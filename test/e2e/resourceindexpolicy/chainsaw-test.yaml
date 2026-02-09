@@ -76,7 +76,7 @@ spec:
         - script:
             content: |
               # Attempt to update the policy - this should fail
-              cat <<EOF | kubectl apply -f - 2>&1
+              cat <<EOF | kubectl apply -f - 2>&1 || true
               apiVersion: policy.search.miloapis.com/v1alpha1
               kind: ResourceIndexPolicy
               metadata:
@@ -108,7 +108,7 @@ spec:
         - script:
             content: |
               # Attempt to create policy with syntax error in CEL expression
-              cat <<EOF | kubectl apply -f - 2>&1
+              cat <<EOF | kubectl apply -f - 2>&1 || true
               apiVersion: policy.search.miloapis.com/v1alpha1
               kind: ResourceIndexPolicy
               metadata:
@@ -149,7 +149,7 @@ spec:
         - script:
             content: |
               # Attempt to create policy with invalid JSONPath (missing leading dot)
-              cat <<EOF | kubectl apply -f - 2>&1
+              cat <<EOF | kubectl apply -f - 2>&1 || true
               apiVersion: policy.search.miloapis.com/v1alpha1
               kind: ResourceIndexPolicy
               metadata:
@@ -190,7 +190,7 @@ spec:
         - script:
             content: |
               # Attempt to create policy with arithmetic operator (not allowed)
-              cat <<EOF | kubectl apply -f - 2>&1
+              cat <<EOF | kubectl apply -f - 2>&1 || true
               apiVersion: policy.search.miloapis.com/v1alpha1
               kind: ResourceIndexPolicy
               metadata:

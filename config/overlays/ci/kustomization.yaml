@@ -1,0 +1,51 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: search-system
+
+resources:
+  - ../../base
+  # Controller manager with RBAC
+  - ../../controller-manager/overlays/core-control-plane
+
+# Include components for CI environment
+components:
+  - ../../components/namespace
+  - ../../components/api-registration
+  - ../../components/cert-manager-ca
+  # Observability excluded for CI as Prometheus CRDs are not present
+  # - ../../components/observability
+  - ../../components/tracing
+  - ../../components/vector-sidecar
+
+# Override image tag for dev builds
+images:
+  - name: ghcr.io/datum-cloud/search
+    newTag: dev
+
+patches:
+  - target:
+      kind: APIService
+      name: v1alpha1.policy.search.miloapis.com
+    patch: |-
+      - op: add
+        path: /metadata/annotations
+        value:
+          cert-manager.io/inject-ca-from: search-system/search-ca
+  - target:
+      kind: APIService
+      name: v1alpha1.search.miloapis.com
+    patch: |-
+      - op: add
+        path: /metadata/annotations
+        value:
+          cert-manager.io/inject-ca-from: search-system/search-ca
+  # Disable PodMonitor in Vector sidecar as Prometheus CRDs are not present
+  - target:
+      kind: HelmRelease
+      name: vector-sidecar
+      namespace: search-system
+    patch: |-
+      - op: replace
+        path: /spec/values/podMonitor/enabled
+        value: false

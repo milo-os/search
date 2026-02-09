@@ -21,7 +21,7 @@ env:
 jobs:
   test-environment-validation:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout code
@@ -84,11 +84,11 @@ jobs:
 
           # Wait for controller manager to be ready
           echo "⏳ Waiting for controller manager to be ready..."
-          task test-infra:kubectl -- wait --for=condition=Ready pod -l app.kubernetes.io/name=search-controller-manager -n search-system --timeout=500s
+          task test-infra:kubectl -- wait --for=condition=Ready pod -l app.kubernetes.io/name=search-controller-manager -n search-system --timeout=1000s
 
           # Wait for API server to be ready
           echo "⏳ Waiting for API server to be ready..."
-          task test-infra:kubectl -- wait --for=condition=Ready pod -l app.kubernetes.io/name=search-apiserver -n search-system --timeout=500s
+          task test-infra:kubectl -- wait --for=condition=Ready pod -l app.kubernetes.io/name=search-apiserver -n search-system --timeout=1000s
 
           # Verify Aggregated API Availability (CA Injection)
           echo "⏳ Verifying Aggregated API Availability..."

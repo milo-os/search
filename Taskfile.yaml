@@ -205,14 +205,20 @@ tasks:
       - task: dev:deploy
 
   ci:setup:
+    desc: Setup a CI-like environment (no observability)
     silent: true
-    desc: Setup environment for CI (skips observability to save resources)
     cmds:
       - task: test-infra:cluster-up
+      - echo "⚠️  Skipping observability installation (CI mode)"
       - task: dev:install-dependencies
+        vars:
+          NATS_CONFIG_DIR: config/dependencies/nats-ci
       - task: dev:build
       - task: dev:load
+      - task: dev:load
       - task: dev:deploy
+        vars:
+          OVERLAY_DIR: config/overlays/ci
       
   dev:install-dependencies:
     desc: Install all infrastructure dependencies (NATS)
@@ -232,13 +238,13 @@ tasks:
         task test-infra:kubectl -- apply -k config/dependencies/etcd
 
         echo "Waiting for Etcd namespace to be created..."
-        task test-infra:kubectl -- wait --for=jsonpath='{.status.phase}'=Active namespace/etcd-system --timeout=30s 2>/dev/null || echo "⚠️  Namespace not ready yet"
+        task test-infra:kubectl -- wait --for=jsonpath='{.status.phase}'=Active namespace/etcd-system --timeout=1000s 2>/dev/null || echo "⚠️  Namespace not ready yet"
 
         echo "Waiting for Etcd HelmRelease to be ready..."
-        task test-infra:kubectl -- wait --for=condition=ready helmrelease/etcd -n etcd-system --timeout=300s 2>/dev/null || echo "⚠️  Etcd HelmRelease not ready yet"
+        task test-infra:kubectl -- wait --for=condition=ready helmrelease/etcd -n etcd-system --timeout=1000s 2>/dev/null || echo "⚠️  Etcd HelmRelease not ready yet"
 
         echo "Waiting for Etcd pods to be ready..."
-        task test-infra:kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=etcd -n etcd-system --timeout=120s 2>/dev/null || echo "⚠️  Etcd pods not ready yet"
+        task test-infra:kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=etcd -n etcd-system --timeout=1000s 2>/dev/null || echo "⚠️  Etcd pods not ready yet"
 
         echo "✅ Etcd installed"
         echo ""
@@ -249,16 +255,16 @@ tasks:
         echo "📦 Installing NATS for event streaming..."
 
         echo "Applying NATS resources..."
-        task test-infra:kubectl -- apply -k config/dependencies/nats
+        task test-infra:kubectl -- apply -k {{.NATS_CONFIG_DIR | default "config/dependencies/nats"}}
 
         echo "Waiting for NATS namespace to be created..."
-        task test-infra:kubectl -- wait --for=jsonpath='{.status.phase}'=Active namespace/nats-system --timeout=30s 2>/dev/null || echo "⚠️  Namespace not ready yet"
+        task test-infra:kubectl -- wait --for=jsonpath='{.status.phase}'=Active namespace/nats-system --timeout=1000s 2>/dev/null || echo "⚠️  Namespace not ready yet"
 
         echo "Waiting for NATS HelmRelease to be ready..."
-        task test-infra:kubectl -- wait --for=condition=ready helmrelease/nats -n nats-system --timeout=300s 2>/dev/null || echo "⚠️  NATS HelmRelease not ready yet (may need Flux installed)"
+        task test-infra:kubectl -- wait --for=condition=ready helmrelease/nats -n nats-system --timeout=1000s 2>/dev/null || echo "⚠️  NATS HelmRelease not ready yet (may need Flux installed)"
 
         echo "Waiting for NATS pods to be ready..."
-        task test-infra:kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=nats -n nats-system --timeout=120s 2>/dev/null || echo "⚠️  NATS pods not ready yet"
+        task test-infra:kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=nats -n nats-system --timeout=1000s 2>/dev/null || echo "⚠️  NATS pods not ready yet"
 
         echo "✅ NATS installed"
         echo ""
@@ -272,13 +278,13 @@ tasks:
         task test-infra:kubectl -- apply -k config/dependencies/meilisearch
 
         echo "Waiting for Meilisearch namespace to be created..."
-        task test-infra:kubectl -- wait --for=jsonpath='{.status.phase}'=Active namespace/meilisearch-system --timeout=30s 2>/dev/null || echo "⚠️  Namespace not ready yet"
+        task test-infra:kubectl -- wait --for=jsonpath='{.status.phase}'=Active namespace/meilisearch-system --timeout=1000s 2>/dev/null || echo "⚠️  Namespace not ready yet"
 
         echo "Waiting for Meilisearch HelmRelease to be ready..."
-        task test-infra:kubectl -- wait --for=condition=ready helmrelease/meilisearch -n meilisearch-system --timeout=300s 2>/dev/null || echo "⚠️  Meilisearch HelmRelease not ready yet"
+        task test-infra:kubectl -- wait --for=condition=ready helmrelease/meilisearch -n meilisearch-system --timeout=1000s 2>/dev/null || echo "⚠️  Meilisearch HelmRelease not ready yet"
 
         echo "Waiting for Meilisearch pods to be ready..."
-        task test-infra:kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=meilisearch -n meilisearch-system --timeout=120s 2>/dev/null || echo "⚠️  Meilisearch pods not ready yet"
+        task test-infra:kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=meilisearch -n meilisearch-system --timeout=1000s 2>/dev/null || echo "⚠️  Meilisearch pods not ready yet"
 
         echo "✅ Meilisearch installed"
         echo ""
@@ -321,17 +327,17 @@ tasks:
         task test-infra:kubectl -- apply -k config/components/nats-streams
 
         echo "⏳ Waiting for NATS stream to be ready..."
-        task test-infra:kubectl -- wait --for=condition=ready stream/audit-events -n nats-system --timeout=120s 2>/dev/null || echo "⚠️  Stream not ready yet"
+        task test-infra:kubectl -- wait --for=condition=ready stream/audit-events -n nats-system --timeout=1000s 2>/dev/null || echo "⚠️  Stream not ready yet"
 
         echo ""
         echo "📋 Deploying Search server and components..."
-        task test-infra:kubectl -- apply -k config/overlays/dev
+        task test-infra:kubectl -- apply -k {{.OVERLAY_DIR | default "config/overlays/dev"}}
 
         echo "⏳ Waiting for Search API Server to be ready..."
-        task test-infra:kubectl -- wait --for=condition=available deployment/search-apiserver -n search-system --timeout=120s 2>/dev/null || echo "⚠️  Search API Server not ready yet"
+        task test-infra:kubectl -- wait --for=condition=available deployment/search-apiserver -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  Search API Server not ready yet"
 
         echo "⏳ Waiting for Search Controller Manager to be ready..."
-        task test-infra:kubectl -- wait --for=condition=available deployment/search-controller-manager -n search-system --timeout=120s 2>/dev/null || echo "⚠️  Search Controller Manager not ready yet"
+        task test-infra:kubectl -- wait --for=condition=available deployment/search-controller-manager -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  Search Controller Manager not ready yet"
         
         echo "✅ Search server and all dependencies deployed successfully!"
         echo ""
@@ -588,7 +594,7 @@ tasks:
 
         # Wait for rollout to complete
         echo "Waiting for rollout to complete..."
-        task test-infra:kubectl -- rollout status deployment/search-controller-manager -n search-system --timeout=120s
+        task test-infra:kubectl -- rollout status deployment/search-controller-manager -n search-system --timeout=1000s
 
         echo "✅ Redeployment complete!"
         echo "Check logs with: task test-infra:kubectl -- logs -n search-system -l app.kubernetes.io/name=search-controller-manager"

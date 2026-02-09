@@ -32,8 +32,8 @@ spec:
             storageClassName: standard  # Adjust for your cluster
 
         # Resource limits for JetStream
-        maxMemory: 1Gi
-        maxFile: 100Gi
+        maxMemory: 128Mi
+        maxFile: 5Gi
 
     # Cluster configuration
     cluster:
@@ -43,11 +43,11 @@ spec:
     # Resource limits
     resources:
       requests:
-        cpu: 200m
-        memory: 512Mi
+        cpu: 10m
+        memory: 64Mi
       limits:
-        cpu: 1000m
-        memory: 2Gi
+        cpu: 200m
+        memory: 256Mi
 
     # Monitoring
     promExporter:
