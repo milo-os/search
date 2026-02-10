@@ -213,7 +213,12 @@ tasks:
           NATS_CONFIG_DIR: config/dependencies/nats-ci
       - task: dev:build
       - task: dev:load
-      - task: dev:load
+      - task: dev:deploy
+        vars:
+          OVERLAY_DIR: config/overlays/ci
+
+  deploy:ci:
+    cmds:
       - task: dev:deploy
         vars:
           OVERLAY_DIR: config/overlays/ci
@@ -340,6 +345,10 @@ tasks:
         echo "⏳ Waiting for Vector Sidecar to be ready..."
         task test-infra:kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/instance=vector-sidecar -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  Vector Sidecar not ready yet"
         
+        echo "⏳ Waiting for Vector Sidecar to be ready..."
+        task test-infra:kubectl -- wait --for=condition=ready helmrelease/vector-sidecar -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  Vector Sidecar HelmRelease not ready yet"
+        task test-infra:kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/instance=vector-sidecar -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  Vector Sidecar pods not ready yet"
+
         echo "✅ Search server and all dependencies deployed successfully!"
         echo ""
         echo "📊 Check status:"
@@ -379,13 +388,26 @@ tasks:
           sed "s|server:.*|server: https://127.0.0.1:9443|g" | \
           sed "s|certificate-authority-data:.*|insecure-skip-tls-verify: true|g" \
           > .tmp/local-search-kubeconfig.yaml
+      - echo "Ensure you are running 'task dev:pf-meilisearch' and 'task dev:pf-etcd' in another terminal!"
+      - echo "Scaling down the controller manager deployment"
+      - |
+        task test-infra:kubectl -- scale deployment -n search-system search-controller-manager --replicas=0
       - |
         echo "🚀 Running controller against local Search API server..."
-        KUBECONFIG=.tmp/local-search-kubeconfig.yaml go run ./cmd/search controller-manager \
+        MEILISEARCH_API_KEY=search-master-key \
+        KUBECONFIG=.tmp/local-search-kubeconfig.yaml \
+        go run ./cmd/search controller-manager \
           --metrics-bind-address=:8085 \
           --health-probe-bind-address=:8086 \
-          --leader-elect=false
+          --leader-elect=false \
+          --meilisearch-domain="http://127.0.0.1:7700"
     silent: true
+
+  dev:pf-meilisearch:
+    desc: Port forward Meilisearch for local development
+    cmds:
+      - echo "Port forwarding Meilisearch to localhost:7700..."
+      - task test-infra:kubectl -- port-forward -n meilisearch-system svc/meilisearch 7700:7700
 
   dev:pf-etcd:
     desc: Port forward Etcd for local development

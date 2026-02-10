@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -18,6 +19,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	policycontroller "go.miloapis.net/search/internal/controllers/policy"
+
+	"go.miloapis.net/search/pkg/meilisearch"
 
 	"go.miloapis.net/search/internal/cel"
 )
@@ -34,23 +37,27 @@ func init() {
 
 // ControllerManagerOptions contains configuration for the controller manager
 type ControllerManagerOptions struct {
-	MetricsAddr          string
-	EnableLeaderElection bool
-	ProbeAddr            string
-	SecureMetrics        bool
-	EnableHTTP2          bool
-	MaxCELDepth          int
+	MetricsAddr                string
+	EnableLeaderElection       bool
+	ProbeAddr                  string
+	SecureMetrics              bool
+	EnableHTTP2                bool
+	MaxCELDepth                int
+	MeilisearchDomain          string
+	MeilisearchTaskWaitTimeout time.Duration
 }
 
 // NewControllerManagerOptions creates a new ControllerManagerOptions with default values
 func NewControllerManagerOptions() *ControllerManagerOptions {
 	return &ControllerManagerOptions{
-		MetricsAddr:          ":8080",
-		ProbeAddr:            ":8081",
-		EnableLeaderElection: true,
-		SecureMetrics:        false,
-		EnableHTTP2:          false,
-		MaxCELDepth:          50,
+		MetricsAddr:                ":8080",
+		ProbeAddr:                  ":8081",
+		EnableLeaderElection:       true,
+		SecureMetrics:              false,
+		EnableHTTP2:                false,
+		MaxCELDepth:                50,
+		MeilisearchTaskWaitTimeout: 30 * time.Second,
+		MeilisearchDomain:          "http://meilisearch.meilisearch-system.svc.cluster.local:7700",
 	}
 }
 
@@ -66,14 +73,27 @@ func (o *ControllerManagerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&o.EnableHTTP2, "enable-http2", o.EnableHTTP2,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	fs.IntVar(&o.MaxCELDepth, "max-cel-depth", o.MaxCELDepth, "Maximum recursion depth allowed for CEL expressions in policies.")
+
+	// Meilisearch
+	fs.StringVar(&o.MeilisearchDomain, "meilisearch-domain", o.MeilisearchDomain, "Domain of the Meilisearch instance.")
+	fs.DurationVar(&o.MeilisearchTaskWaitTimeout, "meilisearch-task-wait-timeout", o.MeilisearchTaskWaitTimeout, "Timeout for waiting for Meilisearch tasks to complete.")
+
 }
 
 // Validate validates the options
 func (o *ControllerManagerOptions) Validate() error {
-
 	if o.MaxCELDepth < 1 {
 		return fmt.Errorf("max-cel-depth must be greater than 0")
 	}
+
+	if o.MeilisearchDomain == "" {
+		return fmt.Errorf("meilisearch-domain must be set")
+	}
+
+	if os.Getenv("MEILISEARCH_API_KEY") == "" {
+		return fmt.Errorf("meilisearch-api-key must be set")
+	}
+
 	return nil
 }
 
@@ -136,10 +156,22 @@ func Run(o *ControllerManagerOptions, ctx context.Context) error {
 		os.Exit(1)
 	}
 
+	// Initialize Meilisearch SDK
+	searchSDK, err := meilisearch.NewSDKClient(meilisearch.SDKConfig{
+		Domain:      o.MeilisearchDomain,
+		APIKey:      os.Getenv("MEILISEARCH_API_KEY"),
+		WaitTimeout: o.MeilisearchTaskWaitTimeout,
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to create Meilisearch SDK")
+		os.Exit(1)
+	}
+
 	if err = (&policycontroller.ResourceIndexPolicyReconciler{
 		Client:       mgr.GetClient(),
 		Scheme:       mgr.GetScheme(),
 		CelValidator: celValidator,
+		SearchSDK:    searchSDK,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ResourceIndexPolicy")
 		os.Exit(1)
