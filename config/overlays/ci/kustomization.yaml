@@ -49,3 +49,8 @@ patches:
       - op: replace
         path: /spec/values/podMonitor/enabled
         value: false
+
+secretGenerator:
+- name: search-controller-manager
+  literals:
+  - MEILISEARCH_API_KEY=search-master-key

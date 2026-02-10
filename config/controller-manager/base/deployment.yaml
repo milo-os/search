@@ -40,6 +40,9 @@ spec:
         - --health-probe-bind-address=$(HEALTH_PROBE_BIND_ADDRESS)
         - --leader-elect=$(LEADER_ELECT)
         - -v=$(LOG_LEVEL)
+        - --meilisearch-domain=$(MEILISEARCH_DOMAIN)
+        - --meilisearch-task-wait-timeout=$(MEILISEARCH_TASK_WAIT_TIMEOUT)
+        - --max-cel-depth=$(MAX_CEL_DEPTH)
         env:
         - name: POD_NAMESPACE
           valueFrom:
@@ -53,6 +56,20 @@ spec:
           value: "true"
         - name: LOG_LEVEL
           value: "4"
+        - name: MEILISEARCH_DOMAIN
+          value: "http://meilisearch.meilisearch-system.svc.cluster.local:7700"
+        - name: MEILISEARCH_TASK_WAIT_TIMEOUT
+          value: "30s"
+        - name: MAX_CEL_DEPTH
+          value: "10"
+        - name: MEILISEARCH_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: search-controller-manager
+              key: MEILISEARCH_API_KEY
+        envFrom:
+        - secretRef:
+            name: search-controller-manager
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
