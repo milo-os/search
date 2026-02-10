@@ -388,7 +388,7 @@ tasks:
           sed "s|server:.*|server: https://127.0.0.1:9443|g" | \
           sed "s|certificate-authority-data:.*|insecure-skip-tls-verify: true|g" \
           > .tmp/local-search-kubeconfig.yaml
-      - echo "Ensure you are running 'task dev:pf-meilisearch' and 'task dev:pf-etcd' in another terminal!"
+      - echo "Ensure you are running 'task dev:run-apiserver', 'task dev:pf-meilisearch' and 'task dev:pf-etcd' in another terminal!"
       - echo "Scaling down the controller manager deployment"
       - |
         task test-infra:kubectl -- scale deployment -n search-system search-controller-manager --replicas=0
