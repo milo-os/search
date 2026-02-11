@@ -266,6 +266,9 @@ tasks:
         echo "Waiting for NATS HelmRelease to be ready..."
         task test-infra:kubectl -- wait --for=condition=ready helmrelease/nats -n nats-system --timeout=1000s 2>/dev/null || echo "⚠️  NATS HelmRelease not ready yet (may need Flux installed)"
 
+        echo "Waiting for NACK HelmRelease to be ready..."
+        task test-infra:kubectl -- wait --for=condition=ready helmrelease/nack -n nats-system --timeout=1000s 2>/dev/null || echo "⚠️  NACK HelmRelease not ready yet"
+
         echo "Waiting for NATS pods to be ready..."
         task test-infra:kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=nats -n nats-system --timeout=1000s 2>/dev/null || echo "⚠️  NATS pods not ready yet"
 
@@ -349,6 +352,12 @@ tasks:
         task test-infra:kubectl -- wait --for=condition=ready helmrelease/vector-sidecar -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  Vector Sidecar HelmRelease not ready yet"
         task test-infra:kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/instance=vector-sidecar -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  Vector Sidecar pods not ready yet"
 
+        echo "⏳ Waiting for Resource Indexer to be ready..."
+        task test-infra:kubectl -- wait --for=condition=available deployment/resource-indexer -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  Resource Indexer not ready yet"
+
+        echo "⏳ Waiting for NATS Consumer to be ready..."
+        task test-infra:kubectl -- wait --for=condition=ready consumer/search-indexer -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  NATS Consumer not ready yet"
+
         echo "✅ Search server and all dependencies deployed successfully!"
         echo ""
         echo "📊 Check status:"
@@ -403,11 +412,53 @@ tasks:
           --meilisearch-domain="http://127.0.0.1:7700"
     silent: true
 
+  dev:run-indexer:
+    desc: Run the indexer against the LOCAL NATS (127.0.0.1:4222)
+    cmds:
+      - echo "Scaling down the indexer deployment"
+      - task test-infra:kubectl -- scale deployment -n search-system resource-indexer --replicas=0
+      - |
+        # Trap to kill background processes (port-forward) on exit
+        trap 'kill $(jobs -p)' EXIT
+
+        echo "🚀 Starting NATS port-forward in background..."
+        task dev:pf-nats > /dev/null 2>&1 &
+        
+        echo "Waiting for port-forward to be ready..."
+        sleep 5
+
+        echo "🚀 Running indexer against local NATS..."
+        echo "🚀 Running indexer against local NATS..."
+        go run ./cmd/search indexer \
+          --nats-url="nats://127.0.0.1:4222" \
+          --nats-subject="audit.>" \
+          --nats-queue-group="search-indexer" \
+          --nats-durable-name="search-indexer" \
+          --nats-stream-name="AUDIT_EVENTS"
+    silent: true
+
+  dev:publish-test-event:
+    desc: Publish a test event to the local NATS server (requires dev:pf-nats)
+    cmds:
+      - go run ./hack/publish_event.go
+
+  dev:pf-vectorsidecar:
+    desc: Port forward Vector sidecar for local development
+    cmds:
+      - echo "Port forwarding Vector sidecar to localhost:8080..."
+      - task test-infra:kubectl -- port-forward -n search-system svc/vector-sidecar 8080:8080
+
   dev:pf-meilisearch:
     desc: Port forward Meilisearch for local development
     cmds:
       - echo "Port forwarding Meilisearch to localhost:7700..."
       - task test-infra:kubectl -- port-forward -n meilisearch-system svc/meilisearch 7700:7700
+
+  dev:pf-nats:
+    desc: Port forward NATS for local development
+    cmds:
+      - echo "Port forwarding NATS to localhost:4222..."
+      - task test-infra:kubectl -- port-forward -n nats-system svc/nats 4222:4222
 
   dev:pf-etcd:
     desc: Port forward Etcd for local development

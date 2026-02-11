@@ -23,6 +23,7 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/kube-openapi/pkg/common"
 
+	"go.miloapis.net/search/cmd/search/indexer"
 	"go.miloapis.net/search/cmd/search/manager"
 
 	// Register JSON logging format
@@ -80,6 +81,7 @@ Exposes SearchQuery resources accessible through kubectl or any Kubernetes clien
 	cmd.AddCommand(NewServeCommand())
 	cmd.AddCommand(NewVersionCommand())
 	cmd.AddCommand(manager.NewControllerManagerCommand())
+	cmd.AddCommand(indexer.NewIndexerCommand())
 
 	return cmd
 }

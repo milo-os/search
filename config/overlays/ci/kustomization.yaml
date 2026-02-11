@@ -17,6 +17,7 @@ components:
   # - ../../components/observability
   - ../../components/tracing
   - ../../components/vector-sidecar
+  - ../../components/indexer
 
 # Override image tag for dev builds
 images:
