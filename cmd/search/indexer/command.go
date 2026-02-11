@@ -27,7 +27,7 @@ type ResourceIndexerOptions struct {
 // NewResourceIndexerOptions creates a new ResourceIndexerOptions with default values.
 func NewResourceIndexerOptions() *ResourceIndexerOptions {
 	return &ResourceIndexerOptions{
-		NatsURL:         "nats://nats.nats.svc:4222",
+		NatsURL:         "nats://nats.nats-system.svc.cluster.local:4222",
 		NatsSubject:     "audit.>",
 		NatsQueueGroup:  "search-indexer",
 		NatsDurableName: "search-indexer",

@@ -24,6 +24,7 @@ images:
     newTag: dev
 
 patches:
+  - path: patches/vector-sidecar-patch.yaml
   - target:
       kind: APIService
       name: v1alpha1.search.miloapis.com
@@ -40,32 +41,6 @@ patches:
         path: /metadata/annotations
         value:
           cert-manager.io/inject-ca-from: search-system/search-ca
-  - target:
-      kind: Deployment
-      name: search-apiserver
-      namespace: search-system
-    patch: |-
-      - op: add
-        path: /spec/template/spec/containers/0/args/-
-        value: "--audit-log-path=-"
-      - op: add
-        path: /spec/template/spec/containers/0/args/-
-        value: "--audit-policy-file=/etc/kubernetes/audit-policy.yaml"
-      - op: add
-        path: /spec/template/spec/containers/0/args/-
-        value: "--audit-webhook-config-file=/etc/kubernetes/audit-webhook.yaml"
-      - op: add
-        path: /spec/template/spec/containers/0/volumeMounts/-
-        value:
-          name: audit-config
-          mountPath: /etc/kubernetes
-          readOnly: true
-      - op: add
-        path: /spec/template/spec/volumes/-
-        value:
-          name: audit-config
-          configMap:
-            name: audit-config
 
 secretGenerator:
 - name: search-controller-manager

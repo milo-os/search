@@ -25,7 +25,7 @@ spec:
         - indexer
         env:
         - name: NATS_URL
-          value: "nats://nats.nats.svc:4222"
+          value: "nats://nats.nats-system.svc.cluster.local:4222"
         - name: NATS_Subject
           value: "audit.>"
         - name: NATS_QUEUE_GROUP

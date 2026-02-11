@@ -25,6 +25,7 @@ images:
     newTag: dev
 
 patches:
+  - path: patches/vector-sidecar-patch.yaml
   - target:
       kind: APIService
       name: v1alpha1.search.miloapis.com
