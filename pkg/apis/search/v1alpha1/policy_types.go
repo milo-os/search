@@ -111,6 +111,10 @@ type ResourceIndexPolicyStatus struct {
 	// +kubebuilder:default={{type: "Ready", status: "Unknown", reason: "Unknown", message: "Waiting for control plane to reconcile", lastTransitionTime: "1970-01-01T00:00:00Z"}}
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// IndexName is the name of the search index created for this policy.
+	// +optional
+	IndexName string `json:"indexName,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

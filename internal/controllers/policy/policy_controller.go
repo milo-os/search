@@ -177,6 +177,7 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	// Clone policy to update status (we need the original status to compare against)
 	oldStatus := policy.Status.DeepCopy()
+	policy.Status.IndexName = searchIndex
 	meta.SetStatusCondition(&policy.Status.Conditions, readyCondition)
 	meta.SetStatusCondition(&policy.Status.Conditions, validationCondition)
 	meta.SetStatusCondition(&policy.Status.Conditions, searchIndexCondition)

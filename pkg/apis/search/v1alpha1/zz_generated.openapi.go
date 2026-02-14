@@ -310,6 +310,13 @@ func schema_pkg_apis_search_v1alpha1_ResourceIndexPolicyStatus(ref common.Refere
 							},
 						},
 					},
+					"indexName": {
+						SchemaProps: spec.SchemaProps{
+							Description: "IndexName is the name of the search index created for this policy.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 			},
 		},
