@@ -44,7 +44,9 @@ type ControllerManagerOptions struct {
 	EnableHTTP2                bool
 	MaxCELDepth                int
 	MeilisearchDomain          string
+	MeilisearchChunkSize       int
 	MeilisearchTaskWaitTimeout time.Duration
+	MeilisearchHTTPTimeout     time.Duration
 }
 
 // NewControllerManagerOptions creates a new ControllerManagerOptions with default values
@@ -56,7 +58,9 @@ func NewControllerManagerOptions() *ControllerManagerOptions {
 		SecureMetrics:              false,
 		EnableHTTP2:                false,
 		MaxCELDepth:                50,
+		MeilisearchChunkSize:       1000,
 		MeilisearchTaskWaitTimeout: 30 * time.Second,
+		MeilisearchHTTPTimeout:     60 * time.Second,
 		MeilisearchDomain:          "http://meilisearch.meilisearch-system.svc.cluster.local:7700",
 	}
 }
@@ -77,6 +81,8 @@ func (o *ControllerManagerOptions) AddFlags(fs *pflag.FlagSet) {
 	// Meilisearch
 	fs.StringVar(&o.MeilisearchDomain, "meilisearch-domain", o.MeilisearchDomain, "Domain of the Meilisearch instance.")
 	fs.DurationVar(&o.MeilisearchTaskWaitTimeout, "meilisearch-task-wait-timeout", o.MeilisearchTaskWaitTimeout, "Timeout for waiting for Meilisearch tasks to complete.")
+	fs.DurationVar(&o.MeilisearchHTTPTimeout, "meilisearch-http-timeout", o.MeilisearchHTTPTimeout, "Timeout for HTTP requests to Meilisearch.")
+	fs.IntVar(&o.MeilisearchChunkSize, "meilisearch-chunk-size", o.MeilisearchChunkSize, "The number of documents to process in a single chunk.")
 
 }
 
@@ -84,6 +90,10 @@ func (o *ControllerManagerOptions) AddFlags(fs *pflag.FlagSet) {
 func (o *ControllerManagerOptions) Validate() error {
 	if o.MaxCELDepth < 1 {
 		return fmt.Errorf("max-cel-depth must be greater than 0")
+	}
+
+	if o.MeilisearchChunkSize < 10 {
+		return fmt.Errorf("meilisearch-chunk-size must be greater than 10")
 	}
 
 	if o.MeilisearchDomain == "" {
@@ -161,6 +171,8 @@ func Run(o *ControllerManagerOptions, ctx context.Context) error {
 		Domain:      o.MeilisearchDomain,
 		APIKey:      os.Getenv("MEILISEARCH_API_KEY"),
 		WaitTimeout: o.MeilisearchTaskWaitTimeout,
+		ChunkSize:   o.MeilisearchChunkSize,
+		HTTPTimeout: o.MeilisearchHTTPTimeout,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to create Meilisearch SDK")
