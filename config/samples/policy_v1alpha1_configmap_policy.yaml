@@ -1,0 +1,21 @@
+apiVersion: policy.search.miloapis.com/v1alpha1
+kind: ResourceIndexPolicy
+metadata:
+  name: configmap-index-policy-1
+spec:
+  targetResource:
+    group: ""
+    version: v1
+    kind: ConfigMap
+  
+  # Only index ConfigMaps in the default namespace
+  conditions:
+    - name: is-default-namespace
+      expression: "metadata.namespace == 'default'"
+
+  # Define which fields to index
+  fields:
+    - path: ".metadata.name"
+      searchable: true
+    - path: ".data['example-key']"
+      searchable: true

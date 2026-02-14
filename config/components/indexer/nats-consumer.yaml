@@ -11,6 +11,6 @@ spec:
   # The filter subject ensures we only get relevant events
   filterSubject: audit.>
   # MaxAckPending controls flow control
-  maxAckPending: 100
+  maxAckPending: 1000000
   # ReplayPolicy indicates that the consumer will replay messages from the stream
   replayPolicy: instant

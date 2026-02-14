@@ -417,24 +417,29 @@ tasks:
     cmds:
       - echo "Scaling down the indexer deployment"
       - task test-infra:kubectl -- scale deployment -n search-system resource-indexer --replicas=0
+      - echo "Ensure you are running 'task dev:pf-nats' in another terminal!"
       - |
         # Trap to kill background processes (port-forward) on exit
         trap 'kill $(jobs -p)' EXIT
 
         echo "🚀 Starting NATS port-forward in background..."
         task dev:pf-nats > /dev/null 2>&1 &
+
+        echo "🚀 Starting Meilisearch port-forward in background..."
+        task dev:pf-meilisearch > /dev/null 2>&1 &
         
         echo "Waiting for port-forward to be ready..."
         sleep 5
 
         echo "🚀 Running indexer against local NATS..."
-        echo "🚀 Running indexer against local NATS..."
+        MEILISEARCH_API_KEY=search-master-key \
         go run ./cmd/search indexer \
           --nats-url="nats://127.0.0.1:4222" \
           --nats-subject="audit.>" \
           --nats-queue-group="search-indexer" \
           --nats-durable-name="search-indexer" \
-          --nats-stream-name="AUDIT_EVENTS"
+          --nats-stream-name="AUDIT_EVENTS" \
+          --meilisearch-domain="http://127.0.0.1:7700"
     silent: true
 
   dev:publish-test-event:
@@ -672,3 +677,8 @@ tasks:
 
         echo "✅ Redeployment complete!"
         echo "Check logs with: task test-infra:kubectl -- logs -n search-system -l app.kubernetes.io/name=search-controller-manager"
+
+  dev:nats-queue:
+    desc: View the NATS queue for the indexer
+    cmds:
+      - task test-infra:kubectl -- exec -n nats-system $(task test-infra:kubectl -- get pods -n nats-system -l app.kubernetes.io/component=nats-box -o jsonpath="{.items[0].metadata.name}") -- nats consumer info AUDIT_EVENTS search-indexer
