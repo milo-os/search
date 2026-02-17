@@ -16,6 +16,8 @@ type BatchConfig struct {
 	BatchSize int
 	// FlushInterval is the maximum time to wait before flushing.
 	FlushInterval time.Duration
+	// MaxConcurrentUploads is the maximum number of concurrent uploads to Meilisearch.
+	MaxConcurrentUploads int
 }
 
 // SearchClient abstracts the search backend interactions.
@@ -40,14 +42,13 @@ type Batcher struct {
 	client      SearchClient
 	batchConfig BatchConfig
 
-	upsertQueue []upsertItem
-	deleteQueue []deleteItem
-	upsertMsgs  []jetstream.Msg
-	deleteMsgs  []jetstream.Msg
+	// Track unique operations in the current batch
+	pendingUpserts map[string]upsertItem
+	pendingDeletes map[string]deleteItem
 
-	// Track seen messages to trigger batching based on unique message count
-	upsertMsgIDs map[uint64]struct{}
-	deleteMsgIDs map[uint64]struct{}
+	// Track NATS messages for acknowledgement
+	upsertMsgs []jetstream.Msg
+	deleteMsgs []jetstream.Msg
 
 	mu  sync.Mutex
 	sem chan struct{} // Global semaphore to limit concurrent Meilisearch requests
@@ -55,16 +56,19 @@ type Batcher struct {
 
 // NewBatcher creates a new Batcher instance.
 func NewBatcher(client SearchClient, batchConfig BatchConfig) *Batcher {
+	maxConcurrent := batchConfig.MaxConcurrentUploads
+	if maxConcurrent <= 0 {
+		maxConcurrent = 100
+	}
+
 	return &Batcher{
-		client:       client,
-		batchConfig:  batchConfig,
-		upsertQueue:  make([]upsertItem, 0, batchConfig.BatchSize),
-		deleteQueue:  make([]deleteItem, 0, batchConfig.BatchSize),
-		upsertMsgs:   make([]jetstream.Msg, 0, batchConfig.BatchSize),
-		deleteMsgs:   make([]jetstream.Msg, 0, batchConfig.BatchSize),
-		upsertMsgIDs: make(map[uint64]struct{}),
-		deleteMsgIDs: make(map[uint64]struct{}),
-		sem:          make(chan struct{}, 100), // 100 concurrent uploads
+		client:         client,
+		batchConfig:    batchConfig,
+		pendingUpserts: make(map[string]upsertItem),
+		pendingDeletes: make(map[string]deleteItem),
+		upsertMsgs:     make([]jetstream.Msg, 0, batchConfig.BatchSize),
+		deleteMsgs:     make([]jetstream.Msg, 0, batchConfig.BatchSize),
+		sem:            make(chan struct{}, maxConcurrent),
 	}
 }
 
@@ -73,63 +77,102 @@ func (b *Batcher) Start(ctx context.Context) {
 	go b.runBatcher(ctx)
 }
 
-// QueueUpsert adds a document to the upsert queue and triggers an asynchronous flush if the batch size is reached.
+// QueueUpsert adds a document to the pending map and triggers an asynchronous flush if the batch size is reached.
 func (b *Batcher) QueueUpsert(indexUID string, doc any, msg *jetstream.Msg) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.upsertQueue = append(b.upsertQueue, upsertItem{
-		indexUID: indexUID,
-		doc:      doc,
-	})
-
-	if msg != nil {
-		if meta, err := (*msg).Metadata(); err == nil {
-			id := meta.Sequence.Stream
-			// If we already have items from this message delivery attempt in the current batch, ignore redeliveries
-			if _, ok := b.upsertMsgIDs[id]; ok {
-				return
-			}
-			b.upsertMsgIDs[id] = struct{}{}
-			b.upsertMsgs = append(b.upsertMsgs, *msg)
+	// Extract UID for deduplication key
+	var docID string
+	if m, ok := doc.(map[string]any); ok {
+		if uid, ok := m["uid"].(string); ok {
+			docID = uid
 		}
 	}
 
-	// Flush if we reached the batch size of unique messages
-	if len(b.upsertMsgs) >= b.batchConfig.BatchSize {
+	key := indexUID + "/" + docID
+
+	// Add/Update the pending item (last write wins for same docID)
+	b.pendingUpserts[key] = upsertItem{
+		indexUID: indexUID,
+		doc:      doc,
+	}
+
+	if msg != nil {
+		b.trackMessage(msg, true)
+	}
+
+	// Flush if we reached the batch size of unique messages or unique documents
+	if len(b.upsertMsgs) >= b.batchConfig.BatchSize || len(b.pendingUpserts) >= b.batchConfig.BatchSize {
 		queue, msgs := b.takeUpsertBatch()
 		klog.Infof("Batch size reached, flushing %d upserts from %d unique messages", len(queue), len(msgs))
 		go b.performUpsertFlush(queue, msgs)
 	}
 }
 
-// QueueDelete adds a document ID to the delete queue and triggers an asynchronous flush if the batch size is reached.
+var a int = 0
+
+// QueueDelete adds a document ID to the pending map and triggers an asynchronous flush if the batch size is reached.
 func (b *Batcher) QueueDelete(indexUID string, docID string, msg *jetstream.Msg) {
+	a++
+	klog.Infof("QueueDelete %d, %d", len(b.pendingDeletes), len(b.deleteMsgs))
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.deleteQueue = append(b.deleteQueue, deleteItem{
+	key := indexUID + "/" + docID
+	b.pendingDeletes[key] = deleteItem{
 		indexUID: indexUID,
 		docID:    docID,
-	})
-
-	if msg != nil {
-		if meta, err := (*msg).Metadata(); err == nil {
-			id := meta.Sequence.Stream
-			// If we already have items from this message delivery attempt in the current batch, ignore redeliveries
-			if _, ok := b.deleteMsgIDs[id]; ok {
-				return
-			}
-			b.deleteMsgIDs[id] = struct{}{}
-			b.deleteMsgs = append(b.deleteMsgs, *msg)
-		}
 	}
 
-	// Flush if we reached the batch size of unique messages
-	if len(b.deleteMsgs) >= b.batchConfig.BatchSize {
+	if msg != nil {
+		b.trackMessage(msg, false)
+	}
+
+	// Flush if we reached the batch size of unique messages or unique documents
+	if len(b.deleteMsgs) >= b.batchConfig.BatchSize || len(b.pendingDeletes) >= b.batchConfig.BatchSize {
 		queue, msgs := b.takeDeleteBatch()
 		klog.Infof("Batch size reached, flushing %d deletes from %d unique messages", len(queue), len(msgs))
 		go b.performDeleteFlush(queue, msgs)
+	}
+}
+
+// trackMessage adds the message to the appropriate list if it hasn't been seen yet.
+// must be called with lock held.
+func (b *Batcher) trackMessage(msg *jetstream.Msg, isUpsert bool) {
+	meta, err := (*msg).Metadata()
+	if err != nil {
+		klog.Warningf("Failed to get message metadata, message will be treated as unique: %v", err)
+		if isUpsert {
+			b.upsertMsgs = append(b.upsertMsgs, *msg)
+		} else {
+			b.deleteMsgs = append(b.deleteMsgs, *msg)
+		}
+		return
+	}
+
+	id := meta.Sequence.Stream
+
+	// Check for duplicates in the existing slice.
+	var msgs []jetstream.Msg
+	if isUpsert {
+		msgs = b.upsertMsgs
+	} else {
+		msgs = b.deleteMsgs
+	}
+
+	for _, existing := range msgs {
+		if m, err := existing.Metadata(); err == nil {
+			if m.Sequence.Stream == id {
+				return // Already have this message
+			}
+		}
+	}
+
+	if isUpsert {
+		b.upsertMsgs = append(b.upsertMsgs, *msg)
+	} else {
+		b.deleteMsgs = append(b.deleteMsgs, *msg)
 	}
 }
 
@@ -150,7 +193,7 @@ func (b *Batcher) runBatcher(ctx context.Context) {
 
 func (b *Batcher) flushUpserts() {
 	b.mu.Lock()
-	if len(b.upsertMsgs) == 0 && len(b.upsertQueue) == 0 {
+	if len(b.upsertMsgs) == 0 && len(b.pendingUpserts) == 0 {
 		b.mu.Unlock()
 		return
 	}
@@ -162,7 +205,7 @@ func (b *Batcher) flushUpserts() {
 
 func (b *Batcher) flushDeletes() {
 	b.mu.Lock()
-	if len(b.deleteMsgs) == 0 && len(b.deleteQueue) == 0 {
+	if len(b.deleteMsgs) == 0 && len(b.pendingDeletes) == 0 {
 		b.mu.Unlock()
 		return
 	}
@@ -174,21 +217,34 @@ func (b *Batcher) flushDeletes() {
 
 // takeUpsertBatch captures and resets the current upsert buffer. MUST hold lock.
 func (b *Batcher) takeUpsertBatch() ([]upsertItem, []jetstream.Msg) {
-	queue := b.upsertQueue
+	queue := make([]upsertItem, 0, len(b.pendingUpserts))
+	for _, item := range b.pendingUpserts {
+		queue = append(queue, item)
+	}
+
 	msgs := b.upsertMsgs
-	b.upsertQueue = make([]upsertItem, 0, b.batchConfig.BatchSize)
+
+	// Reset
+	b.pendingUpserts = make(map[string]upsertItem)
 	b.upsertMsgs = make([]jetstream.Msg, 0, b.batchConfig.BatchSize)
-	b.upsertMsgIDs = make(map[uint64]struct{})
+
 	return queue, msgs
 }
 
 // takeDeleteBatch captures and resets the current delete buffer. MUST hold lock.
 func (b *Batcher) takeDeleteBatch() ([]deleteItem, []jetstream.Msg) {
-	queue := b.deleteQueue
+	// Convert map to slice for processing
+	queue := make([]deleteItem, 0, len(b.pendingDeletes))
+	for _, item := range b.pendingDeletes {
+		queue = append(queue, item)
+	}
+
 	msgs := b.deleteMsgs
-	b.deleteQueue = make([]deleteItem, 0, b.batchConfig.BatchSize)
+
+	// Reset
+	b.pendingDeletes = make(map[string]deleteItem)
 	b.deleteMsgs = make([]jetstream.Msg, 0, b.batchConfig.BatchSize)
-	b.deleteMsgIDs = make(map[uint64]struct{})
+
 	return queue, msgs
 }
 

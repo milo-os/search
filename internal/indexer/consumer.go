@@ -64,19 +64,9 @@ func (i *Indexer) Start(ctx context.Context) error {
 
 		// Handle deletions separately
 		if event.Verb == deleteVerb {
-			// Extract UID. Sometimes it's in ObjectRef, sometimes in ResponseObject (Status).
-			docID := event.ObjectRef.UID
-			if docID == "" && event.ResponseObject != nil {
-				if details, ok := event.ResponseObject["details"].(map[string]interface{}); ok {
-					if uid, ok := details["uid"].(string); ok {
-						docID = uid
-					}
-				}
-			}
-
+			docID := resolveUID(&event)
 			if docID == "" {
-				klog.Warningf("Delete event received for %s/%s but no UID found in ObjectRef or ResponseObject details. Skipping.",
-					event.ObjectRef.Resource, event.ObjectRef.Name)
+				logMissingUIDDetails(&event)
 				msg.Ack()
 				return
 			}
@@ -101,14 +91,26 @@ func (i *Indexer) Start(ctx context.Context) error {
 
 		// Build unstructured from responseObject if present
 		obj := &unstructured.Unstructured{Object: event.ResponseObject}
+
+		// Attempt to resolve UID using helper
+		resourceUID := resolveUID(&event)
+		if resourceUID == "" {
+			logMissingUIDDetails(&event)
+			msg.Ack()
+			return
+		}
+
 		queued := false
 
-		for _, cp := range i.policyCache.GetPolicies() {
+		policies := i.policyCache.GetPolicies()
+
+		for _, cp := range policies {
 			evalResult, err := cp.Evaluate(obj)
 			if err != nil {
 				klog.Errorf("Policy %s evaluation error: %v", cp.Policy.Name, err)
 				continue
 			}
+
 			if evalResult.Matched {
 				klog.Infof("Policy %s matched %s resource %s (auditID: %s)",
 					cp.Policy.Name, event.Verb, obj.GetName(), event.AuditID)
@@ -119,14 +121,11 @@ func (i *Indexer) Start(ctx context.Context) error {
 					continue
 				}
 
-				// Transform logic would go here. For now assume passing the whole object or a map.
-				// Implementation plan didn't specify transformation logic details, sticking to basic functionality.
-				// Assuming the doc is the object itself for now.
-				doc := event.ResponseObject
+				// Transform the matching resource into an indexable document
+				doc := evalResult.Transform()
+
 				// Ensure UID is set as primary key if not present in the map under "uid"
-				if _, ok := doc["uid"]; !ok {
-					doc["uid"] = obj.GetUID()
-				}
+				ensureUID(doc, resourceUID)
 
 				i.batcher.QueueUpsert(cp.Policy.Status.IndexName, doc, &msg)
 				queued = true
@@ -134,7 +133,7 @@ func (i *Indexer) Start(ctx context.Context) error {
 				// "Update and patch events that don't match should still queue a delete operation"
 				if event.Verb == "update" || event.Verb == "patch" {
 					if cp.Policy.Status.IndexName != "" {
-						i.batcher.QueueDelete(cp.Policy.Status.IndexName, string(obj.GetUID()), &msg)
+						i.batcher.QueueDelete(cp.Policy.Status.IndexName, resourceUID, &msg)
 						queued = true
 					}
 				}
