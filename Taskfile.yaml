@@ -152,8 +152,7 @@ tasks:
             --output-package "$REL_DIR" \
             --output-base "." \
             --output-file-base "zz_generated.openapi" \
-            --go-header-file "hack/boilerplate.go.txt" \
-            --report-filename "$REL_DIR/api_violations.report"
+            --go-header-file "hack/boilerplate.go.txt"
         done
     silent: true
 
