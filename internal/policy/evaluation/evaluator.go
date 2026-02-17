@@ -111,6 +111,53 @@ func (cp *CachedPolicy) Evaluate(u *unstructured.Unstructured) (*EvalResult, err
 	return result, nil
 }
 
+// Transform converts the evaluation result into a document for indexing.
+// It reconstructs the nested structure based on the field paths.
+// For example, ".metadata.name" -> {"metadata": {"name": "value"}}.
+func (r *EvalResult) Transform() map[string]any {
+	doc := make(map[string]any)
+
+	for path, value := range r.Fields {
+		segments := parsePath(path)
+		if len(segments) == 0 {
+			continue
+		}
+
+		// Traverse and build structure
+		current := doc
+		for i := 0; i < len(segments)-1; i++ {
+			seg := segments[i]
+
+			// Check if key exists
+			v, exists := current[seg]
+			if !exists {
+				// Create new map
+				m := make(map[string]any)
+				current[seg] = m
+				current = m
+				continue
+			}
+
+			// If exists, checks if it is a map
+			if m, ok := v.(map[string]any); ok {
+				current = m
+			} else {
+				// Conflict: existing value is not a map (e.g. was a scalar).
+				// We overwrite it with a map to support the deeper path.
+				// This implies the deeper path takes precedence structurally.
+				m := make(map[string]any)
+				current[seg] = m
+				current = m
+			}
+		}
+
+		// Set leaf value
+		leaf := segments[len(segments)-1]
+		current[leaf] = value
+	}
+	return doc
+}
+
 // parsePath converts ".spec.firstName" or ".metadata.labels['department']"
 // into []string{"spec", "firstName"} or []string{"metadata", "labels", "department"}.
 func parsePath(path string) []string {
