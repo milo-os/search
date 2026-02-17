@@ -23,12 +23,18 @@ type SDKConfig struct {
 	HTTPTimeout time.Duration
 	// ChunkSize is the number of documents to process in a single chunk
 	ChunkSize int
+	// MaxRetries is the maximum number of retries for transient errors
+	MaxRetries int
+	// RetryDelay is the base delay between retries
+	RetryDelay time.Duration
 }
 
 type SDKClient struct {
 	client      meilisearch.ServiceManager
 	waitTimeout time.Duration
 	chunkSize   int
+	maxRetries  int
+	retryDelay  time.Duration
 }
 
 func NewSDKClient(config SDKConfig) (*SDKClient, error) {
@@ -64,7 +70,23 @@ func NewSDKClient(config SDKConfig) (*SDKClient, error) {
 		chunkSize = 1000
 	}
 
-	return &SDKClient{client: client, waitTimeout: config.WaitTimeout, chunkSize: chunkSize}, nil
+	maxRetries := config.MaxRetries
+	if maxRetries <= 0 {
+		maxRetries = 3
+	}
+
+	retryDelay := config.RetryDelay
+	if retryDelay <= 0 {
+		retryDelay = 500 * time.Millisecond
+	}
+
+	return &SDKClient{
+		client:      client,
+		waitTimeout: config.WaitTimeout,
+		chunkSize:   chunkSize,
+		maxRetries:  maxRetries,
+		retryDelay:  retryDelay,
+	}, nil
 }
 
 // IndexExists checks if an index with the given UID exists.
@@ -128,10 +150,10 @@ func (s *SDKClient) GetIndexCreationTask(indexUID string) (*meilisearch.Task, er
 // withRetry executes a function with a simple retry logic for transient network errors.
 func (s *SDKClient) withRetry(operation string, fn func() (*meilisearch.Task, error)) (*meilisearch.Task, error) {
 	var lastErr error
-	for i := 0; i < 3; i++ {
+	for i := 0; i < s.maxRetries; i++ {
 		if i > 0 {
-			klog.Warningf("Retrying Meilisearch %s operation (attempt %d/3) after error: %v", operation, i+1, lastErr)
-			time.Sleep(time.Duration(i) * 500 * time.Millisecond)
+			klog.Warningf("Retrying Meilisearch %s operation (attempt %d/%d) after error: %v", operation, i+1, s.maxRetries, lastErr)
+			time.Sleep(time.Duration(i) * s.retryDelay)
 		}
 		task, err := fn()
 		if err == nil {
@@ -144,7 +166,7 @@ func (s *SDKClient) withRetry(operation string, fn func() (*meilisearch.Task, er
 			return nil, err
 		}
 	}
-	return nil, fmt.Errorf("operation %s failed after 3 attempts: %w", operation, lastErr)
+	return nil, fmt.Errorf("operation %s failed after %d attempts: %w", operation, s.maxRetries, lastErr)
 }
 
 // AddDocumentsAsync enqueues documents in chunks and returns the tasks.

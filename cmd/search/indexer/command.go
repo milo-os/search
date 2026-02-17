@@ -36,6 +36,9 @@ type ResourceIndexerOptions struct {
 	MeilisearchChunkSize       int
 	BatchSize                  int
 	FlushInterval              time.Duration
+	MeilisearchMaxRetries      int
+	MeilisearchRetryDelay      time.Duration
+	BatchMaxConcurrentUploads  int
 }
 
 // NewResourceIndexerOptions creates a new ResourceIndexerOptions with default values.
@@ -55,6 +58,9 @@ func NewResourceIndexerOptions() *ResourceIndexerOptions {
 		MeilisearchChunkSize:            1000,
 		BatchSize:                       1000,
 		FlushInterval:                   5 * time.Second,
+		MeilisearchMaxRetries:           3,
+		MeilisearchRetryDelay:           500 * time.Millisecond,
+		BatchMaxConcurrentUploads:       100,
 	}
 }
 
@@ -74,6 +80,9 @@ func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&o.MeilisearchChunkSize, "meilisearch-chunk-size", o.MeilisearchChunkSize, "The number of documents to process in a single chunk.")
 	fs.IntVar(&o.BatchSize, "batch-size", o.BatchSize, "The batch size for upserts and deletes.")
 	fs.DurationVar(&o.FlushInterval, "flush-interval", o.FlushInterval, "The flush interval for upserts and deletes.")
+	fs.IntVar(&o.MeilisearchMaxRetries, "meilisearch-max-retries", o.MeilisearchMaxRetries, "The maximum number of retries for transient Meilisearch errors.")
+	fs.DurationVar(&o.MeilisearchRetryDelay, "meilisearch-retry-delay", o.MeilisearchRetryDelay, "The base delay between Meilisearch retries.")
+	fs.IntVar(&o.BatchMaxConcurrentUploads, "batch-max-concurrent-uploads", o.BatchMaxConcurrentUploads, "The maximum number of concurrent uploads to Meilisearch.")
 }
 
 // Validate checks if the resource indexer options are valid.
@@ -116,6 +125,15 @@ func (o *ResourceIndexerOptions) Validate() error {
 	}
 	if o.FlushInterval < 1*time.Second {
 		return fmt.Errorf("flush-interval must be greater than 1s")
+	}
+	if o.MeilisearchMaxRetries < 1 {
+		return fmt.Errorf("meilisearch-max-retries must be greater than 0")
+	}
+	if o.MeilisearchRetryDelay < 0 {
+		return fmt.Errorf("meilisearch-retry-delay must be non-negative")
+	}
+	if o.BatchMaxConcurrentUploads < 1 {
+		return fmt.Errorf("batch-max-concurrent-uploads must be greater than 0")
 	}
 
 	return nil
@@ -214,14 +232,17 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 		WaitTimeout: o.MeilisearchTaskWaitTimeout,
 		ChunkSize:   o.MeilisearchChunkSize,
 		HTTPTimeout: o.MeilisearchHTTPTimeout,
+		MaxRetries:  o.MeilisearchMaxRetries,
+		RetryDelay:  o.MeilisearchRetryDelay,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create search client: %w", err)
 	}
 
 	batchConfig := indexer.BatchConfig{
-		BatchSize:     o.BatchSize,
-		FlushInterval: o.FlushInterval,
+		BatchSize:            o.BatchSize,
+		FlushInterval:        o.FlushInterval,
+		MaxConcurrentUploads: o.BatchMaxConcurrentUploads,
 	}
 
 	batcher := indexer.NewBatcher(searchClient, batchConfig)
