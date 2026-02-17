@@ -38,8 +38,6 @@ spec:
                 fields:
                   - path: ".spec.name"
                     searchable: true
-                    filterable: false
-                    facetable: false
 
     - name: verify-valid-policy-exists
       description: "Verifies the valid policy was created"
@@ -92,8 +90,6 @@ spec:
                 fields:
                   - path: ".spec.name"
                     searchable: true
-                    filterable: false
-                    facetable: false
               EOF
             check:
               # Expect an error containing "not supported" or "MethodNotAllowed"
@@ -124,8 +120,6 @@ spec:
                 fields:
                   - path: ".spec.name"
                     searchable: true
-                    filterable: false
-                    facetable: false
               EOF
             check:
               # Expect an error (non-zero exit or error in output)
@@ -165,8 +159,6 @@ spec:
                 fields:
                   - path: "spec.name"
                     searchable: true
-                    filterable: false
-                    facetable: false
               EOF
             check:
               # Expect an error about invalid path
@@ -206,8 +198,6 @@ spec:
                 fields:
                   - path: ".spec.name"
                     searchable: true
-                    filterable: false
-                    facetable: false
               EOF
             check:
               # Expect an error about operator not allowed

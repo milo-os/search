@@ -92,9 +92,6 @@ type PolicyCondition struct {
 }
 
 // FieldPolicy defines how a resource field should be indexed and how they behave in search operations.
-// +kubebuilder:validation:XValidation:rule="!self.filterable",message="filterable is a forward-looking option and will be added in a future release. It must be false."
-// +kubebuilder:validation:XValidation:rule="!self.facetable",message="facetable is a forward-looking option and will be added in a future release. It must be false."
-// +kubebuilder:validation:XValidation:rule="self.searchable",message="searchable must be true. Currently, only full-text search is supported."
 type FieldPolicy struct {
 	// Path is the JSONPath to the field value.
 	// Supports nested paths and map key access using bracket notation.
@@ -107,18 +104,6 @@ type FieldPolicy struct {
 	// +kubebuilder:default=false
 	// +optional
 	Searchable bool `json:"searchable,omitempty"`
-
-	// Filterable indicates if the field can be used in filter expressions.
-	// This is a forward-looking option that will be added in a future release.
-	// +kubebuilder:default=false
-	// +optional
-	Filterable bool `json:"filterable,omitempty"`
-
-	// Facetable indicates if the field can be used for faceting.
-	// This is a forward-looking option that will be added in a future release.
-	// +kubebuilder:default=false
-	// +optional
-	Facetable bool `json:"facetable,omitempty"`
 }
 
 // ResourceIndexPolicyStatus serves as the status for a ResourceIndexPolicy.

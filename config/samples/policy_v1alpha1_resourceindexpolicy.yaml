@@ -19,15 +19,11 @@ spec:
   fields:
     - path: ".spec.firstName"
       searchable: true
-      filterable: false
     - path: ".spec.lastName"
       searchable: true
-      filterable: false
     - path: ".spec.email"
       searchable: true
-      filterable: false
     - path: ".metadata.labels['department']"
       searchable: true
-      filterable: false
-      facetable: false
+
 

@@ -100,20 +100,6 @@ func schema_pkg_apis_policy_v1alpha1_FieldPolicy(ref common.ReferenceCallback) c
 							Format:      "",
 						},
 					},
-					"filterable": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Filterable indicates if the field can be used in filter expressions. This is a forward-looking option that will be added in a future release.",
-							Type:        []string{"boolean"},
-							Format:      "",
-						},
-					},
-					"facetable": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Facetable indicates if the field can be used for faceting. This is a forward-looking option that will be added in a future release.",
-							Type:        []string{"boolean"},
-							Format:      "",
-						},
-					},
 				},
 				Required: []string{"path"},
 			},
