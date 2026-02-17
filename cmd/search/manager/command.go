@@ -47,7 +47,7 @@ func NewControllerManagerOptions() *ControllerManagerOptions {
 	return &ControllerManagerOptions{
 		MetricsAddr:          ":8080",
 		ProbeAddr:            ":8081",
-		EnableLeaderElection: false,
+		EnableLeaderElection: true,
 		SecureMetrics:        false,
 		EnableHTTP2:          false,
 		MaxCELDepth:          50,
@@ -122,7 +122,7 @@ func Run(o *ControllerManagerOptions, ctx context.Context) error {
 		Metrics:                metricsserver.Options{BindAddress: o.MetricsAddr, SecureServing: o.SecureMetrics, TLSOpts: tlsOpts},
 		HealthProbeBindAddress: o.ProbeAddr,
 		LeaderElection:         o.EnableLeaderElection,
-		LeaderElectionID:       "1x3u92ac.datumapis.com",
+		LeaderElectionID:       "controller.search.miloapis.com",
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -144,8 +144,6 @@ func Run(o *ControllerManagerOptions, ctx context.Context) error {
 		setupLog.Error(err, "unable to create controller", "controller", "ResourceIndexPolicy")
 		os.Exit(1)
 	}
-
-	// Webhook registration removed as validation is now handled by the APIServer strategy
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
