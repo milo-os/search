@@ -4,5 +4,4 @@ metadata:
   name: search-ca-issuer
 spec:
   ca:
-    # Reference the secret created by the CA Certificate
-    secretName: search-ca-secret
+    secretName: search-ca-tls

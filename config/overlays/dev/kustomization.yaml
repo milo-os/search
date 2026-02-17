@@ -5,6 +5,8 @@ namespace: search-system
 
 resources:
   - ../../base
+  # Controller manager with RBAC
+  - ../../controller-manager/overlays/core-control-plane
 
 # Include components for development environment
 components:
@@ -19,3 +21,22 @@ components:
 images:
   - name: ghcr.io/datum-cloud/search
     newTag: dev
+
+patches:
+  - target:
+      kind: APIService
+      name: v1alpha1.search.miloapis.com
+    patch: |-
+      - op: add
+        path: /metadata/annotations
+        value:
+          cert-manager.io/inject-ca-from: search-system/search-ca
+  - target:
+      kind: APIService
+      name: v1alpha1.search.miloapis.com
+    patch: |-
+      - op: add
+        path: /metadata/annotations
+        value:
+          cert-manager.io/inject-ca-from: search-system/search-ca
+

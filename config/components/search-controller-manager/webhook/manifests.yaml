@@ -1,0 +1,25 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: search-validating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: search-controller-manager-webhook-service
+      namespace: search-system
+      path: /validate-search-miloapis-com-v1alpha1-resourceindexpolicy
+  failurePolicy: Fail
+  name: vresourceindexpolicy.kb.io
+  rules:
+  - apiGroups:
+    - search.miloapis.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - resourceindexpolicies
+  sideEffects: None

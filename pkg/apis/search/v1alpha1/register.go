@@ -27,8 +27,10 @@ func Resource(resource string) schema.GroupResource {
 // addKnownTypes adds the set of types defined in this package to the supplied scheme
 func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(SchemeGroupVersion,
-		&SearchQuery{},
-		&SearchQueryList{},
+		// &SearchQuery{},
+		// &SearchQueryList{},
+		&ResourceIndexPolicy{},
+		&ResourceIndexPolicyList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil

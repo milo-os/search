@@ -12,8 +12,10 @@ import (
 	"k8s.io/klog/v2"
 
 	_ "go.miloapis.net/search/internal/metrics"
+	"go.miloapis.net/search/internal/registry/policy/resourceindexpolicy"
 	"go.miloapis.net/search/pkg/apis/search/install"
-	"go.miloapis.net/search/pkg/apis/search/v1alpha1"
+	searchinstall "go.miloapis.net/search/pkg/apis/search/install"
+	searchv1alpha1 "go.miloapis.net/search/pkg/apis/search/v1alpha1"
 )
 
 var (
@@ -25,8 +27,16 @@ var (
 
 func init() {
 	install.Install(Scheme)
+	searchinstall.Install(Scheme)
 
 	metav1.AddToGroupVersion(Scheme, schema.GroupVersion{Version: "v1"})
+
+	// Register the types as internal as well to support watches and other internal operations
+	// that expect an internal version.
+	Scheme.AddKnownTypes(schema.GroupVersion{Group: searchv1alpha1.GroupName, Version: runtime.APIVersionInternal},
+		&searchv1alpha1.ResourceIndexPolicy{},
+		&searchv1alpha1.ResourceIndexPolicyList{},
+	)
 
 	// Register unversioned meta types required by the API machinery.
 	unversioned := schema.GroupVersion{Group: "", Version: "v1"}
@@ -87,15 +97,22 @@ func (c completedConfig) New() (*SearchServer, error) {
 		GenericAPIServer: genericServer,
 	}
 
-	apiGroupInfo := genericapiserver.NewDefaultAPIGroupInfo(v1alpha1.GroupName, Scheme, metav1.ParameterCodec, Codecs)
+	// Install 'search' API group
+	searchAPIGroupInfo := genericapiserver.NewDefaultAPIGroupInfo(searchv1alpha1.GroupName, Scheme, metav1.ParameterCodec, Codecs)
+	searchV1alpha1Storage := map[string]rest.Storage{}
 
-	v1alpha1Storage := map[string]rest.Storage{}
-	// TODO: Add storage implementations here
-	// Example: v1alpha1Storage["searchqueries"] = search.NewQueryStorage(storage)
+	// Add policy resources
+	policyStorage, err := resourceindexpolicy.NewREST(Scheme, c.GenericConfig.RESTOptionsGetter)
+	if err != nil {
+		return nil, err
+	}
 
-	apiGroupInfo.VersionedResourcesStorageMap["v1alpha1"] = v1alpha1Storage
+	searchV1alpha1Storage["resourceindexpolicies"] = policyStorage.Store
+	searchV1alpha1Storage["resourceindexpolicies/status"] = policyStorage.Status
 
-	if err := s.GenericAPIServer.InstallAPIGroup(&apiGroupInfo); err != nil {
+	searchAPIGroupInfo.VersionedResourcesStorageMap["v1alpha1"] = searchV1alpha1Storage
+
+	if err := s.GenericAPIServer.InstallAPIGroup(&searchAPIGroupInfo); err != nil {
 		return nil, err
 	}
 

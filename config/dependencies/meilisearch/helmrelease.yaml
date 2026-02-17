@@ -31,8 +31,8 @@ spec:
 
     # Environment loaded into the confingMap
     environment:
-      MEILI_ENV: production
-      MEILI_MASTER_KEY: "search-master-key"
+      MEILI_ENV: development
+      MEILI_MASTER_KEY: "search-master-key" # Must be using a secret in production environment
 
     persistence:
       enabled: true

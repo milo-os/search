@@ -4,18 +4,15 @@ metadata:
   name: search-ca
 spec:
   isCA: true
-  secretName: search-ca-secret
-  duration: 87600h  # 10 years
-  renewBefore: 8760h  # 1 year before expiration
-  subject:
-    organizations:
-      - datum-cloud
   commonName: Search Service Internal CA
-  # Use a self-signed issuer to bootstrap the CA
-  # This should reference an existing cluster-wide self-signed issuer
+  secretName: search-ca-tls
+  duration: 87600h # 10 years
+  renewBefore: 8760h # 1 year
+  subject:
+    organizationalUnits:
+    - Search Service
+    - Certificate Authority
   issuerRef:
-    name: selfsigned-cluster-issuer
-    kind: ClusterIssuer
-  privateKey:
-    algorithm: RSA
-    size: 4096
+    name: selfsigned-issuer
+    kind: Issuer
+    group: cert-manager.io

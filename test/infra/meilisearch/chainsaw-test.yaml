@@ -17,7 +17,7 @@ spec:
         - script:
             content: |
               # Generate random title and store in ConfigMap
-              TITLE="Movie-$RANDOM"
+              TITLE="Movie-$(date +%s)"
               kubectl create configmap meilisearch-test-data --from-literal=title="$TITLE" --dry-run=client -o yaml | kubectl apply -f -
             check:
               ($error): ~
@@ -26,8 +26,9 @@ spec:
       description: "Verifies service health endpoint"
       try:
         - script:
+            timeout: 120s
             content: |
-              kubectl run curl-health-$RANDOM --image=curlimages/curl --restart=Never --rm -i -- curl -f -v http://meilisearch.meilisearch-system.svc.cluster.local:7700/health
+              kubectl run curl-health-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -f -v http://meilisearch.meilisearch-system.svc.cluster.local:7700/health
             check:
               ($error): ~
 
@@ -35,8 +36,9 @@ spec:
       description: "Creates the movies index"
       try:
         - script:
+            timeout: 120s
             content: |
-              kubectl run curl-create-index-$RANDOM --image=curlimages/curl --restart=Never --rm -i -- curl -f -X POST \
+              kubectl run curl-create-index-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -f -X POST \
                 -H "Authorization: Bearer search-master-key" \
                 -H "Content-Type: application/json" \
                 --data '{"uid": "movies", "primaryKey": "id"}' \
@@ -48,11 +50,12 @@ spec:
       description: "Adds a test document with random title"
       try:
         - script:
+            timeout: 120s
             content: |
               # Get title from ConfigMap
               TITLE=$(kubectl get cm meilisearch-test-data -o jsonpath='{.data.title}')
               
-              kubectl run curl-add-doc-$RANDOM --image=curlimages/curl --restart=Never --rm -i -- curl -f -X POST \
+              kubectl run curl-add-doc-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -f -X POST \
                 -H "Authorization: Bearer search-master-key" \
                 -H "Content-Type: application/json" \
                 --data '[{"id": 1, "title": "'"$TITLE"'", "genres": ["Romance", "Drama"]}]' \
@@ -71,7 +74,7 @@ spec:
               # Get title from ConfigMap
               TITLE=$(kubectl get cm meilisearch-test-data -o jsonpath='{.data.title}')
               
-              kubectl run curl-search-$RANDOM --image=curlimages/curl --restart=Never --rm -i -- curl -f -X POST \
+              kubectl run curl-search-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -f -X POST \
                 -H "Authorization: Bearer search-master-key" \
                 -H "Content-Type: application/json" \
                 --data '{"q": "'"$TITLE"'"}' \

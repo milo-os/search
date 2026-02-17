@@ -15,7 +15,7 @@ labels:
   - includeSelectors: true
     includeTemplates: true
     pairs:
-      app.kubernetes.io/name: search
+      app.kubernetes.io/name: search-apiserver
       app.kubernetes.io/instance: search-apiserver
       app.kubernetes.io/component: apiserver
       app.kubernetes.io/part-of: search.miloapis.com

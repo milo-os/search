@@ -1,0 +1,177 @@
+name: Test Environment Setup and Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_suite:
+        description: 'Test suite to run (e.g., resourceindexpolicy, or empty for all)'
+        required: false
+        default: ''
+        type: string
+  pull_request: {}
+
+env:
+  # Enable experimental remote taskfiles feature
+  TASK_X_REMOTE_TASKFILES: 1
+  # Test infrastructure configuration
+  TEST_INFRA_CLUSTER_NAME: test-infra
+  SEARCH_IMAGE_NAME: ghcr.io/datum-cloud/search
+  SEARCH_IMAGE_TAG: dev
+
+jobs:
+  test-environment-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Install Task CLI
+        run: |
+          sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin
+
+      - name: Verify Task installation
+        run: |
+          task --version
+          echo "Available tasks:"
+          task --list
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.30.0'
+
+      - name: Install KinD
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+          version: v0.24.0
+
+      - name: Verify prerequisites
+        run: |
+          echo "=== Checking prerequisites ==="
+          docker version
+          kubectl version --client
+          kind version
+          echo "Go version: $(go version)"
+
+      - name: Set up test environment
+        run: |
+          echo "=== Setting up test environment ==="
+          task ci:setup
+
+      - name: Verify Search components
+        run: |
+          echo "=== Verifying Search components ==="
+
+          # Verify all Search components are running
+          echo "Checking Search control plane components:"
+          task test-infra:kubectl -- get pods -n search-system
+
+          # Wait for controller manager to be ready
+          echo "⏳ Waiting for controller manager to be ready..."
+          task test-infra:kubectl -- wait --for=condition=Ready pod -l app.kubernetes.io/name=search-controller-manager -n search-system --timeout=1000s
+
+          # Wait for API server to be ready
+          echo "⏳ Waiting for API server to be ready..."
+          task test-infra:kubectl -- wait --for=condition=Ready pod -l app.kubernetes.io/name=search-apiserver -n search-system --timeout=1000s
+
+          # Verify Aggregated API Availability (CA Injection)
+          echo "⏳ Verifying Aggregated API Availability..."
+          for i in {1..30}; do
+            CA_LEN=$(task test-infra:kubectl -- get apiservice v1alpha1.search.miloapis.com -o jsonpath='{len(.spec.caBundle)}' 2>/dev/null || echo "0")
+            if [ "$CA_LEN" -gt "0" ]; then
+              echo "✅ CA Bundle injected into APIService."
+              break
+            fi
+            echo "Waiting for CA injection into APIService..."
+            sleep 2
+          done
+          
+          # Verify Discovery works
+          echo "Verifying API Discovery..."
+          task test-infra:kubectl -- get resourceindexpolicies
+          
+          echo "✓ Search components verification complete"
+
+      - name: Run end-to-end tests
+        run: |
+          echo "=== Running end-to-end tests ==="
+
+          # Determine which tests to run based on input
+          if [ -n "${{ github.event.inputs.test_suite }}" ]; then
+            echo "Running specified test suite: ${{ github.event.inputs.test_suite }}"
+            task test:end-to-end -- ${{ github.event.inputs.test_suite }}
+          else
+            echo "Running all end-to-end tests..."
+            task test:end-to-end
+          fi
+
+      - name: Collect debug information on failure
+        if: failure()
+        run: |
+          echo "=== Collecting debug information ==="
+
+          # Cluster status
+          echo "=== Infrastructure Cluster Status ==="
+          task test-infra:kubectl -- get pods -A || true
+          task test-infra:kubectl -- get nodes -o wide || true
+
+          # Search control plane status
+          echo "=== Search Control Plane Status ==="
+          task test-infra:kubectl -- describe pods -n search-system || true
+
+          # Search API server logs
+          echo "=== Search API Server Logs ==="
+          task test-infra:kubectl -- logs -n search-system -l app.kubernetes.io/name=search-apiserver --tail=100 || true
+
+          # Controller manager logs
+          echo "=== Controller Manager Logs ==="
+          task test-infra:kubectl -- logs -n search-system -l app.kubernetes.io/name=search-controller-manager --tail=100 || true
+
+          # Docker container status
+          echo "=== Docker Containers ==="
+          docker ps -a || true
+
+          # KinD cluster info
+          echo "=== KinD cluster info ==="
+          kind get clusters || true
+          kind export logs /tmp/kind-logs --name $TEST_INFRA_CLUSTER_NAME || true
+
+      - name: Upload debug artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-logs
+          path: |
+            /tmp/kind-logs/
+          if-no-files-found: ignore
+
+      - name: Cleanup test infrastructure
+        if: always()
+        run: |
+          echo "=== Cleaning up test infrastructure ==="
+
+          # Clean up test infrastructure cluster
+          task test-infra:cluster-down || true
+
+          # Verify cleanup
+          echo "Remaining KinD clusters:"
+          kind get clusters || true
+
+          echo "Remaining Docker containers:"
+          docker ps -a --filter "name=test-infra" || true

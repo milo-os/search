@@ -4,12 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	searchapiserver "go.miloapis.net/search/internal/apiserver"
 	"go.miloapis.net/search/internal/version"
-	"go.miloapis.net/search/pkg/generated/openapi"
+	searchv1alpha1 "go.miloapis.net/search/pkg/apis/search/v1alpha1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	apiopenapi "k8s.io/apiserver/pkg/endpoints/openapi"
 	genericapiserver "k8s.io/apiserver/pkg/server"
@@ -20,6 +21,9 @@ import (
 	"k8s.io/component-base/logs"
 	logsapi "k8s.io/component-base/logs/api/v1"
 	"k8s.io/klog/v2"
+	"k8s.io/kube-openapi/pkg/common"
+
+	"go.miloapis.net/search/cmd/search/manager"
 
 	// Register JSON logging format
 	_ "k8s.io/component-base/logs/json/register"
@@ -29,6 +33,31 @@ func init() {
 	utilruntime.Must(logsapi.AddFeatureGates(utilfeature.DefaultMutableFeatureGate))
 	utilfeature.DefaultMutableFeatureGate.Set("LoggingBetaOptions=true")
 	utilfeature.DefaultMutableFeatureGate.Set("RemoteRequestHeaderUID=true")
+}
+
+func GetOpenAPIDefinitions(cb common.ReferenceCallback) map[string]common.OpenAPIDefinition {
+	defs := make(map[string]common.OpenAPIDefinition)
+
+	merge := func(pkgDefs map[string]common.OpenAPIDefinition) {
+		for k, v := range pkgDefs {
+			// For k8s.io types, store both the original key and the transformed key
+			// because the namer behavior is inconsistent across different types
+			if strings.HasPrefix(k, "k8s.io/") {
+				// Store original key (with slashes)
+				defs[k] = v
+				// Also store transformed key (io.k8s with dots)
+				newK := "io.k8s." + k[7:]
+				newK = strings.ReplaceAll(newK, "/", ".")
+				defs[newK] = v
+			} else {
+				// For non-k8s.io types, keep as-is
+				defs[k] = v
+			}
+		}
+	}
+
+	merge(searchv1alpha1.GetOpenAPIDefinitions(cb))
+	return defs
 }
 
 func main() {
@@ -50,6 +79,7 @@ Exposes SearchQuery resources accessible through kubectl or any Kubernetes clien
 
 	cmd.AddCommand(NewServeCommand())
 	cmd.AddCommand(NewVersionCommand())
+	cmd.AddCommand(manager.NewControllerManagerCommand())
 
 	return cmd
 }
@@ -122,12 +152,6 @@ func NewSearchServerOptions() *SearchServerOptions {
 		Logs: logsapi.NewLoggingConfiguration(),
 	}
 
-	// Disable etcd since storage implementation is external
-	o.RecommendedOptions.Etcd = nil
-
-	// Disable admission plugins since this server doesn't mutate or validate resources.
-	o.RecommendedOptions.Admission = nil
-
 	return o
 }
 
@@ -158,12 +182,12 @@ func (o *SearchServerOptions) Config() (*searchapiserver.Config, error) {
 	genericConfig.EffectiveVersion = basecompatibility.NewEffectiveVersionFromString("1.34", "", "")
 
 	namer := apiopenapi.NewDefinitionNamer(searchapiserver.Scheme)
-	genericConfig.OpenAPIV3Config = genericapiserver.DefaultOpenAPIV3Config(openapi.GetOpenAPIDefinitions, namer)
+	genericConfig.OpenAPIV3Config = genericapiserver.DefaultOpenAPIV3Config(GetOpenAPIDefinitions, namer)
 	genericConfig.OpenAPIV3Config.Info.Title = "Search"
 	genericConfig.OpenAPIV3Config.Info.Version = version.Version
 
 	// Configure OpenAPI v2
-	genericConfig.OpenAPIConfig = genericapiserver.DefaultOpenAPIConfig(openapi.GetOpenAPIDefinitions, namer)
+	genericConfig.OpenAPIConfig = genericapiserver.DefaultOpenAPIConfig(GetOpenAPIDefinitions, namer)
 	genericConfig.OpenAPIConfig.Info.Title = "Search"
 	genericConfig.OpenAPIConfig.Info.Version = version.Version
 

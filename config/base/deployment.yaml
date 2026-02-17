@@ -59,7 +59,10 @@ spec:
         - --logging-format=$(LOGGING_FORMAT)
         - --tracing-config-file=$(TRACING_CONFIG_FILE)
         - -v=$(LOG_LEVEL)
+        - --etcd-servers=$(ETCD_SERVERS)
         env:
+        - name: ETCD_SERVERS
+          value: "http://etcd.etcd-system.svc.cluster.local:2379"
         - name: SECURE_PORT
           value: "8443"
         - name: TLS_CERT_FILE

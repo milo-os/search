@@ -1,0 +1,205 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: resourceindexpolicy-webhook
+spec:
+  description: |
+    Tests for ResourceIndexPolicy webhook validation.
+    Verifies:
+    - Valid policy creation succeeds
+    - Policy updates are rejected
+    - Invalid CEL expressions are rejected
+    - Invalid JSONPath expressions are rejected
+
+  # Use existing namespace to avoid ephemeral namespace creation/deletion
+  namespace: default
+
+  steps:
+    # =========================================================================
+    # Test 1: Valid policy creation should succeed
+    # =========================================================================
+    - name: create-valid-policy
+      description: "Creates a valid ResourceIndexPolicy"
+      try:
+        - apply:
+            resource:
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: test-valid-policy
+              spec:
+                targetResource:
+                  group: "contacts.miloapis.com"
+                  version: v1
+                  kind: Contact
+                conditions:
+                  - name: is-active
+                    expression: "status.active == true"
+                fields:
+                  - path: ".spec.name"
+                    searchable: true
+
+    - name: verify-valid-policy-exists
+      description: "Verifies the valid policy was created"
+      try:
+        - assert:
+            resource:
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: test-valid-policy
+
+    - name: verify-status-condition-ready
+      description: "Verifies the policy status has Ready condition set to True"
+      try:
+        - assert:
+            timeout: 10s
+            resource:
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: test-valid-policy
+              status:
+                conditions:
+                  - type: Ready
+                    status: "True"
+                    reason: Valid
+
+    # =========================================================================
+    # Test 2: Policy update should be rejected
+    # =========================================================================
+    - name: update-policy-should-fail
+      description: "Attempts to update the policy, which should be rejected"
+      try:
+        - script:
+            content: |
+              # Attempt to update the policy - this should fail
+              cat <<EOF | kubectl apply -f - 2>&1 || true
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: test-valid-policy
+              spec:
+                targetResource:
+                  group: "contacts.miloapis.com"
+                  version: v1
+                  kind: Contact
+                conditions:
+                  - name: is-active-updated
+                    expression: "status.phase == 'Active'"
+                fields:
+                  - path: ".spec.name"
+                    searchable: true
+              EOF
+            check:
+              # Expect an error containing "not supported" or "MethodNotAllowed"
+              (contains($stdout, 'not supported') || contains($stdout, 'MethodNotAllowed') || contains($stderr, 'not supported') || contains($stderr, 'MethodNotAllowed')): true
+
+    # =========================================================================
+    # Test 3: Invalid CEL expression should be rejected
+    # =========================================================================
+    - name: invalid-cel-expression-should-fail
+      description: "Attempts to create a policy with invalid CEL expression"
+      try:
+        - script:
+            content: |
+              # Attempt to create policy with syntax error in CEL expression
+              cat <<EOF | kubectl apply -f - 2>&1 || true
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: test-invalid-cel-policy
+              spec:
+                targetResource:
+                  group: "contacts.miloapis.com"
+                  version: v1
+                  kind: Contact
+                conditions:
+                  - name: bad-syntax
+                    expression: "status.active =="
+                fields:
+                  - path: ".spec.name"
+                    searchable: true
+              EOF
+            check:
+              # Expect an error (non-zero exit or error in output)
+              (contains($stdout, 'Invalid') || contains($stderr, 'Invalid') || contains($stdout, 'error') || contains($stderr, 'error')): true
+
+    - name: verify-invalid-cel-policy-not-created
+      description: "Verifies the invalid CEL policy was not created"
+      try:
+        - script:
+            content: |
+              kubectl get resourceindexpolicy test-invalid-cel-policy 2>&1 || true
+            check:
+              (contains($stdout, 'NotFound') || contains($stderr, 'NotFound') || contains($stdout, 'not found') || contains($stderr, 'not found')): true
+
+    # =========================================================================
+    # Test 4: Invalid JSONPath should be rejected
+    # =========================================================================
+    - name: invalid-jsonpath-should-fail
+      description: "Attempts to create a policy with invalid JSONPath"
+      try:
+        - script:
+            content: |
+              # Attempt to create policy with invalid JSONPath (missing leading dot)
+              cat <<EOF | kubectl apply -f - 2>&1 || true
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: test-invalid-path-policy
+              spec:
+                targetResource:
+                  group: "contacts.miloapis.com"
+                  version: v1
+                  kind: Contact
+                conditions:
+                  - name: is-active
+                    expression: "status.active == true"
+                fields:
+                  - path: "spec.name"
+                    searchable: true
+              EOF
+            check:
+              # Expect an error about invalid path
+              (contains($stdout, 'Invalid') || contains($stderr, 'Invalid') || contains($stdout, "must start with '.'") || contains($stderr, "must start with '.'")): true
+
+    - name: verify-invalid-path-policy-not-created
+      description: "Verifies the invalid path policy was not created"
+      try:
+        - script:
+            content: |
+              kubectl get resourceindexpolicy test-invalid-path-policy 2>&1 || true
+            check:
+              (contains($stdout, 'NotFound') || contains($stderr, 'NotFound') || contains($stdout, 'not found') || contains($stderr, 'not found')): true
+
+    # =========================================================================
+    # Test 5: Disallowed CEL operator should be rejected
+    # =========================================================================
+    - name: disallowed-cel-operator-should-fail
+      description: "Attempts to create a policy with disallowed CEL operator (arithmetic)"
+      try:
+        - script:
+            content: |
+              # Attempt to create policy with arithmetic operator (not allowed)
+              cat <<EOF | kubectl apply -f - 2>&1 || true
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: test-disallowed-op-policy
+              spec:
+                targetResource:
+                  group: "contacts.miloapis.com"
+                  version: v1
+                  kind: Contact
+                conditions:
+                  - name: uses-arithmetic
+                    expression: "spec.count + 1 > 5"
+                fields:
+                  - path: ".spec.name"
+                    searchable: true
+              EOF
+            check:
+              # Expect an error about operator not allowed
+              (contains($stdout, 'not allowed') || contains($stderr, 'not allowed') || contains($stdout, 'Invalid') || contains($stderr, 'Invalid')): true
+

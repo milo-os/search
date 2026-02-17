@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: search-controller-manager-webhook
+  labels:
+    app: search-controller-manager
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: search-controller-manager
+  ports:
+  - name: https
+    port: 443
+    protocol: TCP
+    targetPort: webhook-server

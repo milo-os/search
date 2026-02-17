@@ -1,0 +1,60 @@
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    control-plane: search-controller-manager
+  name: search-controller-manager
+  namespace: search-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: search-controller-manager
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        control-plane: search-controller-manager
+    spec:
+      containers:
+      - command:
+        - /search
+        - controller-manager
+        args:
+        - --leader-elect
+        - --health-probe-bind-address=:8081
+        - --metrics-bind-address=127.0.0.1:8080
+        image: ghcr.io/datum-cloud/search:dev
+        name: manager
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+
+      securityContext:
+        runAsNonRoot: true
+      serviceAccountName: search-controller-manager
+      terminationGracePeriodSeconds: 10
+
