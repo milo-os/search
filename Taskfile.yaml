@@ -139,7 +139,6 @@ tasks:
         set -e
         # Packages to generate OpenAPI for
         PACKAGES=(
-          "pkg/apis/policy/v1alpha1"
           "pkg/apis/search/v1alpha1"
         )
         
@@ -337,6 +336,9 @@ tasks:
 
         echo "⏳ Waiting for Search Controller Manager to be ready..."
         task test-infra:kubectl -- wait --for=condition=available deployment/search-controller-manager -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  Search Controller Manager not ready yet"
+
+        echo "⏳ Waiting for Vector Sidecar to be ready..."
+        task test-infra:kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/instance=vector-sidecar -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  Vector Sidecar not ready yet"
         
         echo "✅ Search server and all dependencies deployed successfully!"
         echo ""

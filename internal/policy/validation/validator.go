@@ -5,14 +5,14 @@ import (
 
 	"go.miloapis.net/search/internal/cel"
 	"go.miloapis.net/search/internal/jsonpath"
-	policyv1alpha1 "go.miloapis.net/search/pkg/apis/policy/v1alpha1"
+	searchv1alpha1 "go.miloapis.net/search/pkg/apis/search/v1alpha1"
 )
 
 // ValidateResourceIndexPolicy validates a ResourceIndexPolicy.
 // It checks:
 // 1. CEL expressions in conditions
 // 2. JSONPath syntax in fields
-func ValidateResourceIndexPolicy(policy *policyv1alpha1.ResourceIndexPolicy, celValidator *cel.Validator) field.ErrorList {
+func ValidateResourceIndexPolicy(policy *searchv1alpha1.ResourceIndexPolicy, celValidator *cel.Validator) field.ErrorList {
 	var allErrs field.ErrorList
 
 	// Validate CEL expressions in conditions

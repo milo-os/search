@@ -5,7 +5,7 @@ metadata:
   name: milo-controller-manager
 rules:
 - apiGroups:
-  - policy.search.miloapis.com
+  - search.miloapis.com
   resources:
   - resourceindexpolicies
   verbs:
@@ -13,7 +13,7 @@ rules:
   - list
   - watch
 - apiGroups:
-  - policy.search.miloapis.com
+  - search.miloapis.com
   resources:
   - resourceindexpolicies/status
   verbs:

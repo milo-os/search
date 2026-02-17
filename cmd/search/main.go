@@ -10,7 +10,6 @@ import (
 	"github.com/spf13/pflag"
 	searchapiserver "go.miloapis.net/search/internal/apiserver"
 	"go.miloapis.net/search/internal/version"
-	policyv1alpha1 "go.miloapis.net/search/pkg/apis/policy/v1alpha1"
 	searchv1alpha1 "go.miloapis.net/search/pkg/apis/search/v1alpha1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	apiopenapi "k8s.io/apiserver/pkg/endpoints/openapi"
@@ -57,7 +56,6 @@ func GetOpenAPIDefinitions(cb common.ReferenceCallback) map[string]common.OpenAP
 		}
 	}
 
-	merge(policyv1alpha1.GetOpenAPIDefinitions(cb))
 	merge(searchv1alpha1.GetOpenAPIDefinitions(cb))
 	return defs
 }

@@ -11,7 +11,7 @@ import (
 
 	"go.miloapis.net/search/internal/cel"
 	"go.miloapis.net/search/internal/policy/validation"
-	policyv1alpha1 "go.miloapis.net/search/pkg/apis/policy/v1alpha1"
+	searchv1alpha1 "go.miloapis.net/search/pkg/apis/search/v1alpha1"
 )
 
 // ensure strategy implements RESTCreateStrategy and RESTUpdateStrategy
@@ -33,13 +33,13 @@ type statusStrategy struct {
 var _ rest.RESTUpdateStrategy = statusStrategy{}
 
 func (statusStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Object) {
-	newPolicy := obj.(*policyv1alpha1.ResourceIndexPolicy)
-	oldPolicy := old.(*policyv1alpha1.ResourceIndexPolicy)
+	newPolicy := obj.(*searchv1alpha1.ResourceIndexPolicy)
+	oldPolicy := old.(*searchv1alpha1.ResourceIndexPolicy)
 	newPolicy.Spec = oldPolicy.Spec
 }
 
 func (s statusStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
-	newPolicy := obj.(*policyv1alpha1.ResourceIndexPolicy)
+	newPolicy := obj.(*searchv1alpha1.ResourceIndexPolicy)
 	return validation.ValidateResourceIndexPolicy(newPolicy, s.celValidator)
 }
 
@@ -72,7 +72,7 @@ func (strategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Object) {
 }
 
 func (s strategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
-	policy, ok := obj.(*policyv1alpha1.ResourceIndexPolicy)
+	policy, ok := obj.(*searchv1alpha1.ResourceIndexPolicy)
 	if !ok {
 		return field.ErrorList{field.InternalError(field.NewPath(""), fmt.Errorf("expected ResourceIndexPolicy, got %T", obj))}
 	}

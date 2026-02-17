@@ -26,7 +26,7 @@ images:
 patches:
   - target:
       kind: APIService
-      name: v1alpha1.policy.search.miloapis.com
+      name: v1alpha1.search.miloapis.com
     patch: |-
       - op: add
         path: /metadata/annotations

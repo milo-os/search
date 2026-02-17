@@ -93,7 +93,7 @@ jobs:
           # Verify Aggregated API Availability (CA Injection)
           echo "⏳ Verifying Aggregated API Availability..."
           for i in {1..30}; do
-            CA_LEN=$(task test-infra:kubectl -- get apiservice v1alpha1.policy.search.miloapis.com -o jsonpath='{len(.spec.caBundle)}' 2>/dev/null || echo "0")
+            CA_LEN=$(task test-infra:kubectl -- get apiservice v1alpha1.search.miloapis.com -o jsonpath='{len(.spec.caBundle)}' 2>/dev/null || echo "0")
             if [ "$CA_LEN" -gt "0" ]; then
               echo "✅ CA Bundle injected into APIService."
               break

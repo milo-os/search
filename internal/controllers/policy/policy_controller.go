@@ -14,7 +14,7 @@ import (
 	"go.miloapis.net/search/internal/cel"
 	"go.miloapis.net/search/internal/policy/validation"
 	"go.miloapis.net/search/internal/utils"
-	policyv1alpha1 "go.miloapis.net/search/pkg/apis/policy/v1alpha1"
+	searchv1alpha1 "go.miloapis.net/search/pkg/apis/search/v1alpha1"
 )
 
 // ResourceIndexPolicyReconciler reconciles a ResourceIndexPolicy object
@@ -30,8 +30,8 @@ const (
 	InvalidConditionReason = "Invalid"
 )
 
-// +kubebuilder:rbac:groups=policy.search.miloapis.com,resources=resourceindexpolicies,verbs=get;list;watch
-// +kubebuilder:rbac:groups=policy.search.miloapis.com,resources=resourceindexpolicies/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=search.miloapis.com,resources=resourceindexpolicies,verbs=get;list;watch
+// +kubebuilder:rbac:groups=search.miloapis.com,resources=resourceindexpolicies/status,verbs=get;update;patch
 
 // Reconcile matches the state of the cluster with the desired state of a ResourceIndexPolicy.
 func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -40,7 +40,7 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 	logger.Info("Reconciling ResourceIndexPolicy")
 
 	// Get the policy
-	policy := &policyv1alpha1.ResourceIndexPolicy{}
+	policy := &searchv1alpha1.ResourceIndexPolicy{}
 	err := r.Client.Get(ctx, req.NamespacedName, policy)
 	if errors.IsNotFound(err) {
 		logger.Info("ResourceIndexPolicy not found, probably deleted.")
@@ -91,6 +91,6 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 // SetupWithManager sets up the controller with the Manager.
 func (r *ResourceIndexPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&policyv1alpha1.ResourceIndexPolicy{}).
+		For(&searchv1alpha1.ResourceIndexPolicy{}).
 		Complete(r)
 }
