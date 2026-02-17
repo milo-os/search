@@ -27,27 +27,26 @@ type ResourceIndexPolicySpec struct {
 	// +kubebuilder:validation:Required
 	TargetResource TargetResource `json:"targetResource"`
 
-	// Conditions filter which resources are indexed.
-	// CEL expressions that filter which resources are indexed. Multiple
-	//  conditions can be specified and are evaluated with OR semantics - a
-	//  resource is indexed if it satisfies ANY condition. Use && within a
-	//  single expression to require multiple criteria together.
+	// Conditions filter which resources are indexed using CEL expressions.
+	// Multiple conditions can be specified and are evaluated with OR semantics - a
+	// resource is indexed if it satisfies ANY condition. Use && within a
+	// single expression to require multiple criteria together.
 	//
-	//  Each condition has:
-	//  - name: A unique identifier for the condition, used in status reporting
-	//    and debugging to identify which condition(s) matched a resource.
-	//  - expression: A CEL expression that must evaluate to a boolean. The
-	//    resource is available as the root object in the expression context.
+	// Each condition has:
+	// - name: A unique identifier for the condition, used in status reporting
+	//   and debugging to identify which condition(s) matched a resource.
+	// - expression: A CEL expression that must evaluate to a boolean. The
+	//   resource is available as the root object in the expression context.
 	//
-	//  Available CEL operations:
-	//  - Field access: spec.replicas, metadata.name, status.phase
-	//  - Map access: metadata.labels["app"], metadata.annotations["key"]
-	//  - Comparisons: ==, !=, <, <=, >, >=
-	//  - Logical operators: &&, ||, !
-	//  - String functions: contains(), startsWith(), endsWith(), matches()
-	//  - List functions: exists(), all(), size(), map(), filter()
-	//  - Membership: "value" in list, "key" in map
-	//  - Ternary: condition ? trueValue : falseValue
+	// Available CEL operations:
+	// - Field access: spec.replicas, metadata.name, status.phase
+	// - Map access: metadata.labels["app"], metadata.annotations["key"]
+	// - Comparisons: ==, !=, <, <=, >, >=
+	// - Logical operators: &&, ||, !
+	// - String functions: contains(), startsWith(), endsWith(), matches()
+	// - List functions: exists(), all(), size(), map(), filter()
+	// - Membership: "value" in list, "key" in map
+	// - Ternary: condition ? trueValue : falseValue
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=10
 	Conditions []PolicyCondition `json:"conditions"`
