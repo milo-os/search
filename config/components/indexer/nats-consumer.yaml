@@ -14,3 +14,4 @@ spec:
   maxAckPending: 1000000
   # ReplayPolicy indicates that the consumer will replay messages from the stream
   replayPolicy: instant
+  ackWait: 30s

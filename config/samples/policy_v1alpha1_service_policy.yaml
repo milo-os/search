@@ -1,0 +1,36 @@
+apiVersion: policy.search.miloapis.com/v1alpha1
+kind: ResourceIndexPolicy
+metadata:
+  name: service-index-policy-1
+spec:
+  targetResource:
+    group: ""
+    version: v1
+    kind: Service
+  
+  # Index all services in default namespace
+  conditions:
+    - name: is-default-namespace
+      expression: "metadata.namespace == 'default'"
+
+  fields:
+    - path: ".metadata.name"
+      searchable: true
+    - path: ".metadata.namespace"
+      searchable: true
+    - path: ".metadata.labels['app']"
+      searchable: true
+    - path: ".spec.type"
+      searchable: true
+    - path: ".spec.clusterIP"
+      searchable: true
+    - path: ".spec.selector['app']"
+      searchable: true
+    - path: ".spec.selector.component"
+      searchable: true
+    - path: ".spec.ports[0].port"
+      searchable: true
+    - path: ".spec.ports[0].targetPort"
+      searchable: true
+    - path: ".spec.ports[0].name"
+      searchable: true
