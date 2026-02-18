@@ -16,7 +16,7 @@ components:
   - ../../components/observability
   - ../../components/tracing
   - ../../components/vector-sidecar
-  - ../../components/indexer
+  - ../../resource-indexer
 
 # Override image tag for dev builds
 images:
@@ -44,6 +44,9 @@ patches:
 
 secretGenerator:
 - name: search-controller-manager
+  literals:
+  - MEILISEARCH_API_KEY=search-master-key
+- name: search-indexer
   literals:
   - MEILISEARCH_API_KEY=search-master-key
 

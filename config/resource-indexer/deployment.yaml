@@ -19,9 +19,9 @@ spec:
     spec:
       containers:
       - name: indexer
-        image: ko://go.miloapis.net/search/cmd/search
+        image: ghcr.io/datum-cloud/search
         command:
-        - /ko-app/search
+        - /search
         - indexer
         env:
         - name: NATS_URL
@@ -34,3 +34,7 @@ spec:
           value: "search-indexer"
         - name: NATS_STREAM_NAME
           value: "AUDIT_EVENTS"
+        envFrom:
+        - secretRef:
+            name: search-indexer
+        
