@@ -309,3 +309,47 @@ func (s *SDKClient) IsTaskFailed(task *meilisearch.Task) bool {
 func (s *SDKClient) IsTaskSucceeded(task *meilisearch.Task) bool {
 	return task.Status == meilisearch.TaskStatusSucceeded
 }
+
+// GetSearchableAttributes returns the searchable attributes for the given index.
+func (s *SDKClient) GetSearchableAttributes(indexUID string) ([]string, error) {
+	resp, err := s.client.Index(indexUID).GetSearchableAttributes()
+	if err != nil {
+		klog.Errorf("Failed to get searchable attributes for index %s: %v", indexUID, err)
+		return nil, fmt.Errorf("failed to get searchable attributes: %w", err)
+	}
+	// If nil, it means all attributes are searchable (default behavior of Meilisearch)
+	// However, the typed return is []string. Meilisearch-go returns *[]string
+	if resp == nil {
+		return []string{"*"}, nil
+	}
+	return *resp, nil
+}
+
+// UpdateSearchableAttributes updates the searchable attributes for the given index.
+func (s *SDKClient) UpdateSearchableAttributes(indexUID string, attributes []string) (*meilisearch.Task, error) {
+	klog.Infof("Updating searchable attributes for index %s: %v", indexUID, attributes)
+	resp, err := s.client.Index(indexUID).UpdateSearchableAttributes(&attributes)
+	if err != nil {
+		klog.Errorf("Failed to update searchable attributes for index %s: %v", indexUID, err)
+		return nil, fmt.Errorf("failed to update searchable attributes: %w", err)
+	}
+
+	return &meilisearch.Task{TaskUID: resp.TaskUID, IndexUID: indexUID}, nil
+}
+
+// GetSettingsUpdateTask returns the most recent settings update task for the given index.
+func (s *SDKClient) GetSettingsUpdateTask(indexUID string) (*meilisearch.Task, error) {
+	resp, err := s.client.GetTasks(&meilisearch.TasksQuery{
+		IndexUIDS: []string{indexUID},
+		Types:     []meilisearch.TaskType{"settingsUpdate"},
+	})
+	if err != nil {
+		klog.Errorf("Failed to get settings update task: %v", err)
+		return nil, fmt.Errorf("failed to get settings update task: %w", err)
+	}
+	if len(resp.Results) == 0 {
+		return nil, nil // No settings update task found
+	}
+	// Return the most recent task
+	return &resp.Results[0], nil
+}

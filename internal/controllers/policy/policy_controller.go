@@ -3,6 +3,8 @@ package policy
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -46,6 +48,11 @@ const (
 	ValidationConditionType  = "PolicyValidation"
 	ValidationReadyReason    = "PolicyValidationReady"
 	ValidationNotReadyReason = "PolicyValidationNotReady"
+
+	SearchableAttributesConditionType = "SearchableAttributesConfigured"
+	AttributesSyncedReason            = "AttributesSynced"
+	AttributesUpdatingReason          = "AttributesUpdating"
+	AttributesFailedReason            = "AttributesFailed"
 )
 
 // +kubebuilder:rbac:groups=search.miloapis.com,resources=resourceindexpolicies,verbs=get;list;watch
@@ -102,6 +109,14 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		Message: "Search index provider is ready",
 	}
 
+	// Prepare searchable attributes condition
+	searchableAttributesCondition := metav1.Condition{
+		Type:    SearchableAttributesConditionType,
+		Status:  metav1.ConditionTrue,
+		Reason:  AttributesSyncedReason,
+		Message: "Searchable attributes are configured",
+	}
+
 	indexingErr := field.ErrorList{}
 	// Create search index if not exists
 	searchIndex := utils.GetSearchIndex(policy.Spec.TargetResource)
@@ -122,29 +137,109 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 			logger.Error(err, "Failed to get index creation task")
 			indexingErr = append(indexingErr, field.InternalError(field.NewPath("spec", "targetResource"), err))
 		}
-		if indexTask == nil && err == nil {
-			// Index does not exist (and no task found), create it
-			logger.Info("Creating search index")
-			_, err = r.SearchSDK.CreateIndex(searchIndex)
-			if err != nil {
-				logger.Error(err, "Failed to create search index")
-				indexingErr = append(indexingErr, field.InternalError(field.NewPath("spec", "targetResource"), err))
-			}
-		}
-		if indexTask != nil && err == nil {
-			// Index exists, get actual state
+
+		shouldCreate := true
+		if indexTask != nil {
 			if r.SearchSDK.IsTaskPending(indexTask) {
+				shouldCreate = false
 				logger.Info("Index creation is pending in search provider")
 				searchIndexCondition.Status = metav1.ConditionFalse
 				searchIndexCondition.Reason = IndexPendingReason
 				searchIndexCondition.Message = "Index creation is pending in search provider"
 			} else if r.SearchSDK.IsTaskFailed(indexTask) {
-				logger.Error(err, "Index creation failed in search provider")
+				// We will retry, but let's log the previous failure
+				logger.Info("Previous index creation failed", "error", indexTask.Error.Message)
+			} else {
+				// Task succeeded but index is missing -> Stale task from deleted index?
+				logger.Info("Found succeeded creation task for missing index, recreating")
+			}
+		}
+
+		if shouldCreate && err == nil {
+			logger.Info("Creating search index")
+			_, err = r.SearchSDK.CreateIndex(searchIndex)
+			if err != nil {
+				logger.Error(err, "Failed to create search index")
+				indexingErr = append(indexingErr, field.InternalError(field.NewPath("spec", "targetResource"), err))
 				searchIndexCondition.Status = metav1.ConditionFalse
 				searchIndexCondition.Reason = IndexFailedReason
-				searchIndexCondition.Message = "Index creation failed: " + indexTask.Error.Message
+				searchIndexCondition.Message = "Index creation failed: " + err.Error()
+			}
+		}
+	}
+
+	// Manage Searchable Attributes
+	if searchIndexCondition.Status == metav1.ConditionTrue {
+		// 1. Calculate desired attributes
+		desiredAttributes := []string{}
+		for _, f := range policy.Spec.Fields {
+			if f.Searchable {
+				// Meilisearch expects "metadata.name" not ".metadata.name"
+				path := strings.TrimPrefix(f.Path, ".")
+				desiredAttributes = append(desiredAttributes, path)
+			}
+		}
+		sort.Strings(desiredAttributes)
+
+		// 2. Check for pending updates to avoid race conditions
+		settingsTask, err := r.SearchSDK.GetSettingsUpdateTask(searchIndex)
+		if err != nil {
+			logger.Error(err, "Failed to get settings update task")
+			searchableAttributesCondition.Status = metav1.ConditionFalse
+			searchableAttributesCondition.Reason = fmt.Sprintf("%s: %s", AttributesFailedReason, err.Error())
+			searchableAttributesCondition.Message = "Failed to check settings status"
+		}
+
+		isPending := false
+		if settingsTask != nil {
+			if r.SearchSDK.IsTaskPending(settingsTask) {
+				isPending = true
+				searchableAttributesCondition.Status = metav1.ConditionFalse
+				searchableAttributesCondition.Reason = AttributesUpdatingReason
+				searchableAttributesCondition.Message = "Searchable attributes update is pending"
+				logger.Info("Searchable attributes update is pending")
+			} else if r.SearchSDK.IsTaskFailed(settingsTask) {
+				logger.Info("Previous settings update failed", "error", settingsTask.Error.Message)
+				// We don't block here, we'll try to update again if needed
+			}
+		}
+
+		// 3. If not pending, check current vs desired and update if needed
+		if !isPending {
+			currentAttributes, err := r.SearchSDK.GetSearchableAttributes(searchIndex)
+			if err != nil {
+				logger.Error(err, "Failed to get current searchable attributes")
+				searchableAttributesCondition.Status = metav1.ConditionFalse
+				searchableAttributesCondition.Reason = fmt.Sprintf("%s: %s", AttributesFailedReason, err.Error())
+				searchableAttributesCondition.Message = "Failed to get current attributes"
 			} else {
-				logger.Info("Index creation completed in search provider")
+				sort.Strings(currentAttributes)
+
+				// Compare slices
+				equal := len(currentAttributes) == len(desiredAttributes)
+				if equal {
+					for i := range currentAttributes {
+						if currentAttributes[i] != desiredAttributes[i] {
+							equal = false
+							break
+						}
+					}
+				}
+
+				if !equal {
+					logger.Info("Updating searchable attributes", "current", currentAttributes, "desired", desiredAttributes)
+					_, err := r.SearchSDK.UpdateSearchableAttributes(searchIndex, desiredAttributes)
+					if err != nil {
+						logger.Error(err, "Failed to update searchable attributes")
+						searchableAttributesCondition.Status = metav1.ConditionFalse
+						searchableAttributesCondition.Reason = fmt.Sprintf("%s: %s", AttributesFailedReason, err.Error())
+						searchableAttributesCondition.Message = "Failed to update attributes: " + err.Error()
+					} else {
+						searchableAttributesCondition.Status = metav1.ConditionFalse
+						searchableAttributesCondition.Reason = AttributesUpdatingReason
+						searchableAttributesCondition.Message = "Updating searchable attributes"
+					}
+				}
 			}
 		}
 	}
@@ -169,7 +264,9 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 
 	// Verify ready condition
-	if validationCondition.Status == metav1.ConditionFalse || searchIndexCondition.Status == metav1.ConditionFalse {
+	if validationCondition.Status == metav1.ConditionFalse ||
+		searchIndexCondition.Status == metav1.ConditionFalse ||
+		searchableAttributesCondition.Status == metav1.ConditionFalse {
 		readyCondition.Status = metav1.ConditionFalse
 		readyCondition.Reason = NotReadyConditionReason
 		readyCondition.Message = "ResourceIndexPolicy is not ready"
@@ -181,6 +278,7 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 	meta.SetStatusCondition(&policy.Status.Conditions, readyCondition)
 	meta.SetStatusCondition(&policy.Status.Conditions, validationCondition)
 	meta.SetStatusCondition(&policy.Status.Conditions, searchIndexCondition)
+	meta.SetStatusCondition(&policy.Status.Conditions, searchableAttributesCondition)
 
 	if err := utils.UpdateStatusIfChanged(ctx, r.Client, logger, policy, oldStatus, &policy.Status); err != nil {
 		return ctrl.Result{}, err
@@ -190,9 +288,9 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{}, fmt.Errorf("ResourceIndexPolicy has errors")
 	}
 
-	// If index is pending, requeue after 5 seconds to check if index is ready
-	if searchIndexCondition.Reason == IndexPendingReason {
-		logger.Info("Index creation is pending, requeuing after 5 seconds")
+	// If index is pending or attributes updating, requeue after 5 seconds
+	if searchIndexCondition.Reason == IndexPendingReason || searchableAttributesCondition.Reason == AttributesUpdatingReason {
+		logger.Info("Index or attributes pending, requeuing after 5 seconds")
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
