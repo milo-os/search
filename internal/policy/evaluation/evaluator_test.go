@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	internalcel "go.miloapis.net/search/internal/cel"
-	"go.miloapis.net/search/pkg/apis/policy/v1alpha1"
+	"go.miloapis.net/search/pkg/apis/search/v1alpha1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 

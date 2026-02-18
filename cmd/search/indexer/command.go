@@ -11,7 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"go.miloapis.net/search/internal/indexer"
-	policyv1alpha1 "go.miloapis.net/search/pkg/apis/policy/v1alpha1"
+	searchv1alpha1 "go.miloapis.net/search/pkg/apis/search/v1alpha1"
 	"go.miloapis.net/search/pkg/meilisearch"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
@@ -171,7 +171,7 @@ func NewIndexerCommand() *cobra.Command {
 func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 	// Build a Kubernetes client for listing policies
 	scheme := runtime.NewScheme()
-	if err := policyv1alpha1.AddToScheme(scheme); err != nil {
+	if err := searchv1alpha1.AddToScheme(scheme); err != nil {
 		return fmt.Errorf("failed to add v1alpha1 scheme: %w", err)
 	}
 

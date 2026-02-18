@@ -9,7 +9,7 @@ import (
 	"github.com/google/cel-go/cel"
 	internalcel "go.miloapis.net/search/internal/cel"
 	policyevaluation "go.miloapis.net/search/internal/policy/evaluation"
-	"go.miloapis.net/search/pkg/apis/policy/v1alpha1"
+	"go.miloapis.net/search/pkg/apis/search/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"

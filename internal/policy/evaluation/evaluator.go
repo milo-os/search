@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/google/cel-go/cel"
-	"go.miloapis.net/search/pkg/apis/policy/v1alpha1"
+	"go.miloapis.net/search/pkg/apis/search/v1alpha1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/klog/v2"
 )
