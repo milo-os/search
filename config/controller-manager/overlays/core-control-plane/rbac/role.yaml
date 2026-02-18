@@ -1,0 +1,22 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: milo-controller-manager
+rules:
+- apiGroups:
+  - search.miloapis.com
+  resources:
+  - resourceindexpolicies
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - search.miloapis.com
+  resources:
+  - resourceindexpolicies/status
+  verbs:
+  - get
+  - patch
+  - update

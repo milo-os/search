@@ -1,4 +1,4 @@
-apiVersion: policy.search.miloapis.com/v1alpha1
+apiVersion: search.miloapis.com/v1alpha1
 kind: ResourceIndexPolicy
 metadata:
   name: service-index-policy-1

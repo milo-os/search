@@ -9,10 +9,10 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/mock"
+	internalcel "go.miloapis.net/search/internal/cel"
+	policyevaluation "go.miloapis.net/search/internal/policy/evaluation"
 	"go.miloapis.net/search/pkg/apis/search/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // MockConsumer is a mock for jetstream.Consumer
@@ -74,9 +74,6 @@ func (m *MockConsumeContext) Closed() <-chan struct{} { return nil }
 
 func TestIndexer_Start_ConsumeFlow(t *testing.T) {
 	// 1. Setup PolicyCache with a policy
-	scheme := runtime.NewScheme()
-	v1alpha1.AddToScheme(scheme)
-
 	policy := &v1alpha1.ResourceIndexPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod-policy"},
 		Spec: v1alpha1.ResourceIndexPolicySpec{
@@ -91,9 +88,12 @@ func TestIndexer_Start_ConsumeFlow(t *testing.T) {
 		},
 	}
 
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy).Build()
-	policyCache, _ := NewPolicyCache(k8sClient, 1*time.Minute)
-	policyCache.refresh(context.Background())
+	env, _ := internalcel.NewEnv()
+	policyCache := &PolicyCache{
+		policies: make(map[string]*policyevaluation.CachedPolicy),
+		celEnv:   env,
+	}
+	policyCache.upsertPolicy(policy)
 
 	// 2. Setup Batcher with Mock Search Client
 	mockSearch := new(MockSearchClient)
@@ -159,9 +159,6 @@ func TestIndexer_Start_ConsumeFlow(t *testing.T) {
 
 func TestIndexer_Consume_Delete(t *testing.T) {
 	// Setup similar to above but for DELETE event
-	scheme := runtime.NewScheme()
-	v1alpha1.AddToScheme(scheme)
-
 	policy := &v1alpha1.ResourceIndexPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod-policy"},
 		Spec: v1alpha1.ResourceIndexPolicySpec{
@@ -173,9 +170,12 @@ func TestIndexer_Consume_Delete(t *testing.T) {
 		},
 	}
 
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy).Build()
-	policyCache, _ := NewPolicyCache(k8sClient, 1*time.Minute)
-	policyCache.refresh(context.Background())
+	env2, _ := internalcel.NewEnv()
+	policyCache := &PolicyCache{
+		policies: make(map[string]*policyevaluation.CachedPolicy),
+		celEnv:   env2,
+	}
+	policyCache.upsertPolicy(policy)
 
 	mockSearch := new(MockSearchClient)
 	batcher := NewBatcher(mockSearch, BatchConfig{BatchSize: 1, FlushInterval: 1 * time.Minute})

@@ -110,12 +110,8 @@ func (b *Batcher) QueueUpsert(indexUID string, doc any, msg *jetstream.Msg) {
 	}
 }
 
-var a int = 0
-
 // QueueDelete adds a document ID to the pending map and triggers an asynchronous flush if the batch size is reached.
 func (b *Batcher) QueueDelete(indexUID string, docID string, msg *jetstream.Msg) {
-	a++
-	klog.Infof("QueueDelete %d, %d", len(b.pendingDeletes), len(b.deleteMsgs))
 	b.mu.Lock()
 	defer b.mu.Unlock()
 

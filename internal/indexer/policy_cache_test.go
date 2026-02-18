@@ -1,23 +1,33 @@
 package indexer
 
 import (
-	"context"
 	"testing"
-	"time"
+
+	internalcel "go.miloapis.net/search/internal/cel"
+	policyevaluation "go.miloapis.net/search/internal/policy/evaluation"
+	"go.miloapis.net/search/pkg/apis/search/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.miloapis.net/search/pkg/apis/search/v1alpha1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func TestPolicyCache_Refresh(t *testing.T) {
-	scheme := runtime.NewScheme()
-	require.NoError(t, v1alpha1.AddToScheme(scheme))
+// newTestPolicyCache creates a PolicyCache with a real CEL env but no backing
+// informer cache, suitable for unit-testing upsertPolicy / deletePolicy directly.
+func newTestPolicyCache(t *testing.T) *PolicyCache {
+	t.Helper()
+	env, err := internalcel.NewEnv()
+	require.NoError(t, err)
+	return &PolicyCache{
+		policies: make(map[string]*policyevaluation.CachedPolicy),
+		celEnv:   env,
+	}
+}
 
+// TestPolicyCache_UpsertPolicy mirrors the original TestPolicyCache_Refresh table
+// tests, adapted to call upsertPolicy directly (the informer event handler path)
+// instead of the removed polling refresh() method.
+func TestPolicyCache_UpsertPolicy(t *testing.T) {
 	tests := []struct {
 		name           string
 		policies       []v1alpha1.ResourceIndexPolicy
@@ -128,19 +138,12 @@ func TestPolicyCache_Refresh(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create a fake client with the test policies
-			objs := []client.Object{}
+			cache := newTestPolicyCache(t)
+
+			// Simulate the informer Add event for each policy.
 			for i := range tt.policies {
-				objs = append(objs, &tt.policies[i])
+				cache.upsertPolicy(&tt.policies[i])
 			}
-			k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-
-			cache, err := NewPolicyCache(k8sClient, 1*time.Minute)
-			require.NoError(t, err)
-
-			// Manually trigger refresh
-			err = cache.refresh(context.Background())
-			assert.NoError(t, err)
 
 			policies := cache.GetPolicies()
 			assert.Equal(t, tt.expectedCount, len(policies))
@@ -157,4 +160,57 @@ func TestPolicyCache_Refresh(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPolicyCache_DeletePolicy(t *testing.T) {
+	c := newTestPolicyCache(t)
+
+	policy := &v1alpha1.ResourceIndexPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "policy-1"},
+		Spec: v1alpha1.ResourceIndexPolicySpec{
+			TargetResource: v1alpha1.TargetResource{Group: "", Version: "v1", Kind: "Pod"},
+			Conditions: []v1alpha1.PolicyCondition{
+				{Name: "all", Expression: "true"},
+			},
+		},
+		Status: v1alpha1.ResourceIndexPolicyStatus{
+			Conditions: []metav1.Condition{
+				{Type: "Ready", Status: metav1.ConditionTrue},
+			},
+		},
+	}
+
+	c.upsertPolicy(policy)
+	assert.Len(t, c.GetPolicies(), 1)
+
+	c.deletePolicy("policy-1")
+	assert.Empty(t, c.GetPolicies())
+}
+
+func TestPolicyCache_UpsertPolicy_NotReady_RemovesExisting(t *testing.T) {
+	c := newTestPolicyCache(t)
+
+	policy := &v1alpha1.ResourceIndexPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "policy-1"},
+		Spec: v1alpha1.ResourceIndexPolicySpec{
+			TargetResource: v1alpha1.TargetResource{Group: "", Version: "v1", Kind: "Pod"},
+			Conditions: []v1alpha1.PolicyCondition{
+				{Name: "all", Expression: "true"},
+			},
+		},
+		Status: v1alpha1.ResourceIndexPolicyStatus{
+			Conditions: []metav1.Condition{
+				{Type: "Ready", Status: metav1.ConditionTrue},
+			},
+		},
+	}
+
+	// First upsert as Ready
+	c.upsertPolicy(policy)
+	assert.Len(t, c.GetPolicies(), 1)
+
+	// Now mark as not-Ready — should be evicted from the cache
+	policy.Status.Conditions[0].Status = metav1.ConditionFalse
+	c.upsertPolicy(policy)
+	assert.Empty(t, c.GetPolicies())
 }

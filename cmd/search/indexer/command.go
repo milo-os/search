@@ -15,7 +15,7 @@ import (
 	"go.miloapis.net/search/pkg/meilisearch"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	runtimecache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
@@ -29,11 +29,6 @@ type ResourceIndexerOptions struct {
 	NatsStreamName  string
 	NatsAckWait     time.Duration
 	NatsMaxInFlight int
-
-	// ResourceIndexPolicySyncInterval controls how often the indexer polls the Kubernetes API
-	// to refresh the cache of ResourceIndexPolicies. This allows the indexer to pick up
-	// changes to indexing rules without a restart.
-	ResourceIndexPolicySyncInterval time.Duration
 
 	// Meilisearch connection and timeout settings
 	MeilisearchTaskWaitTimeout time.Duration // Timeout for waiting for Meilisearch tasks to complete.
@@ -52,23 +47,22 @@ type ResourceIndexerOptions struct {
 // NewResourceIndexerOptions creates a new ResourceIndexerOptions with default values.
 func NewResourceIndexerOptions() *ResourceIndexerOptions {
 	return &ResourceIndexerOptions{
-		NatsURL:                         "nats://nats.nats-system.svc.cluster.local:4222",
-		NatsSubject:                     "audit.>",
-		NatsQueueGroup:                  "search-indexer",
-		NatsDurableName:                 "search-indexer",
-		NatsStreamName:                  "AUDIT_EVENTS",
-		NatsAckWait:                     120 * time.Second,
-		NatsMaxInFlight:                 10000,
-		ResourceIndexPolicySyncInterval: 2 * time.Minute,
-		MeilisearchTaskWaitTimeout:      4 * time.Second,
-		MeilisearchHTTPTimeout:          60 * time.Second,
-		MeilisearchDomain:               "http://meilisearch.meilisearch-system.svc.cluster.local:7700",
-		MeilisearchChunkSize:            1000,
-		BatchSize:                       1000,
-		FlushInterval:                   5 * time.Second,
-		MeilisearchMaxRetries:           3,
-		MeilisearchRetryDelay:           500 * time.Millisecond,
-		BatchMaxConcurrentUploads:       100,
+		NatsURL:                    "nats://nats.nats-system.svc.cluster.local:4222",
+		NatsSubject:                "audit.>",
+		NatsQueueGroup:             "search-indexer",
+		NatsDurableName:            "search-indexer",
+		NatsStreamName:             "AUDIT_EVENTS",
+		NatsAckWait:                120 * time.Second,
+		NatsMaxInFlight:            10000,
+		MeilisearchTaskWaitTimeout: 4 * time.Second,
+		MeilisearchHTTPTimeout:     60 * time.Second,
+		MeilisearchDomain:          "http://meilisearch.meilisearch-system.svc.cluster.local:7700",
+		MeilisearchChunkSize:       1000,
+		BatchSize:                  1000,
+		FlushInterval:              5 * time.Second,
+		MeilisearchMaxRetries:      3,
+		MeilisearchRetryDelay:      500 * time.Millisecond,
+		BatchMaxConcurrentUploads:  100,
 	}
 }
 
@@ -81,7 +75,6 @@ func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.NatsStreamName, "nats-stream-name", o.NatsStreamName, "The name of the JetStream stream.")
 	fs.DurationVar(&o.NatsAckWait, "nats-ack-wait", o.NatsAckWait, "The time to wait for an acknowledgement.")
 	fs.IntVar(&o.NatsMaxInFlight, "nats-max-in-flight", o.NatsMaxInFlight, "The maximum number of in-flight messages.")
-	fs.DurationVar(&o.ResourceIndexPolicySyncInterval, "resource-index-policy-sync-interval", o.ResourceIndexPolicySyncInterval, "How often to re-sync ResourceIndexPolicies.")
 	fs.StringVar(&o.MeilisearchDomain, "meilisearch-domain", o.MeilisearchDomain, "Domain of the Meilisearch instance.")
 	fs.DurationVar(&o.MeilisearchTaskWaitTimeout, "meilisearch-task-wait-timeout", o.MeilisearchTaskWaitTimeout, "Timeout for waiting for Meilisearch tasks to complete.")
 	fs.DurationVar(&o.MeilisearchHTTPTimeout, "meilisearch-http-timeout", o.MeilisearchHTTPTimeout, "Timeout for HTTP requests to Meilisearch.")
@@ -115,9 +108,6 @@ func (o *ResourceIndexerOptions) Validate() error {
 	}
 	if o.NatsMaxInFlight < 1 {
 		return fmt.Errorf("nats-max-in-flight must be greater than 0")
-	}
-	if o.ResourceIndexPolicySyncInterval < 10*time.Second {
-		return fmt.Errorf("resource-index-policy-sync-interval must be at least 10s")
 	}
 	if o.MeilisearchDomain == "" {
 		return fmt.Errorf("meilisearch-domain must be set")
@@ -177,7 +167,7 @@ func NewIndexerCommand() *cobra.Command {
 
 // Run starts the indexer consumer
 func Run(o *ResourceIndexerOptions, ctx context.Context) error {
-	// Build a Kubernetes client for listing policies
+	// Build a scheme and REST config for the controller-runtime cache.
 	scheme := runtime.NewScheme()
 	if err := searchv1alpha1.AddToScheme(scheme); err != nil {
 		return fmt.Errorf("failed to add v1alpha1 scheme: %w", err)
@@ -188,13 +178,15 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 		return fmt.Errorf("failed to get kubeconfig: %w", err)
 	}
 
-	k8sClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	// Create a controller-runtime cache that uses a watch stream (informer)
+	// to keep ResourceIndexPolicies in-sync.
+	k8sCache, err := runtimecache.New(cfg, runtimecache.Options{Scheme: scheme})
 	if err != nil {
-		return fmt.Errorf("failed to create kubernetes client: %w", err)
+		return fmt.Errorf("failed to create controller-runtime cache: %w", err)
 	}
 
 	// Create and start the policy cache
-	policyCache, err := indexer.NewPolicyCache(k8sClient, o.ResourceIndexPolicySyncInterval)
+	policyCache, err := indexer.NewPolicyCache(k8sCache)
 	if err != nil {
 		return fmt.Errorf("failed to create policy cache: %w", err)
 	}
