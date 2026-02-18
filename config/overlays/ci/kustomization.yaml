@@ -18,6 +18,7 @@ components:
   # - ../../components/observability
   - ../../components/tracing
   - ../../components/vector-sidecar
+  - ../../components/nats-config
 
 
 # Override image tag for dev builds
