@@ -21,24 +21,32 @@ import (
 
 // ResourceIndexerOptions holds the configuration for the resource indexer.
 type ResourceIndexerOptions struct {
-	NatsURL                         string
-	NatsSubject                     string
-	NatsQueueGroup                  string
-	NatsDurableName                 string
-	NatsStreamName                  string
-	NatsAckWait                     time.Duration
-	NatsMaxInFlight                 int
+	// NATS connection and consumer settings
+	NatsURL         string
+	NatsSubject     string
+	NatsQueueGroup  string
+	NatsDurableName string
+	NatsStreamName  string
+	NatsAckWait     time.Duration
+	NatsMaxInFlight int
+
+	// ResourceIndexPolicySyncInterval controls how often the indexer polls the Kubernetes API
+	// to refresh the cache of ResourceIndexPolicies. This allows the indexer to pick up
+	// changes to indexing rules without a restart.
 	ResourceIndexPolicySyncInterval time.Duration
 
-	MeilisearchTaskWaitTimeout time.Duration
-	MeilisearchHTTPTimeout     time.Duration
-	MeilisearchDomain          string
-	MeilisearchChunkSize       int
-	BatchSize                  int
-	FlushInterval              time.Duration
-	MeilisearchMaxRetries      int
-	MeilisearchRetryDelay      time.Duration
-	BatchMaxConcurrentUploads  int
+	// Meilisearch connection and timeout settings
+	MeilisearchTaskWaitTimeout time.Duration // Timeout for waiting for Meilisearch tasks to complete.
+	MeilisearchHTTPTimeout     time.Duration // Timeout for HTTP requests to Meilisearch.
+	MeilisearchDomain          string        // Domain of the Meilisearch instance.
+	MeilisearchChunkSize       int           // The number of documents to process in a single chunk.
+	MeilisearchMaxRetries      int           // The maximum number of retries for transient Meilisearch errors.
+	MeilisearchRetryDelay      time.Duration // The base delay between Meilisearch retries.
+
+	// Audit events batching and throughput tuning
+	BatchSize                 int           // The maximum number of documents to process in a single batch.
+	FlushInterval             time.Duration // The time to wait before flushing a batch.
+	BatchMaxConcurrentUploads int           // The maximum number of concurrent uploads to Meilisearch.
 }
 
 // NewResourceIndexerOptions creates a new ResourceIndexerOptions with default values.
