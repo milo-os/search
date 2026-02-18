@@ -4,9 +4,10 @@ kind: Kustomization
 namespace: search-system
 
 resources:
-  - ../../base
+  - ../../base/apiserver
+  - ../../base/resource-indexer
   # Controller manager with RBAC
-  - ../../controller-manager/overlays/core-control-plane
+  - ../../base/controller-manager/overlays/core-control-plane
 
 # Include components for development environment
 components:
@@ -16,7 +17,7 @@ components:
   - ../../components/observability
   - ../../components/tracing
   - ../../components/vector-sidecar
-  - ../../resource-indexer
+
 
 # Override image tag for dev builds
 images:
