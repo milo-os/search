@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: resource-indexer
+  namespace: search-system
+  labels:
+    app.kubernetes.io/name: resource-indexer
+    app.kubernetes.io/component: indexer
+    app.kubernetes.io/part-of: search
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: resource-indexer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: resource-indexer
+    spec:
+      containers:
+      - name: indexer
+        image: ghcr.io/datum-cloud/search
+        command:
+        - /search
+        - indexer
+        env:
+        - name: NATS_URL
+          value: "nats://nats.nats-system.svc.cluster.local:4222"
+        - name: NATS_Subject
+          value: "audit.>"
+        - name: NATS_QUEUE_GROUP
+          value: "search-indexer"
+        - name: NATS_DURABLE_NAME
+          value: "search-indexer"
+        - name: NATS_STREAM_NAME
+          value: "AUDIT_EVENTS"
+        envFrom:
+        - secretRef:
+            name: search-indexer
+        

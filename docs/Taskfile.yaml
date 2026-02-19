@@ -1,7 +1,7 @@
 version: '3'
 
 vars:
-  DIAGRAMS_DIR: "{{.USER_WORKING_DIR}}/docs/diagrams"
+  DIAGRAMS_DIR: "{{.ROOT_DIR}}/docs/diagrams"
   OUTPUT_FORMAT: "png"
 
 tasks:

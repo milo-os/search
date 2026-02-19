@@ -48,13 +48,19 @@ type Validator struct {
 	maxDepth int
 }
 
-// NewValidator creates a new CEL validator with the standard environment and specified max recursion depth
-func NewValidator(maxDepth int) (*Validator, error) {
-	env, err := cel.NewEnv(
+// NewEnv creates a new CEL environment with the standard variables
+func NewEnv() (*cel.Env, error) {
+	return cel.NewEnv(
 		cel.Variable("metadata", cel.DynType),
 		cel.Variable("spec", cel.DynType),
 		cel.Variable("status", cel.DynType),
+		// Add other standard configuration here if needed
 	)
+}
+
+// NewValidator creates a new CEL validator with the standard environment and specified max recursion depth
+func NewValidator(maxDepth int) (*Validator, error) {
+	env, err := NewEnv()
 	if err != nil {
 		return nil, err
 	}

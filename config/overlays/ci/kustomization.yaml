@@ -4,9 +4,10 @@ kind: Kustomization
 namespace: search-system
 
 resources:
-  - ../../base
+  - ../../base/apiserver
+  - ../../base/resource-indexer
   # Controller manager with RBAC
-  - ../../controller-manager/overlays/core-control-plane
+  - ../../base/controller-manager/overlays/core-control-plane
 
 # Include components for CI environment
 components:
@@ -17,6 +18,8 @@ components:
   # - ../../components/observability
   - ../../components/tracing
   - ../../components/vector-sidecar
+  - ../../components/nats-config
+
 
 # Override image tag for dev builds
 images:
@@ -24,6 +27,7 @@ images:
     newTag: dev
 
 patches:
+  - path: patches/vector-sidecar-patch.yaml
   - target:
       kind: APIService
       name: v1alpha1.search.miloapis.com
@@ -49,3 +53,11 @@ patches:
       - op: replace
         path: /spec/values/podMonitor/enabled
         value: false
+
+secretGenerator:
+- name: search-controller-manager
+  literals:
+  - MEILISEARCH_API_KEY=search-master-key
+- name: search-indexer
+  literals:
+  - MEILISEARCH_API_KEY=search-master-key

@@ -213,7 +213,12 @@ tasks:
           NATS_CONFIG_DIR: config/dependencies/nats-ci
       - task: dev:build
       - task: dev:load
-      - task: dev:load
+      - task: dev:deploy
+        vars:
+          OVERLAY_DIR: config/overlays/ci
+
+  deploy:ci:
+    cmds:
       - task: dev:deploy
         vars:
           OVERLAY_DIR: config/overlays/ci
@@ -260,6 +265,9 @@ tasks:
 
         echo "Waiting for NATS HelmRelease to be ready..."
         task test-infra:kubectl -- wait --for=condition=ready helmrelease/nats -n nats-system --timeout=1000s 2>/dev/null || echo "⚠️  NATS HelmRelease not ready yet (may need Flux installed)"
+
+        echo "Waiting for NACK HelmRelease to be ready..."
+        task test-infra:kubectl -- wait --for=condition=ready helmrelease/nack -n nats-system --timeout=1000s 2>/dev/null || echo "⚠️  NACK HelmRelease not ready yet"
 
         echo "Waiting for NATS pods to be ready..."
         task test-infra:kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=nats -n nats-system --timeout=1000s 2>/dev/null || echo "⚠️  NATS pods not ready yet"
@@ -340,6 +348,16 @@ tasks:
         echo "⏳ Waiting for Vector Sidecar to be ready..."
         task test-infra:kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/instance=vector-sidecar -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  Vector Sidecar not ready yet"
         
+        echo "⏳ Waiting for Vector Sidecar to be ready..."
+        task test-infra:kubectl -- wait --for=condition=ready helmrelease/vector-sidecar -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  Vector Sidecar HelmRelease not ready yet"
+        task test-infra:kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/instance=vector-sidecar -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  Vector Sidecar pods not ready yet"
+
+        echo "⏳ Waiting for Resource Indexer to be ready..."
+        task test-infra:kubectl -- wait --for=condition=available deployment/resource-indexer -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  Resource Indexer not ready yet"
+
+        echo "⏳ Waiting for NATS Consumer to be ready..."
+        task test-infra:kubectl -- wait --for=condition=ready consumer/search-indexer -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  NATS Consumer not ready yet"
+
         echo "✅ Search server and all dependencies deployed successfully!"
         echo ""
         echo "📊 Check status:"
@@ -379,13 +397,73 @@ tasks:
           sed "s|server:.*|server: https://127.0.0.1:9443|g" | \
           sed "s|certificate-authority-data:.*|insecure-skip-tls-verify: true|g" \
           > .tmp/local-search-kubeconfig.yaml
+      - echo "Ensure you are running 'task dev:run-apiserver', 'task dev:pf-meilisearch' and 'task dev:pf-etcd' in another terminal!"
+      - echo "Scaling down the controller manager deployment"
+      - |
+        task test-infra:kubectl -- scale deployment -n search-system search-controller-manager --replicas=0
       - |
         echo "🚀 Running controller against local Search API server..."
-        KUBECONFIG=.tmp/local-search-kubeconfig.yaml go run ./cmd/search controller-manager \
+        MEILISEARCH_API_KEY=search-master-key \
+        KUBECONFIG=.tmp/local-search-kubeconfig.yaml \
+        go run ./cmd/search controller-manager \
           --metrics-bind-address=:8085 \
           --health-probe-bind-address=:8086 \
-          --leader-elect=false
+          --leader-elect=false \
+          --meilisearch-domain="http://127.0.0.1:7700"
     silent: true
+
+  dev:run-indexer:
+    desc: Run the indexer against the LOCAL NATS (127.0.0.1:4222)
+    cmds:
+      - echo "Scaling down the indexer deployment"
+      - task test-infra:kubectl -- scale deployment -n search-system resource-indexer --replicas=0
+      - echo "Ensure you are running 'task dev:pf-nats' in another terminal!"
+      - |
+        # Trap to kill background processes (port-forward) on exit
+        trap 'kill $(jobs -p)' EXIT
+
+        echo "🚀 Starting NATS port-forward in background..."
+        task dev:pf-nats > /dev/null 2>&1 &
+
+        echo "🚀 Starting Meilisearch port-forward in background..."
+        task dev:pf-meilisearch > /dev/null 2>&1 &
+        
+        echo "Waiting for port-forward to be ready..."
+        sleep 5
+
+        echo "🚀 Running indexer against local NATS..."
+        MEILISEARCH_API_KEY=search-master-key \
+        go run ./cmd/search indexer \
+          --nats-url="nats://127.0.0.1:4222" \
+          --nats-subject="audit.>" \
+          --nats-queue-group="search-indexer" \
+          --nats-durable-name="search-indexer" \
+          --nats-stream-name="AUDIT_EVENTS" \
+          --meilisearch-domain="http://127.0.0.1:7700"
+    silent: true
+
+  dev:publish-test-event:
+    desc: Publish a test event to the local NATS server (requires dev:pf-nats)
+    cmds:
+      - go run ./hack/publish_event.go
+
+  dev:pf-vectorsidecar:
+    desc: Port forward Vector sidecar for local development
+    cmds:
+      - echo "Port forwarding Vector sidecar to localhost:8080..."
+      - task test-infra:kubectl -- port-forward -n search-system svc/vector-sidecar 8080:8080
+
+  dev:pf-meilisearch:
+    desc: Port forward Meilisearch for local development
+    cmds:
+      - echo "Port forwarding Meilisearch to localhost:7700..."
+      - task test-infra:kubectl -- port-forward -n meilisearch-system svc/meilisearch 7700:7700
+
+  dev:pf-nats:
+    desc: Port forward NATS for local development
+    cmds:
+      - echo "Port forwarding NATS to localhost:4222..."
+      - task test-infra:kubectl -- port-forward -n nats-system svc/nats 4222:4222
 
   dev:pf-etcd:
     desc: Port forward Etcd for local development
@@ -599,3 +677,8 @@ tasks:
 
         echo "✅ Redeployment complete!"
         echo "Check logs with: task test-infra:kubectl -- logs -n search-system -l app.kubernetes.io/name=search-controller-manager"
+
+  dev:nats-queue:
+    desc: View the NATS queue for the indexer
+    cmds:
+      - task test-infra:kubectl -- exec -n nats-system $(task test-infra:kubectl -- get pods -n nats-system -l app.kubernetes.io/component=nats-box -o jsonpath="{.items[0].metadata.name}") -- nats consumer info AUDIT_EVENTS search-indexer

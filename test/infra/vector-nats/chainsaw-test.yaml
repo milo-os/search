@@ -1,9 +1,9 @@
 # Chainsaw E2E Test: Audit Log Pipeline Verification
 #
 # This test verifies the audit logging pipeline:
-#   1. Inject mock audit events to Vector webhook
-#   2. Vector collects and pushes to NATS
-#   3. Verify events exist in NATS JetStream queue
+#   1. Trigger a real Kubernetes API action to generate an audit log entry
+#   2. Vector reads the audit log file and pushes events to NATS
+#   3. Verify the event exists in NATS JetStream queue
 #
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
@@ -11,9 +11,9 @@ metadata:
   name: audit-log-pipeline
 spec:
   description: |
-    Verifies that audit events sent to Vector are correctly
-    forwarded to the NATS AUDIT_EVENTS stream.
-    Injects 3 distinct events and verifies their arrival.
+    Verifies that audit events from the kube-apiserver audit log file are
+    correctly forwarded to the NATS AUDIT_EVENTS stream by Vector.
+    Triggers a real Kubernetes API action and verifies its audit event arrives.
 
   # Use existing namespace to avoid ephemeral namespace creation/deletion
   namespace: default
@@ -25,78 +25,69 @@ spec:
             timeout: 2m
             content: |
               echo "--------------------------------------------------"
-              echo "1. Injecting 3 Mock Audit Events"
+              echo "1. Capturing baseline NATS stream sequence"
               echo "--------------------------------------------------"
-              
-              # Unique ID for this test run to avoid collision
-              RUN_ID="run-${RANDOM}"
-              TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-              
-              # Loop to inject 3 events
-              for i in 1 2 3; do
-                EVENT_ID="${RUN_ID}-event-${i}"
-                echo "Injecting Event: $EVENT_ID"
-                
-                # Use simpler JSON construction to avoid heredoc artifact issues
-                PAYLOAD="{\"kind\":\"EventList\",\"apiVersion\":\"audit.k8s.io/v1\",\"items\":[{\"auditID\":\"${EVENT_ID}\",\"stage\":\"ResponseComplete\",\"level\":\"Metadata\",\"verb\":\"test-action\",\"requestURI\":\"/api/test/${i}\",\"objectRef\":{\"resource\":\"pods\",\"namespace\":\"default\",\"name\":\"test-pod-${i}\"},\"stageTimestamp\":\"${TIMESTAMP}\"}]}"
-                
-                kubectl exec -n nats-system deployment/nats-box -- \
-                  curl -s -X POST \
-                  "http://vector-sidecar.search-system.svc.cluster.local:8080/events" \
-                  -H "Content-Type: application/json" \
-                  -d "$PAYLOAD"
-              done
-              
+
+              BASELINE_SEQ=$(kubectl exec -n nats-system deployment/nats-box -- nats stream info AUDIT_EVENTS --json | grep '"last_seq"' | awk '{print $2}' | tr -d ',')
+              echo "Baseline Last Sequence ID: $BASELINE_SEQ"
+
               echo ""
               echo "--------------------------------------------------"
-              echo "2. Verifying Events in NATS"
+              echo "2. Triggering Kubernetes API action to generate audit event"
               echo "--------------------------------------------------"
-              
-              # Small wait for propagation
-              sleep 5
 
-              # Get the last sequence number to determine range
-              LAST_SEQ=$(kubectl exec -n nats-system deployment/nats-box -- nats stream info AUDIT_EVENTS --json | grep '"last_seq"' | awk '{print $2}' | tr -d ',')
-              echo "Last Sequence ID: $LAST_SEQ"
+              # Create a unique ConfigMap - this generates a deterministic audit event
+              # with a name we can search for in NATS
+              CM_NAME="audit-test-$(date +%s)"
+              echo "Creating ConfigMap: $CM_NAME"
+              kubectl create configmap "$CM_NAME" --from-literal=test=value -n default
 
-              if [ "$LAST_SEQ" = "0" ]; then
-                 echo "❌ Stream is empty."
-                 exit 1
+              echo ""
+              echo "--------------------------------------------------"
+              echo "3. Waiting for Vector to pick up and forward the event"
+              echo "--------------------------------------------------"
+
+              # Vector reads from file - give it time to tail, parse, and publish
+              sleep 10
+
+              echo ""
+              echo "--------------------------------------------------"
+              echo "4. Verifying event in NATS"
+              echo "--------------------------------------------------"
+
+              NEW_SEQ=$(kubectl exec -n nats-system deployment/nats-box -- nats stream info AUDIT_EVENTS --json | grep '"last_seq"' | awk '{print $2}' | tr -d ',')
+              echo "New Last Sequence ID: $NEW_SEQ"
+
+              if [ "$NEW_SEQ" = "$BASELINE_SEQ" ]; then
+                echo "❌ No new messages arrived in NATS after triggering API action."
+                exit 1
               fi
 
-              # Fetch the last 5 messages (or fewer if stream is short) to check for our events
-              # This avoids 'nats stream view' interactive errors
-              START_SEQ=$((LAST_SEQ - 4))
-              if [ "$START_SEQ" -lt 1 ]; then START_SEQ=1; fi
+              echo "New messages arrived (seq $BASELINE_SEQ -> $NEW_SEQ). Searching for our event..."
 
-              echo "Checking messages from seq $START_SEQ to $LAST_SEQ..."
-              MESSAGES=""
-              
-              for seq in $(seq $START_SEQ $LAST_SEQ); do
-                 MSG=$(kubectl exec -n nats-system deployment/nats-box -- nats stream get AUDIT_EVENTS "$seq" 2>&1 || true)
-                 MESSAGES="${MESSAGES}\n${MSG}"
-              done
+              # Search the new messages for our ConfigMap name
+              START_SEQ=$((BASELINE_SEQ + 1))
+              FOUND=0
 
-              MISSING=0
-              for i in 1 2 3; do
-                TARGET="${RUN_ID}-event-${i}"
-                if echo "$MESSAGES" | grep -q "$TARGET"; then
-                  echo "✅ Found Event: $TARGET"
-                else
-                  echo "❌ Missing Event: $TARGET"
-                  MISSING=1
+              for seq in $(seq $START_SEQ $NEW_SEQ); do
+                MSG=$(kubectl exec -n nats-system deployment/nats-box -- nats stream get AUDIT_EVENTS "$seq" 2>&1 || true)
+                if echo "$MSG" | grep -q "$CM_NAME"; then
+                  echo "✅ Found audit event for $CM_NAME at sequence $seq"
+                  FOUND=1
+                  break
                 fi
               done
-              
-              if [ "$MISSING" -eq 1 ]; then
-                 echo ""
-                 echo "⚠️ Some events were missing from NATS."
-                 echo "Captured Messages Dump:"
-                 echo -e "$MESSAGES"
-                 exit 1
+
+              if [ "$FOUND" -eq 0 ]; then
+                echo "❌ Audit event for $CM_NAME not found in NATS (seq $START_SEQ to $NEW_SEQ)."
+                echo "This may indicate Vector has not yet tailed the file or the pipeline is broken."
+                exit 1
               fi
-              
-              echo "✅ All 3 events verified successfully."
+
+              echo "✅ Audit log pipeline verified successfully."
+
+              # Cleanup
+              kubectl delete configmap "$CM_NAME" -n default --ignore-not-found=true
 
   # Increase timeouts to avoid Context Deadline Exceeded during cleanup
   timeouts:

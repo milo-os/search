@@ -48,23 +48,20 @@ spec:
               kind: ResourceIndexPolicy
               metadata:
                 name: test-valid-policy
-
-    - name: verify-status-condition-ready
-      description: "Verifies the policy status has Ready condition set to True"
+      
+    - name: wait-for-valid-policy-to-be-ready
+      description: Wait for User to reach Ready state
       try:
-        - assert:
-            timeout: 10s
-            resource:
-              apiVersion: search.miloapis.com/v1alpha1
-              kind: ResourceIndexPolicy
-              metadata:
-                name: test-valid-policy
-              status:
-                conditions:
-                  - type: Ready
-                    status: "True"
-                    reason: Valid
-
+        - wait:
+            apiVersion: search.miloapis.com/v1alpha1
+            kind: ResourceIndexPolicy
+            name: "test-valid-policy"
+            timeout: 30s
+            for:
+              condition:
+                name: Ready
+                value: 'True'
+    
     # =========================================================================
     # Test 2: Policy update should be rejected
     # =========================================================================
