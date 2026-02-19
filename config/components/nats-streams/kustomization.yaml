@@ -5,6 +5,7 @@ namespace: nats-system
 
 resources:
   - audit-stream.yaml
+  - reindex-stream.yaml
 
 # Note: This contains application-specific NATS JetStream stream configurations.
 # The NATS infrastructure (server + NACK controller) is deployed from config/dependencies/nats/

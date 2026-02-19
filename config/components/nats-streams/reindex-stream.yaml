@@ -1,15 +1,15 @@
 apiVersion: jetstream.nats.io/v1beta2
 kind: Stream
 metadata:
-  name: audit-events
+  name: reindex-events
   namespace: nats-system
 spec:
   # Stream name in NATS
-  name: AUDIT_EVENTS
+  name: REINDEX_EVENTS
 
   # Subjects to consume - wildcard for all Kubernetes audit events
   subjects:
-    - audit.k8s.>
+    - reindex.>
 
   # Retention policy: limits-based (time + size)
   retention: limits
@@ -17,14 +17,15 @@ spec:
   # Storage: file-based for durability
   storage: file
 
-  # Maximum age: 7 days retention as per architecture
-  maxAge: 168h  # 7 days = 168 hours
+  # Maximum age: 24 hours — re-index jobs are short-lived; if not consumed
+  # within a day they are stale and should be discarded.
+  maxAge: 24h
 
-  # Maximum bytes: 10GB as per architecture
+  # Maximum bytes: 10GB
   maxBytes: 10737418240  # 10 * 1024 * 1024 * 1024
 
-  # Number of replicas for high availability
-  replicas: 1  # Can be increased to 3 for production HA
+  # Single replica (increase to 3 for production HA)
+  replicas: 1
 
   # Discard policy when limits are reached
   discard: old
