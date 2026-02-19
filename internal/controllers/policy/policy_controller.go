@@ -2,6 +2,9 @@ package policy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -11,7 +14,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/client-go/dynamic"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -24,12 +29,31 @@ import (
 	"go.miloapis.net/search/pkg/meilisearch"
 )
 
+// ResourceReindexPublisher is implemented by any component that can enqueue a
+// single Kubernetes resource for background re-indexing (e.g. the NATS-backed
+type ResourceReindexPublisher interface {
+	// PublishResource publishes a single resource object for re-indexing.
+	PublishResource(ctx context.Context, resource map[string]any, resourceID string) error
+}
+
 // ResourceIndexPolicyReconciler reconciles a ResourceIndexPolicy object
 type ResourceIndexPolicyReconciler struct {
 	Client       client.Client
 	Scheme       *runtime.Scheme
 	CelValidator *cel.Validator
 	SearchSDK    *meilisearch.SDKClient
+
+	// DynamicClient is used to list target resources when a policy changes so
+	// that each resource can be published to the re-index queue individually.
+	DynamicClient dynamic.Interface
+
+	// RESTMapper resolves a GVK to its REST resource name and scope so we can
+	// call the dynamic client correctly.
+	RESTMapper meta.RESTMapper
+
+	// ReindexPublisher is called once per target resource after a
+	// successful reconcile to trigger background re-indexing.
+	ReindexPublisher ResourceReindexPublisher
 
 	RetryBaseDelay time.Duration
 	RetryMaxDelay  time.Duration
@@ -53,6 +77,10 @@ const (
 	AttributesSyncedReason            = "AttributesSynced"
 	AttributesUpdatingReason          = "AttributesUpdating"
 	AttributesFailedReason            = "AttributesFailed"
+
+	ReindexingConditionType    = "Reindexing"
+	ReindexingCompleteReason   = "ReindexingComplete"
+	ReindexingInProgressReason = "ReindexingInProgress"
 )
 
 // +kubebuilder:rbac:groups=search.miloapis.com,resources=resourceindexpolicies,verbs=get;list;watch
@@ -81,9 +109,20 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{}, nil
 	}
 
+	// List all policies to check for global uniqueness constraints
+	allPolicies := &searchv1alpha1.ResourceIndexPolicyList{}
+	if err := r.Client.List(ctx, allPolicies); err != nil {
+		logger.Error(err, "Failed to list all ResourceIndexPolicies for validation")
+		return ctrl.Result{}, err
+	}
+	otherPolicies := make([]*searchv1alpha1.ResourceIndexPolicy, len(allPolicies.Items))
+	for i := range allPolicies.Items {
+		otherPolicies[i] = &allPolicies.Items[i]
+	}
+
 	// As webhook validation may change in the future, we ensure that
 	// current policies are still valid with the newest validation logic.
-	valErr := validation.ValidateResourceIndexPolicy(policy, r.CelValidator)
+	valErr := validation.ValidateResourceIndexPolicy(policy, otherPolicies, r.CelValidator)
 
 	// Prepare ready condition
 	readyCondition := metav1.Condition{
@@ -115,6 +154,14 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		Status:  metav1.ConditionTrue,
 		Reason:  AttributesSyncedReason,
 		Message: "Searchable attributes are configured",
+	}
+
+	// Prepare reindexing condition
+	reindexingCondition := metav1.Condition{
+		Type:    ReindexingConditionType,
+		Status:  metav1.ConditionTrue,
+		Reason:  ReindexingCompleteReason,
+		Message: "Reindexing completed",
 	}
 
 	indexingErr := field.ErrorList{}
@@ -263,14 +310,31 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		logger.Error(indexingErr.ToAggregate(), "ResourceIndexPolicy indexing failed")
 	}
 
+	// Determine if reindexing is needed by comparing a SHA-256 hash of the
+	// current spec against the hash stored in status.
+	currentHash := computeSpecHash(&policy.Spec)
+	storedHash := policy.Status.CurrentGeneration
+	needsReindexing := currentHash != storedHash
+
+	if needsReindexing {
+		reindexingCondition.Status = metav1.ConditionFalse
+		reindexingCondition.Reason = ReindexingInProgressReason
+		reindexingCondition.Message = "Reindexing in progress"
+	}
+
 	// Verify ready condition
 	if validationCondition.Status == metav1.ConditionFalse ||
 		searchIndexCondition.Status == metav1.ConditionFalse ||
-		searchableAttributesCondition.Status == metav1.ConditionFalse {
+		searchableAttributesCondition.Status == metav1.ConditionFalse ||
+		reindexingCondition.Status == metav1.ConditionFalse {
 		readyCondition.Status = metav1.ConditionFalse
 		readyCondition.Reason = NotReadyConditionReason
 		readyCondition.Message = "ResourceIndexPolicy is not ready"
 	}
+
+	// Determine if actions made to Meilisearch are pending to complete
+	isPending := searchIndexCondition.Reason == IndexPendingReason ||
+		searchableAttributesCondition.Reason == AttributesUpdatingReason
 
 	// Clone policy to update status (we need the original status to compare against)
 	oldStatus := policy.Status.DeepCopy()
@@ -279,7 +343,10 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 	meta.SetStatusCondition(&policy.Status.Conditions, validationCondition)
 	meta.SetStatusCondition(&policy.Status.Conditions, searchIndexCondition)
 	meta.SetStatusCondition(&policy.Status.Conditions, searchableAttributesCondition)
+	meta.SetStatusCondition(&policy.Status.Conditions, reindexingCondition)
 
+	// Update status now. This persists any "InProgress" state before we start
+	// the long-running re-indexing operation.
 	if err := utils.UpdateStatusIfChanged(ctx, r.Client, logger, policy, oldStatus, &policy.Status); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -289,12 +356,140 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 
 	// If index is pending or attributes updating, requeue after 5 seconds
-	if searchIndexCondition.Reason == IndexPendingReason || searchableAttributesCondition.Reason == AttributesUpdatingReason {
+	if isPending {
 		logger.Info("Index or attributes pending, requeuing after 5 seconds")
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
+	// Trigger background re-indexing
+	if needsReindexing {
+		logger.Info("Triggering background re-indexing", "specHash", currentHash)
+		if err := r.publishReindexMessages(ctx, policy); err != nil {
+			logger.Error(err, "Failed to publish re-index messages")
+			reindexingCondition.Status = metav1.ConditionFalse
+			reindexingCondition.Reason = "ReindexingFailed"
+			reindexingCondition.Message = "Failed to publish re-index messages: " + err.Error()
+		} else {
+			// Success! Persist the current spec hash so we don't re-index on
+			// the next reconcile unless the spec actually changes again.
+			policy.Status.CurrentGeneration = currentHash
+
+			reindexingCondition.Status = metav1.ConditionTrue
+			reindexingCondition.Reason = ReindexingCompleteReason
+			reindexingCondition.Message = fmt.Sprintf("Reindexing published for spec hash %s", currentHash[:8])
+		}
+
+		meta.SetStatusCondition(&policy.Status.Conditions, reindexingCondition)
+
+		// Re-evaluate Ready condition based on the result of re-indexing.
+		if reindexingCondition.Status == metav1.ConditionTrue {
+			readyCondition.Status = metav1.ConditionTrue
+			readyCondition.Reason = ReadyConditionReason
+			readyCondition.Message = "ResourceIndexPolicy is valid and indexed"
+		} else {
+			readyCondition.Status = metav1.ConditionFalse
+			readyCondition.Reason = NotReadyConditionReason
+			readyCondition.Message = "Reindexing failed: " + reindexingCondition.Message
+		}
+		meta.SetStatusCondition(&policy.Status.Conditions, readyCondition)
+
+		if err := r.Client.Status().Update(ctx, policy); err != nil {
+			logger.Error(err, "Failed to update status after reindexing")
+			return ctrl.Result{}, err
+		}
+	}
+
+	if reindexingCondition.Status == metav1.ConditionFalse {
+		return ctrl.Result{}, fmt.Errorf("Error when indexing policies")
+	}
+
 	return ctrl.Result{}, nil
+
+}
+
+// computeSpecHash returns a short SHA-256 hex digest of the policy spec.
+// It is stored in an annotation to detect spec changes on aggregated API
+// servers that do not manage metadata.generation automatically.
+func computeSpecHash(spec *searchv1alpha1.ResourceIndexPolicySpec) string {
+	b, err := json.Marshal(spec)
+	if err != nil {
+		// Extremely unlikely; fall back to a zero string so we always re-index.
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// publishReindexMessages lists all resources matching the policy's TargetResource
+// and publishes one reindex message per resource to the re-index queue.
+func (r *ResourceIndexPolicyReconciler) publishReindexMessages(
+	ctx context.Context,
+	policy *searchv1alpha1.ResourceIndexPolicy,
+) error {
+	logger := logf.FromContext(ctx).WithName("resourceindexpolicy-controller")
+
+	target := policy.Spec.TargetResource
+	gvk := schema.GroupVersionKind{
+		Group:   target.Group,
+		Version: target.Version,
+		Kind:    target.Kind,
+	}
+
+	// Resolve the REST mapping so we know the plural resource name and scope.
+	mapping, err := r.RESTMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+	if err != nil {
+		if meta.IsNoMatchError(err) {
+			logger.Info("Target resource type not found, skipping re-index", "gvk", gvk.String())
+			return nil
+		}
+		logger.Error(err, "RESTMapper failure", "gvk", gvk.String(), "group", gvk.Group, "version", gvk.Version, "kind", gvk.Kind)
+		return fmt.Errorf("failed to get REST mapping for %v: %w", gvk, err)
+	}
+
+	// Determine whether the resource is cluster-scoped or namespace-scoped.
+	var resourceClient dynamic.ResourceInterface
+	if mapping.Scope.Name() == meta.RESTScopeNameRoot {
+		resourceClient = r.DynamicClient.Resource(mapping.Resource)
+	} else {
+		resourceClient = r.DynamicClient.Resource(mapping.Resource).Namespace(metav1.NamespaceAll)
+	}
+
+	// Page through all resources and publish one synthetic audit event per resource.
+	var continueToken string
+	pageSize := int64(500)
+	published := 0
+
+	for {
+		list, err := resourceClient.List(ctx, metav1.ListOptions{
+			Limit:    pageSize,
+			Continue: continueToken,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to list %v resources: %w", gvk, err)
+		}
+
+		for i := range list.Items {
+			obj := &list.Items[i]
+			logger.Info("Publishing re-index message", "resource", obj.GetName(), "namespace", obj.GetNamespace())
+			// Use "reindex/<policyName>/<uid>" as the resourceID so that duplicate
+			// messages from rapid policy updates are deduplicated by NATS.
+			resourceID := fmt.Sprintf("reindex/%s/%s", policy.Name, obj.GetUID())
+			if err := r.ReindexPublisher.PublishResource(ctx, obj.Object, resourceID); err != nil {
+				logger.Error(err, "Failed to publish re-index message",
+					"resource", obj.GetName(), "namespace", obj.GetNamespace())
+				continue
+			}
+			published++
+		}
+
+		continueToken = list.GetContinue()
+		if continueToken == "" {
+			break
+		}
+	}
+
+	logger.Info("Published re-index messages", "policy", policy.Name, "count", published)
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
