@@ -22,13 +22,13 @@ import (
 // ResourceIndexerOptions holds the configuration for the resource indexer.
 type ResourceIndexerOptions struct {
 	// NATS connection and consumer settings
-	NatsURL         string
-	NatsDurableName string
-	NatsStreamName  string
+	NatsURL               string
+	NatsAuditConsumerName string
+	NatsStreamName        string
 
 	// NATS re-index consumer settings (separate REINDEX_EVENTS stream)
-	NatsReindexStream      string
-	NatsReindexDurableName string
+	NatsReindexStream       string
+	NatsReindexConsumerName string
 
 	// Meilisearch connection and timeout settings
 	MeilisearchTaskWaitTimeout time.Duration
@@ -48,10 +48,10 @@ type ResourceIndexerOptions struct {
 func NewResourceIndexerOptions() *ResourceIndexerOptions {
 	return &ResourceIndexerOptions{
 		NatsURL:                    "nats://nats.nats-system.svc.cluster.local:4222",
-		NatsDurableName:            "search-indexer",
+		NatsAuditConsumerName:      "search-indexer",
 		NatsStreamName:             "AUDIT_EVENTS",
 		NatsReindexStream:          "REINDEX_EVENTS",
-		NatsReindexDurableName:     "search-reindexer",
+		NatsReindexConsumerName:    "search-reindexer",
 		MeilisearchTaskWaitTimeout: 4 * time.Second,
 		MeilisearchHTTPTimeout:     60 * time.Second,
 		MeilisearchDomain:          "http://meilisearch.meilisearch-system.svc.cluster.local:7700",
@@ -67,11 +67,11 @@ func NewResourceIndexerOptions() *ResourceIndexerOptions {
 // AddFlags adds the flags for the resource indexer to the command.
 func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.NatsURL, "nats-url", o.NatsURL, "The URL of the NATS server.")
-	fs.StringVar(&o.NatsDurableName, "nats-durable-name", o.NatsDurableName, "The durable name of the audit-events JetStream consumer (must match the manifest).")
+	fs.StringVar(&o.NatsAuditConsumerName, "nats-audit-consumer-name", o.NatsAuditConsumerName, "The name of the audit-events JetStream consumer (must match the manifest).")
 	fs.StringVar(&o.NatsStreamName, "nats-stream-name", o.NatsStreamName, "The name of the audit-events JetStream stream.")
 
 	fs.StringVar(&o.NatsReindexStream, "nats-reindex-stream", o.NatsReindexStream, "The JetStream stream name for re-index messages.")
-	fs.StringVar(&o.NatsReindexDurableName, "nats-reindex-durable-name", o.NatsReindexDurableName, "The durable name of the re-index JetStream consumer (must match the manifest).")
+	fs.StringVar(&o.NatsReindexConsumerName, "nats-reindex-consumer-name", o.NatsReindexConsumerName, "The name of the re-index JetStream consumer (must match the manifest).")
 
 	fs.StringVar(&o.MeilisearchDomain, "meilisearch-domain", o.MeilisearchDomain, "Domain of the Meilisearch instance.")
 	fs.DurationVar(&o.MeilisearchTaskWaitTimeout, "meilisearch-task-wait-timeout", o.MeilisearchTaskWaitTimeout, "Timeout for waiting for Meilisearch tasks to complete.")
@@ -89,8 +89,8 @@ func (o *ResourceIndexerOptions) Validate() error {
 	if o.NatsURL == "" {
 		return fmt.Errorf("nats-url must be set")
 	}
-	if o.NatsDurableName == "" {
-		return fmt.Errorf("nats-durable-name must be set")
+	if o.NatsAuditConsumerName == "" {
+		return fmt.Errorf("nats-consummer-name must be set")
 	}
 	if o.NatsStreamName == "" {
 		return fmt.Errorf("nats-stream-name must be set")
@@ -98,8 +98,8 @@ func (o *ResourceIndexerOptions) Validate() error {
 	if o.NatsReindexStream == "" {
 		return fmt.Errorf("nats-reindex-stream must be set")
 	}
-	if o.NatsReindexDurableName == "" {
-		return fmt.Errorf("nats-reindex-durable-name must be set")
+	if o.NatsReindexConsumerName == "" {
+		return fmt.Errorf("nats-reindex-consumer-name must be set")
 	}
 	if o.MeilisearchDomain == "" {
 		return fmt.Errorf("meilisearch-domain must be set")
@@ -219,9 +219,9 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 	}
 
 	// Consumer is declared in config/components/nats-config/nats-consumer.yaml
-	auditConsumer, err := auditStream.Consumer(ctx, o.NatsDurableName)
+	auditConsumer, err := auditStream.Consumer(ctx, o.NatsAuditConsumerName)
 	if err != nil {
-		return fmt.Errorf("failed to get consumer %s: %w", o.NatsDurableName, err)
+		return fmt.Errorf("failed to get consumer %s: %w", o.NatsAuditConsumerName, err)
 	}
 
 	// ── Re-index consumer (separate REINDEX_EVENTS stream) ──────────────────
@@ -232,9 +232,9 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 	}
 
 	// Consumer is declared in config/components/nats-config/nats-consumer.yaml
-	reindexJSConsumer, err := reindexStream.Consumer(ctx, o.NatsReindexDurableName)
+	reindexJSConsumer, err := reindexStream.Consumer(ctx, o.NatsReindexConsumerName)
 	if err != nil {
-		return fmt.Errorf("failed to get re-index consumer %s: %w", o.NatsReindexDurableName, err)
+		return fmt.Errorf("failed to get re-index consumer %s: %w", o.NatsReindexConsumerName, err)
 	}
 
 	// ── Meilisearch client ──────────────────────────────────────────────────

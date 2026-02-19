@@ -437,7 +437,8 @@ tasks:
           --nats-url="nats://127.0.0.1:4222" \
           --nats-subject="audit.>" \
           --nats-queue-group="search-indexer" \
-          --nats-durable-name="search-indexer" \
+          --nats-audit-consumer-name="search-indexer" \
+          --nats-reindex-consumer-name="search-reindexer" \
           --nats-stream-name="AUDIT_EVENTS" \
           --meilisearch-domain="http://127.0.0.1:7700"
     silent: true
