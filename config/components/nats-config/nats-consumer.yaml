@@ -14,4 +14,22 @@ spec:
   maxAckPending: 1000000
   # ReplayPolicy indicates that the consumer will replay messages from the stream
   replayPolicy: instant
-  ackWait: 30s
+  ackWait: 120s
+---
+apiVersion: jetstream.nats.io/v1beta2
+kind: Consumer
+metadata:
+  name: search-reindexer
+  namespace: search-system
+spec:
+  streamName: REINDEX_EVENTS
+  durableName: search-reindexer
+  deliverPolicy: all
+  ackPolicy: explicit
+  # The filter subject ensures we only get relevant events
+  filterSubject: reindex.>
+  # MaxAckPending controls flow control
+  maxAckPending: 1000000
+  # ReplayPolicy indicates that the consumer will replay messages from the stream
+  replayPolicy: instant
+  ackWait: 120s

@@ -317,6 +317,13 @@ func schema_pkg_apis_search_v1alpha1_ResourceIndexPolicyStatus(ref common.Refere
 							Format:      "",
 						},
 					},
+					"currentGeneration": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CurrentGeneration is the most recent generation of the policy that the controller has successfully reconciled and triggered re-indexing for. Re-indexing is triggered whenever generation != CurrentGeneration, which covers both the first reconciliation and any subsequent spec changes.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 			},
 		},

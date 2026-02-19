@@ -7,7 +7,7 @@ resources:
   - ../../base/apiserver
   - ../../base/resource-indexer
   # Controller manager with RBAC
-  - ../../base/controller-manager/overlays/core-control-plane
+  - ../controller-manager/core-control-plane
 
 # Include components for CI environment
 components:

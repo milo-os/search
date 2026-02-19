@@ -47,9 +47,10 @@ var upsertVerbs = map[string]bool{"create": true, "update": true, "patch": true}
 const deleteVerb = "delete"
 
 // Start starts the indexer consumer loop.
+// Note: the Batcher must be started separately by the caller (via batcher.Start)
+// before calling this method. This allows multiple Indexer instances to share a
+// single Batcher without starting its flush goroutine more than once.
 func (i *Indexer) Start(ctx context.Context) error {
-	// Start the batch flusher
-	i.batcher.Start(ctx)
 
 	// Consume messages
 	cons, err := i.consumer.Consume(func(msg jetstream.Msg) {

@@ -7,11 +7,15 @@ import (
 	"os"
 	"time"
 
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"go.miloapis.net/search/internal/indexer"
 	"go.miloapis.net/search/pkg/apis/search/install"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/dynamic"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -47,6 +51,10 @@ type ControllerManagerOptions struct {
 	MeilisearchChunkSize       int
 	MeilisearchTaskWaitTimeout time.Duration
 	MeilisearchHTTPTimeout     time.Duration
+
+	// NATS settings for publishing per-resource re-index messages.
+	NatsURL            string
+	NatsReindexSubject string
 }
 
 // NewControllerManagerOptions creates a new ControllerManagerOptions with default values
@@ -62,6 +70,8 @@ func NewControllerManagerOptions() *ControllerManagerOptions {
 		MeilisearchTaskWaitTimeout: 30 * time.Second,
 		MeilisearchHTTPTimeout:     60 * time.Second,
 		MeilisearchDomain:          "http://meilisearch.meilisearch-system.svc.cluster.local:7700",
+		NatsURL:                    "nats://nats.nats-system.svc.cluster.local:4222",
+		NatsReindexSubject:         "reindex.all",
 	}
 }
 
@@ -84,6 +94,9 @@ func (o *ControllerManagerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.DurationVar(&o.MeilisearchHTTPTimeout, "meilisearch-http-timeout", o.MeilisearchHTTPTimeout, "Timeout for HTTP requests to Meilisearch.")
 	fs.IntVar(&o.MeilisearchChunkSize, "meilisearch-chunk-size", o.MeilisearchChunkSize, "The number of documents to process in a single chunk.")
 
+	// NATS
+	fs.StringVar(&o.NatsURL, "nats-url", o.NatsURL, "The URL of the NATS server used to publish re-index messages.")
+	fs.StringVar(&o.NatsReindexSubject, "nats-reindex-subject", o.NatsReindexSubject, "The NATS subject to publish per-resource re-index messages to.")
 }
 
 // Validate validates the options
@@ -102,6 +115,10 @@ func (o *ControllerManagerOptions) Validate() error {
 
 	if os.Getenv("MEILISEARCH_API_KEY") == "" {
 		return fmt.Errorf("meilisearch-api-key must be set")
+	}
+
+	if o.NatsURL == "" {
+		return fmt.Errorf("nats-url must be set")
 	}
 
 	return nil
@@ -147,7 +164,9 @@ func Run(o *ControllerManagerOptions, ctx context.Context) error {
 		})
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	cfg := ctrl.GetConfigOrDie()
+
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: o.MetricsAddr, SecureServing: o.SecureMetrics, TLSOpts: tlsOpts},
 		HealthProbeBindAddress: o.ProbeAddr,
@@ -159,14 +178,12 @@ func Run(o *ControllerManagerOptions, ctx context.Context) error {
 		os.Exit(1)
 	}
 
-	// Register Webhook
 	celValidator, err := cel.NewValidator(o.MaxCELDepth)
 	if err != nil {
 		setupLog.Error(err, "unable to create CEL validator")
 		os.Exit(1)
 	}
 
-	// Initialize Meilisearch SDK
 	searchSDK, err := meilisearch.NewSDKClient(meilisearch.SDKConfig{
 		Domain:      o.MeilisearchDomain,
 		APIKey:      os.Getenv("MEILISEARCH_API_KEY"),
@@ -179,11 +196,38 @@ func Run(o *ControllerManagerOptions, ctx context.Context) error {
 		os.Exit(1)
 	}
 
+	// Dynamic client — used by the policy controller to list target resources.
+	dynamicClient, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		setupLog.Error(err, "unable to create dynamic client")
+		os.Exit(1)
+	}
+
+	// Connect to NATS and set up the re-index stream + publisher.
+	setupLog.Info("Connecting to NATS for re-index publishing", "url", o.NatsURL)
+	nc, err := nats.Connect(o.NatsURL)
+	if err != nil {
+		setupLog.Error(err, "unable to connect to NATS")
+		os.Exit(1)
+	}
+	defer nc.Close()
+
+	js, err := jetstream.New(nc)
+	if err != nil {
+		setupLog.Error(err, "unable to create JetStream context")
+		os.Exit(1)
+	}
+
+	reindexPub := indexer.NewReindexPublisher(js, o.NatsReindexSubject)
+
 	if err = (&policycontroller.ResourceIndexPolicyReconciler{
-		Client:       mgr.GetClient(),
-		Scheme:       mgr.GetScheme(),
-		CelValidator: celValidator,
-		SearchSDK:    searchSDK,
+		Client:           mgr.GetClient(),
+		Scheme:           mgr.GetScheme(),
+		CelValidator:     celValidator,
+		SearchSDK:        searchSDK,
+		DynamicClient:    dynamicClient,
+		RESTMapper:       mgr.GetRESTMapper(),
+		ReindexPublisher: reindexPub,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ResourceIndexPolicy")
 		os.Exit(1)

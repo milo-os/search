@@ -22,7 +22,6 @@
 - [Observability](#observability)
 - [Future Considerations](#future-considerations)
 
-
 ## Overview
 
 The Resource Indexer is a core component of the Search service responsible for
@@ -254,6 +253,59 @@ keys][meilisearch-primary-key] — reindexing the same resource overwrites the
 existing document.
 
 [meilisearch-primary-key]: https://www.meilisearch.com/docs/learn/core_concepts/primary_key
+
+## Initial Indexing and Re-indexing
+
+When a `ResourceIndexPolicy` is newly created (initial indexing) or its underlying specification changes (re-indexing), the platform must reconcile existing resources in the cluster to reflect the current policy definition. This asynchronous background task is handled collectively by the Policy Controller and the indexer's re-index consumer.
+
+1. **Policy Observation**: The policy controller monitors `ResourceIndexPolicy` resources. Upon creation or a specification update (detected by comparing the current spec's SHA-256 hash against the status generation), it triggers the re-indexing flow.
+2. **Resource Listing**: The controller discovers the appropriate GroupVersionKind (GVK) routing and fetches all corresponding cluster resources.
+3. **Event Publishing**: Instead of indexing directly, the controller constructs a synthetic re-index event for each resource and publishes it to a dedicated NATS JetStream `reindex-stream`. To prevent thrashing and duplicate processing during rapid policy updates, messages are uniquely identified using NATS message deduplication with the format `reindex/<policyName>/<uid>`.
+4. **Ingestion & Transformation**: A dedicated `ReindexConsumer` running within the indexer application continuously consumes these synthetic events. It validates each resource against active index policies evaluating CEL filters.
+5. **Persistence**:
+    - If a resource **matches** the policy, it gets transformed into a document and queued for an upsert.
+    - If it **does not match** (e.g., failed CEL condition after a policy update), it is proactively queued for deletion to ensure it's wiped from the index.
+    - Persisting behaves identically to standard audit events, ensuring batching, throughput control, and at-least-once delivery guarantees.
+
+```mermaid
+sequenceDiagram
+    participant API as Kubernetes API
+    participant Controller as Policy Controller
+    participant JS as NATS (reindex-stream)
+    participant ReindexConsumer as Re-index Consumer
+    participant Meili as Meilisearch
+
+    rect rgb(240, 248, 255)
+        note right of API: Policy Creation or Update
+        Controller->>API: Watch ResourceIndexPolicy
+        API-->>Controller: Policy Created/Updated
+        Controller->>Controller: Detect spec hash change
+        
+        Controller->>API: List target resources (GVK)
+        API-->>Controller: Resource List
+        
+        loop For each resource
+            Controller->>JS: Publish re-index event (ID: reindex/policy/uid)
+        end
+        Controller->>API: Update Status (Reindexing=In Progress)
+    end
+    
+    rect rgb(245, 245, 245)
+        note right of JS: Background Re-indexing
+        JS->>ReindexConsumer: Deliver re-index event
+        ReindexConsumer->>ReindexConsumer: Evaluate against active policies
+        
+        alt Matches Policy
+            ReindexConsumer->>ReindexConsumer: Transform to document
+            ReindexConsumer->>Meili: Queue Upsert
+        else Does Not Match Policy
+            ReindexConsumer->>Meili: Queue Delete
+        end
+        
+        Meili-->>ReindexConsumer: Success
+        ReindexConsumer->>JS: Ack event
+    end
+```
 
 ## Bootstrap Process
 

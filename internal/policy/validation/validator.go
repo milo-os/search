@@ -12,8 +12,28 @@ import (
 // It checks:
 // 1. CEL expressions in conditions
 // 2. JSONPath syntax in fields
-func ValidateResourceIndexPolicy(policy *searchv1alpha1.ResourceIndexPolicy, celValidator *cel.Validator) field.ErrorList {
+// 3. Uniqueness of TargetResource across existing policies (if provided)
+func ValidateResourceIndexPolicy(
+	policy *searchv1alpha1.ResourceIndexPolicy,
+	otherPolicies []*searchv1alpha1.ResourceIndexPolicy,
+	celValidator *cel.Validator,
+) field.ErrorList {
 	var allErrs field.ErrorList
+
+	// Validate TargetResource uniqueness
+	for _, other := range otherPolicies {
+		if other.Name == policy.Name {
+			continue
+		}
+		if other.Spec.TargetResource.Group == policy.Spec.TargetResource.Group &&
+			other.Spec.TargetResource.Version == policy.Spec.TargetResource.Version &&
+			other.Spec.TargetResource.Kind == policy.Spec.TargetResource.Kind {
+			allErrs = append(allErrs, field.Duplicate(
+				field.NewPath("spec", "targetResource"),
+				"TargetResource is already indexed by another policy: "+other.Name,
+			))
+		}
+	}
 
 	// Validate CEL expressions in conditions
 	for i, condition := range policy.Spec.Conditions {

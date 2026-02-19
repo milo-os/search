@@ -22,38 +22,36 @@ import (
 // ResourceIndexerOptions holds the configuration for the resource indexer.
 type ResourceIndexerOptions struct {
 	// NATS connection and consumer settings
-	NatsURL         string
-	NatsSubject     string
-	NatsQueueGroup  string
-	NatsDurableName string
-	NatsStreamName  string
-	NatsAckWait     time.Duration
-	NatsMaxInFlight int
+	NatsURL               string
+	NatsAuditConsumerName string
+	NatsStreamName        string
+
+	// NATS re-index consumer settings (separate REINDEX_EVENTS stream)
+	NatsReindexStream       string
+	NatsReindexConsumerName string
 
 	// Meilisearch connection and timeout settings
-	MeilisearchTaskWaitTimeout time.Duration // Timeout for waiting for Meilisearch tasks to complete.
-	MeilisearchHTTPTimeout     time.Duration // Timeout for HTTP requests to Meilisearch.
-	MeilisearchDomain          string        // Domain of the Meilisearch instance.
-	MeilisearchChunkSize       int           // The number of documents to process in a single chunk.
-	MeilisearchMaxRetries      int           // The maximum number of retries for transient Meilisearch errors.
-	MeilisearchRetryDelay      time.Duration // The base delay between Meilisearch retries.
+	MeilisearchTaskWaitTimeout time.Duration
+	MeilisearchHTTPTimeout     time.Duration
+	MeilisearchDomain          string
+	MeilisearchChunkSize       int
+	MeilisearchMaxRetries      int
+	MeilisearchRetryDelay      time.Duration
 
-	// Audit events batching and throughput tuning
-	BatchSize                 int           // The maximum number of documents to process in a single batch.
-	FlushInterval             time.Duration // The time to wait before flushing a batch.
-	BatchMaxConcurrentUploads int           // The maximum number of concurrent uploads to Meilisearch.
+	// Batching and throughput tuning
+	BatchSize                 int
+	FlushInterval             time.Duration
+	BatchMaxConcurrentUploads int
 }
 
 // NewResourceIndexerOptions creates a new ResourceIndexerOptions with default values.
 func NewResourceIndexerOptions() *ResourceIndexerOptions {
 	return &ResourceIndexerOptions{
 		NatsURL:                    "nats://nats.nats-system.svc.cluster.local:4222",
-		NatsSubject:                "audit.>",
-		NatsQueueGroup:             "search-indexer",
-		NatsDurableName:            "search-indexer",
+		NatsAuditConsumerName:      "search-indexer",
 		NatsStreamName:             "AUDIT_EVENTS",
-		NatsAckWait:                120 * time.Second,
-		NatsMaxInFlight:            10000,
+		NatsReindexStream:          "REINDEX_EVENTS",
+		NatsReindexConsumerName:    "search-reindexer",
 		MeilisearchTaskWaitTimeout: 4 * time.Second,
 		MeilisearchHTTPTimeout:     60 * time.Second,
 		MeilisearchDomain:          "http://meilisearch.meilisearch-system.svc.cluster.local:7700",
@@ -69,12 +67,12 @@ func NewResourceIndexerOptions() *ResourceIndexerOptions {
 // AddFlags adds the flags for the resource indexer to the command.
 func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.NatsURL, "nats-url", o.NatsURL, "The URL of the NATS server.")
-	fs.StringVar(&o.NatsSubject, "nats-subject", o.NatsSubject, "The NATS subject to subscribe to.")
-	fs.StringVar(&o.NatsQueueGroup, "nats-queue-group", o.NatsQueueGroup, "The NATS queue group for load balancing.")
-	fs.StringVar(&o.NatsDurableName, "nats-durable-name", o.NatsDurableName, "The durable name for the JetStream consumer.")
-	fs.StringVar(&o.NatsStreamName, "nats-stream-name", o.NatsStreamName, "The name of the JetStream stream.")
-	fs.DurationVar(&o.NatsAckWait, "nats-ack-wait", o.NatsAckWait, "The time to wait for an acknowledgement.")
-	fs.IntVar(&o.NatsMaxInFlight, "nats-max-in-flight", o.NatsMaxInFlight, "The maximum number of in-flight messages.")
+	fs.StringVar(&o.NatsAuditConsumerName, "nats-audit-consumer-name", o.NatsAuditConsumerName, "The name of the audit-events JetStream consumer (must match the manifest).")
+	fs.StringVar(&o.NatsStreamName, "nats-stream-name", o.NatsStreamName, "The name of the audit-events JetStream stream.")
+
+	fs.StringVar(&o.NatsReindexStream, "nats-reindex-stream", o.NatsReindexStream, "The JetStream stream name for re-index messages.")
+	fs.StringVar(&o.NatsReindexConsumerName, "nats-reindex-consumer-name", o.NatsReindexConsumerName, "The name of the re-index JetStream consumer (must match the manifest).")
+
 	fs.StringVar(&o.MeilisearchDomain, "meilisearch-domain", o.MeilisearchDomain, "Domain of the Meilisearch instance.")
 	fs.DurationVar(&o.MeilisearchTaskWaitTimeout, "meilisearch-task-wait-timeout", o.MeilisearchTaskWaitTimeout, "Timeout for waiting for Meilisearch tasks to complete.")
 	fs.DurationVar(&o.MeilisearchHTTPTimeout, "meilisearch-http-timeout", o.MeilisearchHTTPTimeout, "Timeout for HTTP requests to Meilisearch.")
@@ -91,23 +89,17 @@ func (o *ResourceIndexerOptions) Validate() error {
 	if o.NatsURL == "" {
 		return fmt.Errorf("nats-url must be set")
 	}
-	if o.NatsSubject == "" {
-		return fmt.Errorf("nats-subject must be set")
-	}
-	if o.NatsQueueGroup == "" {
-		return fmt.Errorf("nats-queue-group must be set")
-	}
-	if o.NatsDurableName == "" {
-		return fmt.Errorf("nats-durable-name must be set")
+	if o.NatsAuditConsumerName == "" {
+		return fmt.Errorf("nats-consummer-name must be set")
 	}
 	if o.NatsStreamName == "" {
 		return fmt.Errorf("nats-stream-name must be set")
 	}
-	if o.NatsAckWait == 0 {
-		return fmt.Errorf("nats-ack-wait must be set")
+	if o.NatsReindexStream == "" {
+		return fmt.Errorf("nats-reindex-stream must be set")
 	}
-	if o.NatsMaxInFlight < 1 {
-		return fmt.Errorf("nats-max-in-flight must be greater than 0")
+	if o.NatsReindexConsumerName == "" {
+		return fmt.Errorf("nats-reindex-consumer-name must be set")
 	}
 	if o.MeilisearchDomain == "" {
 		return fmt.Errorf("meilisearch-domain must be set")
@@ -186,14 +178,25 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 	}
 
 	// Create and start the policy cache
-	policyCache, err := indexer.NewPolicyCache(k8sCache)
+	indexPolicyCache, err := indexer.NewPolicyCache(k8sCache, true)
+	if err != nil {
+		return fmt.Errorf("failed to create policy cache: %w", err)
+	}
+
+	reindexPolicyCache, err := indexer.NewPolicyCache(k8sCache, false)
 	if err != nil {
 		return fmt.Errorf("failed to create policy cache: %w", err)
 	}
 
 	go func() {
-		if err := policyCache.Start(ctx); err != nil {
-			klog.Errorf("Policy cache stopped: %v", err)
+		if err := indexPolicyCache.Start(ctx); err != nil {
+			klog.Errorf("Index Policy cache stopped: %v", err)
+		}
+	}()
+
+	go func() {
+		if err := reindexPolicyCache.Start(ctx); err != nil {
+			klog.Errorf("Reindex Policy cache stopped: %v", err)
 		}
 	}()
 
@@ -210,22 +213,31 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 		return fmt.Errorf("failed to create JetStream context: %w", err)
 	}
 
-	stream, err := js.Stream(ctx, o.NatsStreamName)
+	auditStream, err := js.Stream(ctx, o.NatsStreamName)
 	if err != nil {
 		return fmt.Errorf("failed to get stream %s: %w", o.NatsStreamName, err)
 	}
 
-	consumer, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
-		Durable:       o.NatsDurableName,
-		FilterSubject: o.NatsSubject,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		MaxAckPending: o.NatsMaxInFlight,
-		AckWait:       o.NatsAckWait,
-	})
+	// Consumer is declared in config/components/nats-config/nats-consumer.yaml
+	auditConsumer, err := auditStream.Consumer(ctx, o.NatsAuditConsumerName)
 	if err != nil {
-		return fmt.Errorf("failed to get/create consumer %s: %w", o.NatsDurableName, err)
+		return fmt.Errorf("failed to get consumer %s: %w", o.NatsAuditConsumerName, err)
 	}
 
+	// ── Re-index consumer (separate REINDEX_EVENTS stream) ──────────────────
+	// The stream is declared in config/components/nats-streams/reindex-stream.yaml
+	reindexStream, err := js.Stream(ctx, o.NatsReindexStream)
+	if err != nil {
+		return fmt.Errorf("failed to get re-index stream %s: %w", o.NatsReindexStream, err)
+	}
+
+	// Consumer is declared in config/components/nats-config/nats-consumer.yaml
+	reindexJSConsumer, err := reindexStream.Consumer(ctx, o.NatsReindexConsumerName)
+	if err != nil {
+		return fmt.Errorf("failed to get re-index consumer %s: %w", o.NatsReindexConsumerName, err)
+	}
+
+	// ── Meilisearch client ──────────────────────────────────────────────────
 	searchClient, err := meilisearch.NewSDKClient(meilisearch.SDKConfig{
 		Domain:      o.MeilisearchDomain,
 		APIKey:      os.Getenv("MEILISEARCH_API_KEY"),
@@ -245,9 +257,46 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 		MaxConcurrentUploads: o.BatchMaxConcurrentUploads,
 	}
 
-	batcher := indexer.NewBatcher(searchClient, batchConfig)
-	idx := indexer.NewIndexer(consumer, policyCache, batcher)
+	// Create separate batchers for audit events and re-indexing events
+	// so they don't block each other and can be tuned independently if needed.
+	auditBatcher := indexer.NewBatcher(searchClient, batchConfig)
+	reindexBatcher := indexer.NewBatcher(searchClient, batchConfig)
 
-	klog.Info("Starting indexer...")
-	return idx.Start(ctx)
+	// Start both batchers
+	auditBatcher.Start(ctx)
+	reindexBatcher.Start(ctx)
+
+	auditIdx := indexer.NewIndexer(auditConsumer, indexPolicyCache, auditBatcher)
+	reindexIdx := indexer.NewReindexConsumer(reindexJSConsumer, reindexPolicyCache, reindexBatcher)
+
+	klog.Info("Starting audit indexer and re-index consumer...")
+
+	consumerCtx, cancelConsumers := context.WithCancel(ctx)
+	defer cancelConsumers()
+
+	errCh := make(chan error, 2)
+
+	go func() {
+		if err := auditIdx.Start(consumerCtx); err != nil {
+			errCh <- fmt.Errorf("audit indexer: %w", err)
+		} else {
+			errCh <- nil
+		}
+	}()
+
+	go func() {
+		if err := reindexIdx.Start(consumerCtx); err != nil {
+			errCh <- fmt.Errorf("reindex consumer: %w", err)
+		} else {
+			errCh <- nil
+		}
+	}()
+
+	select {
+	case err := <-errCh:
+		cancelConsumers()
+		return err
+	case <-ctx.Done():
+		return nil
+	}
 }

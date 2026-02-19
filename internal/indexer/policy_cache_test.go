@@ -14,13 +14,14 @@ import (
 
 // newTestPolicyCache creates a PolicyCache with a real CEL env but no backing
 // informer cache, suitable for unit-testing upsertPolicy / deletePolicy directly.
-func newTestPolicyCache(t *testing.T) *PolicyCache {
+func newTestPolicyCache(t *testing.T, requireReady bool) *PolicyCache {
 	t.Helper()
 	env, err := internalcel.NewEnv()
 	require.NoError(t, err)
 	return &PolicyCache{
-		policies: make(map[string]*policyevaluation.CachedPolicy),
-		celEnv:   env,
+		policies:              make(map[string]*policyevaluation.CachedPolicy),
+		celEnv:                env,
+		requireReadyCondition: requireReady,
 	}
 }
 
@@ -138,7 +139,8 @@ func TestPolicyCache_UpsertPolicy(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cache := newTestPolicyCache(t)
+			// Tests by default use strict ready checking as that's the standard behavior.
+			cache := newTestPolicyCache(t, true)
 
 			// Simulate the informer Add event for each policy.
 			for i := range tt.policies {
@@ -163,7 +165,7 @@ func TestPolicyCache_UpsertPolicy(t *testing.T) {
 }
 
 func TestPolicyCache_DeletePolicy(t *testing.T) {
-	c := newTestPolicyCache(t)
+	c := newTestPolicyCache(t, true)
 
 	policy := &v1alpha1.ResourceIndexPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "policy-1"},
@@ -188,7 +190,7 @@ func TestPolicyCache_DeletePolicy(t *testing.T) {
 }
 
 func TestPolicyCache_UpsertPolicy_NotReady_RemovesExisting(t *testing.T) {
-	c := newTestPolicyCache(t)
+	c := newTestPolicyCache(t, true)
 
 	policy := &v1alpha1.ResourceIndexPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "policy-1"},

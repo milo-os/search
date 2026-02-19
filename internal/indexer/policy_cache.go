@@ -23,12 +23,18 @@ type PolicyCache struct {
 	policies map[string]*policyevaluation.CachedPolicy
 	celEnv   *cel.Env
 	cache    runtimecache.Cache
+
+	// requireReadyCondition, when true, ensures that only policies with a "Ready"
+	// condition set to "True" are cached. This is mandatory for the primary
+	// indexer to ensure it only processes resources for fully initialized policies.
+	requireReadyCondition bool
 }
 
-// NewPolicyCache creates a new PolicyCache backed by the given controller-runtime
-// cache. The cache must be started (via Start) before policies are available.
-func NewPolicyCache(c runtimecache.Cache) (*PolicyCache, error) {
-	klog.Info("Creating policy cache")
+// NewPolicyCache creates a new PolicyCache backed by the given controller-runtime cache.
+// The requireReadyCondition parameter determines if the cache should strictly enforce
+// the "Ready" status condition on policies before caching them.
+func NewPolicyCache(c runtimecache.Cache, requireReadyCondition bool) (*PolicyCache, error) {
+	klog.Info("Initializing policy cache environment")
 	env, err := internalcel.NewEnv()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create CEL env: %w", err)
@@ -37,9 +43,10 @@ func NewPolicyCache(c runtimecache.Cache) (*PolicyCache, error) {
 	klog.Info("Policy cache created")
 
 	return &PolicyCache{
-		policies: make(map[string]*policyevaluation.CachedPolicy),
-		celEnv:   env,
-		cache:    c,
+		policies:              make(map[string]*policyevaluation.CachedPolicy),
+		celEnv:                env,
+		cache:                 c,
+		requireReadyCondition: requireReadyCondition,
 	}, nil
 }
 
@@ -97,10 +104,15 @@ func (c *PolicyCache) Start(ctx context.Context) error {
 func (c *PolicyCache) upsertPolicy(p *v1alpha1.ResourceIndexPolicy) {
 	key := p.Name
 
-	if !meta.IsStatusConditionTrue(p.Status.Conditions, "Ready") {
-		klog.Infof("Policy %s is not Ready, removing from cache if present", key)
-		c.deletePolicy(key)
-		return
+	// If strict ready checking is enabled, we only cache policies that are fully Ready.
+	// This prevents the primary indexer from processing events for policies that are
+	// still being initialized (e.g. index creation or initial re-indexing).
+	if c.requireReadyCondition {
+		if !meta.IsStatusConditionTrue(p.Status.Conditions, "Ready") {
+			klog.Infof("Policy %s is not yet Ready; skipping cache", key)
+			c.deletePolicy(key)
+			return
+		}
 	}
 
 	cached := &policyevaluation.CachedPolicy{
