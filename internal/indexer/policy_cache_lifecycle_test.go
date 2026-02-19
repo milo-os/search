@@ -3,8 +3,6 @@ package indexer
 import (
 	"testing"
 
-	internalcel "go.miloapis.net/search/internal/cel"
-	policyevaluation "go.miloapis.net/search/internal/policy/evaluation"
 	"go.miloapis.net/search/pkg/apis/search/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	toolscache "k8s.io/client-go/tools/cache"
@@ -18,13 +16,8 @@ import (
 // policy map. We exercise the handlers directly to avoid needing a live
 // API server or envtest setup.
 func TestPolicyCache_EventHandlers(t *testing.T) {
-	env, err := internalcel.NewEnv()
+	c, err := NewPolicyCache(nil, true)
 	require.NoError(t, err)
-
-	c := &PolicyCache{
-		policies: make(map[string]*policyevaluation.CachedPolicy),
-		celEnv:   env,
-	}
 
 	readyPolicy := func(name string) *v1alpha1.ResourceIndexPolicy {
 		return &v1alpha1.ResourceIndexPolicy{
