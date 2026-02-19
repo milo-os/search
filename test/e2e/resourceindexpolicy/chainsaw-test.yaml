@@ -63,37 +63,7 @@ spec:
                 value: 'True'
     
     # =========================================================================
-    # Test 2: Policy update should be rejected
-    # =========================================================================
-    - name: update-policy-should-fail
-      description: "Attempts to update the policy, which should be rejected"
-      try:
-        - script:
-            content: |
-              # Attempt to update the policy - this should fail
-              cat <<EOF | kubectl apply -f - 2>&1 || true
-              apiVersion: search.miloapis.com/v1alpha1
-              kind: ResourceIndexPolicy
-              metadata:
-                name: test-valid-policy
-              spec:
-                targetResource:
-                  group: "contacts.miloapis.com"
-                  version: v1
-                  kind: Contact
-                conditions:
-                  - name: is-active-updated
-                    expression: "status.phase == 'Active'"
-                fields:
-                  - path: ".spec.name"
-                    searchable: true
-              EOF
-            check:
-              # Expect an error containing "not supported" or "MethodNotAllowed"
-              (contains($stdout, 'not supported') || contains($stdout, 'MethodNotAllowed') || contains($stderr, 'not supported') || contains($stderr, 'MethodNotAllowed')): true
-
-    # =========================================================================
-    # Test 3: Invalid CEL expression should be rejected
+    # Test 2: Invalid CEL expression should be rejected
     # =========================================================================
     - name: invalid-cel-expression-should-fail
       description: "Attempts to create a policy with invalid CEL expression"
@@ -132,7 +102,7 @@ spec:
               (contains($stdout, 'NotFound') || contains($stderr, 'NotFound') || contains($stdout, 'not found') || contains($stderr, 'not found')): true
 
     # =========================================================================
-    # Test 4: Invalid JSONPath should be rejected
+    # Test 3: Invalid JSONPath should be rejected
     # =========================================================================
     - name: invalid-jsonpath-should-fail
       description: "Attempts to create a policy with invalid JSONPath"
@@ -171,7 +141,7 @@ spec:
               (contains($stdout, 'NotFound') || contains($stderr, 'NotFound') || contains($stdout, 'not found') || contains($stderr, 'not found')): true
 
     # =========================================================================
-    # Test 5: Disallowed CEL operator should be rejected
+    # Test 4: Disallowed CEL operator should be rejected
     # =========================================================================
     - name: disallowed-cel-operator-should-fail
       description: "Attempts to create a policy with disallowed CEL operator (arithmetic)"

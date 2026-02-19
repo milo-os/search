@@ -26,6 +26,10 @@ func NewREST(scheme *runtime.Scheme, optsGetter generic.RESTOptionsGetter) (*Res
 
 		TableConvertor: rest.NewDefaultTableConvertor(searchv1alpha1.Resource("resourceindexpolicies")),
 	}
+
+	// Inject the store as a lister into the strategy so it can perform
+	// cross-resource uniqueness validation.
+	strategy.SetLister(store)
 	options := &generic.StoreOptions{RESTOptions: optsGetter}
 	if err := store.CompleteWithOptions(options); err != nil {
 		return nil, err
