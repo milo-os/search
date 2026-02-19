@@ -115,6 +115,13 @@ type ResourceIndexPolicyStatus struct {
 	// IndexName is the name of the search index created for this policy.
 	// +optional
 	IndexName string `json:"indexName,omitempty"`
+
+	// CurrentGeneration is the most recent generation of the policy that the
+	// controller has successfully reconciled and triggered re-indexing for.
+	// Re-indexing is triggered whenever generation != CurrentGeneration, which
+	// covers both the first reconciliation and any subsequent spec changes.
+	// +optional
+	CurrentGeneration string `json:"currentGeneration,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
