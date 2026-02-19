@@ -4,7 +4,7 @@ kind: Kustomization
 resources:
 - apiserver
 - resource-indexer
-- controller-manager/base
+- controller-manager
 
 images:
 - name: ghcr.io/datum-cloud/search
