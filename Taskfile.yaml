@@ -377,6 +377,7 @@ tasks:
         echo "  Etcd:              task test-infra:kubectl -- logs -l app.kubernetes.io/name=etcd -n etcd-system -f"
         echo "  Search API Server:     task test-infra:kubectl -- logs -l app.kubernetes.io/name=search-apiserver -n search-system -f"
         echo "  Search Controller:     task test-infra:kubectl -- logs -l app.kubernetes.io/name=search-controller-manager -n search-system -f"
+        echo "  Search Indexer:     task test-infra:kubectl -- logs -l app.kubernetes.io/name=resource-indexer -n search-system -f"
 
   dev:generate-webhook-certs:
     desc: Generate all certificates for webhook server
@@ -661,7 +662,6 @@ tasks:
     deps:
       - dev:build
       - dev:load
-      - dev:deploy
     cmds:
       - |
         set -e
@@ -672,13 +672,16 @@ tasks:
         # Restart the deployment to pick up new image
         task test-infra:kubectl -- rollout restart deployment/search-apiserver -n search-system
         task test-infra:kubectl -- rollout restart deployment/search-controller-manager -n search-system
+        task test-infra:kubectl -- rollout restart deployment/resource-indexer -n search-system
 
         # Wait for rollout to complete
         echo "Waiting for rollout to complete..."
+        task test-infra:kubectl -- rollout status deployment/search-apiserver -n search-system --timeout=1000s
         task test-infra:kubectl -- rollout status deployment/search-controller-manager -n search-system --timeout=1000s
+        task test-infra:kubectl -- rollout status deployment/resource-indexer -n search-system --timeout=1000s
 
         echo "✅ Redeployment complete!"
-        echo "Check logs with: task test-infra:kubectl -- logs -n search-system -l app.kubernetes.io/name=search-controller-manager"
+        echo "Check pods with: task test-infra:kubectl -- get pods -n search-system"
 
   dev:nats-queue:
     desc: View the NATS queue for the indexer

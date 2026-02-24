@@ -188,17 +188,27 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 		return fmt.Errorf("failed to create policy cache: %w", err)
 	}
 
+	// Register handlers for both caches. They share the same underlying informer.
+	if err := indexPolicyCache.RegisterHandlers(ctx); err != nil {
+		return fmt.Errorf("failed to register index policy handlers: %w", err)
+	}
+	if err := reindexPolicyCache.RegisterHandlers(ctx); err != nil {
+		return fmt.Errorf("failed to register reindex policy handlers: %w", err)
+	}
+
+	// Start the shared cache and wait for it to be synced.
 	go func() {
-		if err := indexPolicyCache.Start(ctx); err != nil {
-			klog.Errorf("Index Policy cache stopped: %v", err)
+		klog.Info("Starting shared Kubernetes cache...")
+		if err := k8sCache.Start(ctx); err != nil {
+			klog.Fatalf("Kubernetes cache stopped with error: %v", err)
 		}
 	}()
 
-	go func() {
-		if err := reindexPolicyCache.Start(ctx); err != nil {
-			klog.Errorf("Reindex Policy cache stopped: %v", err)
-		}
-	}()
+	klog.Info("Waiting for cache to sync...")
+	if !k8sCache.WaitForCacheSync(ctx) {
+		return fmt.Errorf("failed to sync Kubernetes cache")
+	}
+	klog.Info("Cache synced successfully")
 
 	// Connect to NATS
 	klog.Infof("Connecting to NATS at %s...", o.NatsURL)

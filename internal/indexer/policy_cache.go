@@ -53,9 +53,9 @@ func NewPolicyCache(c runtimecache.Cache, requireReadyCondition bool) (*PolicyCa
 	}, nil
 }
 
-// Start registers informer event handlers for ResourceIndexPolicy objects
-func (c *PolicyCache) Start(ctx context.Context) error {
-	klog.Info("Starting policy cache informer")
+// RegisterHandlers registers informer event handlers for ResourceIndexPolicy objects.
+func (c *PolicyCache) RegisterHandlers(ctx context.Context) error {
+	klog.Info("Registering policy cache informer handlers")
 
 	informer, err := c.cache.GetInformer(ctx, &v1alpha1.ResourceIndexPolicy{})
 	if err != nil {
@@ -95,10 +95,6 @@ func (c *PolicyCache) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to add event handler to ResourceIndexPolicy informer: %w", err)
 	}
 
-	// Start runs all informers and blocks until ctx is cancelled.
-	if err := c.cache.Start(ctx); err != nil {
-		return fmt.Errorf("policy cache informer stopped with error: %w", err)
-	}
 	return nil
 }
 
@@ -112,7 +108,7 @@ func (c *PolicyCache) upsertPolicy(p *v1alpha1.ResourceIndexPolicy) {
 	// still being initialized (e.g. index creation or initial re-indexing).
 	if c.requireReadyCondition {
 		if !meta.IsStatusConditionTrue(p.Status.Conditions, "Ready") {
-			klog.Infof("Policy %s is not yet Ready; skipping cache", key)
+			klog.Infof("Policy %s is not yet Ready (Ready=True condition missing); skipping cache", key)
 			c.deletePolicy(key)
 			return
 		}
