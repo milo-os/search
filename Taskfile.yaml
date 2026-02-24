@@ -122,6 +122,7 @@ tasks:
       # Generate RBAC rules for the controllers.
       - echo "Generating RBAC rules for the controllers..."
       - "\"{{.TOOL_DIR}}/controller-gen\" rbac:roleName=milo-controller-manager paths=\"./internal/controllers/...\" output:dir=\"./config/overlays/controller-manager/core-control-plane/rbac\""
+      - "\"{{.TOOL_DIR}}/controller-gen\" rbac:roleName=milo-resource-indexer paths=\"./internal/indexer/...\" output:dir=\"./config/overlays/resource-indexer/core-control-plane/rbac\""
       - task: generate:openapi
     silent: true
 

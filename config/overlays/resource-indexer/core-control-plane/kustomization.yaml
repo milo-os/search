@@ -1,0 +1,14 @@
+# This overlay is used to install the resource indexer into the core control
+# plane.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  # Install the base resource indexer resources.
+  - ../../../base/resource-indexer
+  # Install the RBAC resources for the resource indexer that are specific to
+  # the core control plane.
+  - rbac
+
+patches:
+- path: patches/deployment.yaml

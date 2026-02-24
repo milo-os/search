@@ -2,7 +2,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: resource-indexer
-  namespace: search-system
   labels:
     app.kubernetes.io/name: resource-indexer
     app.kubernetes.io/component: indexer

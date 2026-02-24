@@ -15,6 +15,9 @@ import (
 	runtimecache "sigs.k8s.io/controller-runtime/pkg/cache"
 )
 
+// +kubebuilder:rbac:groups=search.miloapis.com,resources=resourceindexpolicies,verbs=get;list;watch
+// +kubebuilder:rbac:groups=search.miloapis.com,resources=resourceindexpolicies/status,verbs=get;list;watch
+
 // PolicyCache maintains a thread-safe cache of compiled ResourceIndexPolicies.
 // It uses a controller-runtime informer to watch the API server for changes
 // via a watch stream, keeping policies in-sync without polling.
