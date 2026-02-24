@@ -409,7 +409,9 @@ tasks:
           --metrics-bind-address=:8085 \
           --health-probe-bind-address=:8086 \
           --leader-elect=false \
-          --meilisearch-domain="http://127.0.0.1:7700"
+          --meilisearch-domain="http://127.0.0.1:7700" \
+          --nats-url="nats://127.0.0.1:4222"
+          
     silent: true
 
   dev:run-indexer:
@@ -422,21 +424,10 @@ tasks:
         # Trap to kill background processes (port-forward) on exit
         trap 'kill $(jobs -p)' EXIT
 
-        echo "🚀 Starting NATS port-forward in background..."
-        task dev:pf-nats > /dev/null 2>&1 &
-
-        echo "🚀 Starting Meilisearch port-forward in background..."
-        task dev:pf-meilisearch > /dev/null 2>&1 &
-        
-        echo "Waiting for port-forward to be ready..."
-        sleep 5
-
         echo "🚀 Running indexer against local NATS..."
         MEILISEARCH_API_KEY=search-master-key \
         go run ./cmd/search indexer \
           --nats-url="nats://127.0.0.1:4222" \
-          --nats-subject="audit.>" \
-          --nats-queue-group="search-indexer" \
           --nats-audit-consumer-name="search-indexer" \
           --nats-reindex-consumer-name="search-reindexer" \
           --nats-stream-name="AUDIT_EVENTS" \
@@ -471,6 +462,15 @@ tasks:
     cmds:
       - echo "Port forwarding Etcd to localhost:2379..."
       - task test-infra:kubectl -- port-forward -n etcd-system svc/etcd 2379:2379
+
+  dev:pf-all:
+    desc: Port forward all dependencies for local development
+    cmds:
+      - |
+        task dev:pf-meilisearch &
+        task dev:pf-nats &
+        task dev:pf-etcd &
+        wait
 
   dev:run-apiserver:
     desc: Run the API server locally (requires dev:pf-etcd running)
@@ -683,3 +683,4 @@ tasks:
     desc: View the NATS queue for the indexer
     cmds:
       - task test-infra:kubectl -- exec -n nats-system $(task test-infra:kubectl -- get pods -n nats-system -l app.kubernetes.io/component=nats-box -o jsonpath="{.items[0].metadata.name}") -- nats consumer info AUDIT_EVENTS search-indexer
+      - task test-infra:kubectl -- exec -n nats-system $(task test-infra:kubectl -- get pods -n nats-system -l app.kubernetes.io/component=nats-box -o jsonpath="{.items[0].metadata.name}") -- nats consumer info REINDEX_EVENTS search-reindexer
