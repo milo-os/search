@@ -36,6 +36,11 @@ type SearchQuery struct {
 //
 // The actual fields will depend on the specific search implementation.
 type SearchQuerySpec struct {
+	// TargetResources limits the search to specific resource types.
+	// +optional
+	// +listType=atomic
+	TargetResources []TargetResource `json:"targetResources,omitempty"`
+
 	// Query is the search query string.
 	//
 	// +required
@@ -58,17 +63,27 @@ type SearchQuerySpec struct {
 
 // SearchQueryStatus contains the query results and pagination state.
 type SearchQueryStatus struct {
-	// Results contains the search results as an array of Kubernetes resources.
+	// Results contains the search results.
 	//
 	// +optional
-	Results []runtime.RawExtension `json:"results,omitempty"`
+	// +listType=atomic
+	Results []SearchResult `json:"results,omitempty"`
 
 	// Continue is the pagination cursor.
 	// Non-empty means more results are available - copy this to spec.continue for the next page.
 	// Empty means you have all results.
-	//
 	// +optional
 	Continue string `json:"continue,omitempty"`
+}
+
+// SearchResult represents a single search result with its relevance score.
+type SearchResult struct {
+	// Resource contains the actual Kubernetes resource.
+	Resource runtime.RawExtension `json:"resource"`
+
+	// RelevanceScore is the relevance score from Meilisearch.
+	// +optional
+	RelevanceScore float64 `json:"relevanceScore,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

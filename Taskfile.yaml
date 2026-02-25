@@ -497,6 +497,7 @@ tasks:
       - |
         # Use KUBECONFIG if set, otherwise fallback to default
         KCFG=${KUBECONFIG:-$HOME/.kube/config}
+        export MEILISEARCH_API_KEY=search-master-key
         go run ./cmd/search serve \
           --etcd-servers http://127.0.0.1:2379 \
           --secure-port 9443 \
@@ -506,7 +507,9 @@ tasks:
           --authorization-kubeconfig="$KCFG" \
           --kubeconfig="$KCFG" \
           --client-ca-file="{{.CERTS_DIR}}/kind-ca.crt" \
-          --authorization-always-allow-paths=/healthz,/readyz,/livez,/openapi,/openapi/v2,/openapi/v3,/apis,/api
+          --authorization-always-allow-paths=/healthz,/readyz,/livez,/openapi,/openapi/v2,/openapi/v3,/apis,/api \
+          --meilisearch-domain="http://127.0.0.1:7700" \
+          
 
   dev:undeploy:
     desc: Undeploy Search server from test-infra cluster

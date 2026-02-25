@@ -1,0 +1,12 @@
+apiVersion: search.miloapis.com/v1alpha1
+kind: SearchQuery
+metadata:
+  name: configmap-search-sample
+spec:
+  targetResources:
+    - group: ""
+      version: v1
+      kind: ConfigMap
+  query: "" # Empty query returns everything, or put a specific string
+  limit: 20
+  offset: 0

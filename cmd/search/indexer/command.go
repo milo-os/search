@@ -17,6 +17,7 @@ import (
 	"k8s.io/klog/v2"
 	runtimecache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // ResourceIndexerOptions holds the configuration for the resource indexer.
@@ -159,6 +160,7 @@ func NewIndexerCommand() *cobra.Command {
 
 // Run starts the indexer consumer
 func Run(o *ResourceIndexerOptions, ctx context.Context) error {
+	ctrllog.SetLogger(klog.NewKlogr())
 	// Build a scheme and REST config for the controller-runtime cache.
 	scheme := runtime.NewScheme()
 	if err := searchv1alpha1.AddToScheme(scheme); err != nil {

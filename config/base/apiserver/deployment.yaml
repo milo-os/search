@@ -97,6 +97,9 @@ spec:
           value: "4"
         - name: TRACING_CONFIG_FILE
           value: ""
+        envFrom:
+        - secretRef:
+            name: search-apiserver
         # TEMPLATE NOTE: Add your service-specific environment variables here
         # Example: database credentials, API keys, configuration values
         resources:

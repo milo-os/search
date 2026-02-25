@@ -62,3 +62,6 @@ secretGenerator:
 - name: search-indexer
   literals:
   - MEILISEARCH_API_KEY=search-master-key
+- name: search-apiserver
+  literals:
+  - MEILISEARCH_API_KEY=search-master-key

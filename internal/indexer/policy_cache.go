@@ -155,6 +155,16 @@ func (c *PolicyCache) deletePolicy(name string) {
 	klog.Infof("Policy %s removed from cache", name)
 }
 
+// Start starts the underlying cache.
+func (c *PolicyCache) Start(ctx context.Context) error {
+	return c.cache.Start(ctx)
+}
+
+// WaitForCacheSync waits for the underlying cache to sync.
+func (c *PolicyCache) WaitForCacheSync(ctx context.Context) bool {
+	return c.cache.WaitForCacheSync(ctx)
+}
+
 // GetPolicies returns a snapshot of all cached policies.
 func (c *PolicyCache) GetPolicies() []*policyevaluation.CachedPolicy {
 	c.mu.RLock()

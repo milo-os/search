@@ -25,6 +25,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"go.miloapis.net/search/pkg/apis/search/v1alpha1.SearchQueryList":           schema_pkg_apis_search_v1alpha1_SearchQueryList(ref),
 		"go.miloapis.net/search/pkg/apis/search/v1alpha1.SearchQuerySpec":           schema_pkg_apis_search_v1alpha1_SearchQuerySpec(ref),
 		"go.miloapis.net/search/pkg/apis/search/v1alpha1.SearchQueryStatus":         schema_pkg_apis_search_v1alpha1_SearchQueryStatus(ref),
+		"go.miloapis.net/search/pkg/apis/search/v1alpha1.SearchResult":              schema_pkg_apis_search_v1alpha1_SearchResult(ref),
 		"go.miloapis.net/search/pkg/apis/search/v1alpha1.TargetResource":            schema_pkg_apis_search_v1alpha1_TargetResource(ref),
 		"k8s.io/apimachinery/pkg/apis/meta/v1.APIGroup":                             schema_pkg_apis_meta_v1_APIGroup(ref),
 		"k8s.io/apimachinery/pkg/apis/meta/v1.APIGroupList":                         schema_pkg_apis_meta_v1_APIGroupList(ref),
@@ -253,6 +254,14 @@ func schema_pkg_apis_search_v1alpha1_ResourceIndexPolicySpec(ref common.Referenc
 						},
 					},
 					"conditions": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"name",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
 						SchemaProps: spec.SchemaProps{
 							Description: "Conditions filter which resources are indexed using CEL expressions. Multiple conditions can be specified and are evaluated with OR semantics - a resource is indexed if it satisfies ANY condition. Use && within a single expression to require multiple criteria together.\n\nEach condition has: - name: A unique identifier for the condition, used in status reporting\n  and debugging to identify which condition(s) matched a resource.\n- expression: A CEL expression that must evaluate to a boolean. The\n  resource is available as the root object in the expression context.\n\nAvailable CEL operations: - Field access: spec.replicas, metadata.name, status.phase - Map access: metadata.labels[\"app\"], metadata.annotations[\"key\"] - Comparisons: ==, !=, <, <=, >, >= - Logical operators: &&, ||, ! - String functions: contains(), startsWith(), endsWith(), matches() - List functions: exists(), all(), size(), map(), filter() - Membership: \"value\" in list, \"key\" in map - Ternary: condition ? trueValue : falseValue",
 							Type:        []string{"array"},
@@ -267,6 +276,14 @@ func schema_pkg_apis_search_v1alpha1_ResourceIndexPolicySpec(ref common.Referenc
 						},
 					},
 					"fields": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"path",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
 						SchemaProps: spec.SchemaProps{
 							Description: "Fields defines which fields from the resource are indexed.",
 							Type:        []string{"array"},
@@ -297,6 +314,14 @@ func schema_pkg_apis_search_v1alpha1_ResourceIndexPolicyStatus(ref common.Refere
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"conditions": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"type",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
 						SchemaProps: spec.SchemaProps{
 							Description: "Conditions represents the latest available observations of the policy's state.",
 							Type:        []string{"array"},
@@ -436,6 +461,25 @@ func schema_pkg_apis_search_v1alpha1_SearchQuerySpec(ref common.ReferenceCallbac
 				Description: "SearchQuerySpec defines the search parameters.\n\nThe actual fields will depend on the specific search implementation.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
+					"targetResources": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "TargetResources limits the search to specific resource types.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("go.miloapis.net/search/pkg/apis/search/v1alpha1.TargetResource"),
+									},
+								},
+							},
+						},
+					},
 					"query": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Query is the search query string.",
@@ -462,6 +506,8 @@ func schema_pkg_apis_search_v1alpha1_SearchQuerySpec(ref common.ReferenceCallbac
 				Required: []string{"query"},
 			},
 		},
+		Dependencies: []string{
+			"go.miloapis.net/search/pkg/apis/search/v1alpha1.TargetResource"},
 	}
 }
 
@@ -473,14 +519,19 @@ func schema_pkg_apis_search_v1alpha1_SearchQueryStatus(ref common.ReferenceCallb
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"results": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
 						SchemaProps: spec.SchemaProps{
-							Description: "Results contains the search results as an array of Kubernetes resources.",
+							Description: "Results contains the search results.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
 									SchemaProps: spec.SchemaProps{
 										Default: map[string]interface{}{},
-										Ref:     ref("k8s.io/apimachinery/pkg/runtime.RawExtension"),
+										Ref:     ref("go.miloapis.net/search/pkg/apis/search/v1alpha1.SearchResult"),
 									},
 								},
 							},
@@ -494,6 +545,36 @@ func schema_pkg_apis_search_v1alpha1_SearchQueryStatus(ref common.ReferenceCallb
 						},
 					},
 				},
+			},
+		},
+		Dependencies: []string{
+			"go.miloapis.net/search/pkg/apis/search/v1alpha1.SearchResult"},
+	}
+}
+
+func schema_pkg_apis_search_v1alpha1_SearchResult(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "SearchResult represents a single search result with its relevance score.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"resource": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Resource contains the actual Kubernetes resource.",
+							Default:     map[string]interface{}{},
+							Ref:         ref("k8s.io/apimachinery/pkg/runtime.RawExtension"),
+						},
+					},
+					"relevanceScore": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RelevanceScore is the relevance score from Meilisearch.",
+							Type:        []string{"number"},
+							Format:      "double",
+						},
+					},
+				},
+				Required: []string{"resource"},
 			},
 		},
 		Dependencies: []string{

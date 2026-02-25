@@ -353,3 +353,36 @@ func (s *SDKClient) GetSettingsUpdateTask(indexUID string) (*meilisearch.Task, e
 	// Return the most recent task
 	return &resp.Results[0], nil
 }
+
+// MultiSearch performs a search query across multiple indices.
+func (s *SDKClient) MultiSearch(indexUIDs []string, query string, limit int64, offset int64) (*meilisearch.MultiSearchResponse, error) {
+	if len(indexUIDs) == 0 {
+		return nil, fmt.Errorf("no index UIDs provided")
+	}
+
+	var queries []*meilisearch.SearchRequest
+	for _, uid := range indexUIDs {
+		queries = append(queries, &meilisearch.SearchRequest{
+			IndexUID:         uid,
+			Query:            query,
+			ShowRankingScore: true,
+		})
+	}
+
+	req := &meilisearch.MultiSearchRequest{
+		Queries: queries,
+		Federation: &meilisearch.MultiSearchFederation{
+			Limit:  limit,
+			Offset: offset,
+		},
+	}
+
+	klog.V(4).Infof("MultiSearch across indices %v with query %q, limit %d, offset %d", indexUIDs, query, limit, offset)
+	resp, err := s.client.MultiSearch(req)
+	if err != nil {
+		klog.Errorf("MultiSearch failed across indices %v: %v", indexUIDs, err)
+		return nil, fmt.Errorf("multi-search failed: %w", err)
+	}
+
+	return resp, nil
+}
