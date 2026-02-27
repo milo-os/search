@@ -43,6 +43,7 @@ func init() {
 type ControllerManagerOptions struct {
 	MetricsAddr                string
 	EnableLeaderElection       bool
+	LeaderElectionNamespace    string
 	ProbeAddr                  string
 	SecureMetrics              bool
 	EnableHTTP2                bool
@@ -66,6 +67,7 @@ func NewControllerManagerOptions() *ControllerManagerOptions {
 		MetricsAddr:                ":8080",
 		ProbeAddr:                  ":8081",
 		EnableLeaderElection:       true,
+		LeaderElectionNamespace:    "",
 		SecureMetrics:              false,
 		EnableHTTP2:                false,
 		MaxCELDepth:                50,
@@ -85,6 +87,8 @@ func (o *ControllerManagerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&o.EnableLeaderElection, "leader-elect", o.EnableLeaderElection,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
+	fs.StringVar(&o.LeaderElectionNamespace, "leader-elect-resource-namespace", o.LeaderElectionNamespace,
+		"The namespace in which the leader election resource will be created.")
 	fs.BoolVar(&o.SecureMetrics, "metrics-secure", o.SecureMetrics,
 		"If set the metrics endpoint is served securely")
 	fs.BoolVar(&o.EnableHTTP2, "enable-http2", o.EnableHTTP2,
@@ -173,11 +177,12 @@ func Run(o *ControllerManagerOptions, ctx context.Context) error {
 	cfg := ctrl.GetConfigOrDie()
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsserver.Options{BindAddress: o.MetricsAddr, SecureServing: o.SecureMetrics, TLSOpts: tlsOpts},
-		HealthProbeBindAddress: o.ProbeAddr,
-		LeaderElection:         o.EnableLeaderElection,
-		LeaderElectionID:       "controller.search.miloapis.com",
+		Scheme:                  scheme,
+		Metrics:                 metricsserver.Options{BindAddress: o.MetricsAddr, SecureServing: o.SecureMetrics, TLSOpts: tlsOpts},
+		HealthProbeBindAddress:  o.ProbeAddr,
+		LeaderElection:          o.EnableLeaderElection,
+		LeaderElectionID:        "controller.search.miloapis.com",
+		LeaderElectionNamespace: o.LeaderElectionNamespace,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
