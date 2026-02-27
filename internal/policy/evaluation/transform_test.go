@@ -11,17 +11,33 @@ func TestEvalResult_Transform(t *testing.T) {
 	tests := []struct {
 		name     string
 		fields   map[string]any
+		group    string
+		version  string
+		kind     string
 		expected map[string]any
 	}{
 		{
-			name:     "empty fields",
-			fields:   map[string]any{},
-			expected: map[string]any{},
+			name:    "empty fields",
+			fields:  map[string]any{},
+			group:   "search.miloapis.com",
+			version: "v1alpha1",
+			kind:    "ResourceIndexPolicy",
+			expected: map[string]any{
+				"apiVersion": "search.miloapis.com/v1alpha1",
+				"kind":       "ResourceIndexPolicy",
+			},
 		},
 		{
-			name:     "single field",
-			fields:   map[string]any{".metadata.name": "test-cm"},
-			expected: map[string]any{"metadata": map[string]any{"name": "test-cm"}},
+			name:    "single field",
+			fields:  map[string]any{".metadata.name": "test-cm"},
+			group:   "",
+			version: "v1",
+			kind:    "ConfigMap",
+			expected: map[string]any{
+				"apiVersion": "v1",
+				"kind":       "ConfigMap",
+				"metadata":   map[string]any{"name": "test-cm"},
+			},
 		},
 		{
 			name: "multiple fields",
@@ -30,8 +46,13 @@ func TestEvalResult_Transform(t *testing.T) {
 				".spec.replicas":                 int64(3),
 				".spec.selector.matchLabels.app": "foo",
 			},
+			group:   "apps",
+			version: "v1",
+			kind:    "Deployment",
 			expected: map[string]any{
-				"metadata": map[string]any{"name": "test-cm"},
+				"apiVersion": "apps/v1",
+				"kind":       "Deployment",
+				"metadata":   map[string]any{"name": "test-cm"},
 				"spec": map[string]any{
 					"replicas": int64(3),
 					"selector": map[string]any{
@@ -41,10 +62,15 @@ func TestEvalResult_Transform(t *testing.T) {
 			},
 		},
 		{
-			name:   "nested brackets",
-			fields: map[string]any{".data['config.yaml']": "content"},
+			name:    "nested brackets",
+			fields:  map[string]any{".data['config.yaml']": "content"},
+			group:   "",
+			version: "v1",
+			kind:    "ConfigMap",
 			expected: map[string]any{
-				"data": map[string]any{"config.yaml": "content"},
+				"apiVersion": "v1",
+				"kind":       "ConfigMap",
+				"data":       map[string]any{"config.yaml": "content"},
 			},
 		},
 		{
@@ -53,7 +79,12 @@ func TestEvalResult_Transform(t *testing.T) {
 				".metadata.name":      "test",
 				".metadata.namespace": "default",
 			},
+			group:   "",
+			version: "v1",
+			kind:    "Pod",
 			expected: map[string]any{
+				"apiVersion": "v1",
+				"kind":       "Pod",
 				"metadata": map[string]any{
 					"name":      "test",
 					"namespace": "default",
@@ -66,7 +97,12 @@ func TestEvalResult_Transform(t *testing.T) {
 				".spec.selector['app']":    "backend",
 				".spec.selector.component": "core",
 			},
+			group:   "apps",
+			version: "v1",
+			kind:    "Deployment",
 			expected: map[string]any{
+				"apiVersion": "apps/v1",
+				"kind":       "Deployment",
 				"spec": map[string]any{
 					"selector": map[string]any{
 						"app":       "backend",
@@ -85,7 +121,12 @@ func TestEvalResult_Transform(t *testing.T) {
 				".spec.ports[1].targetPort": int64(8443),
 				".spec.ports[1].name":       "https",
 			},
+			group:   "apps",
+			version: "v1",
+			kind:    "StatefulSet",
 			expected: map[string]any{
+				"apiVersion": "apps/v1",
+				"kind":       "StatefulSet",
 				"spec": map[string]any{
 					"ports": map[string]any{
 						"0": map[string]any{
@@ -110,7 +151,12 @@ func TestEvalResult_Transform(t *testing.T) {
 				".status.containerStatuses[0].name": "main",
 				".status.hostIP":                    "10.0.0.1",
 			},
+			group:   "",
+			version: "v1",
+			kind:    "Pod",
 			expected: map[string]any{
+				"apiVersion": "v1",
+				"kind":       "Pod",
 				"status": map[string]any{
 					"conditions": map[string]any{
 						"0": map[string]any{
@@ -133,7 +179,12 @@ func TestEvalResult_Transform(t *testing.T) {
 				".a.b.c.d.e": "deep",
 				".a.b.c.f":   "shallow",
 			},
+			group:   "example.com",
+			version: "v1",
+			kind:    "CustomResource",
 			expected: map[string]any{
+				"apiVersion": "example.com/v1",
+				"kind":       "CustomResource",
 				"a": map[string]any{
 					"b": map[string]any{
 						"c": map[string]any{
@@ -153,7 +204,12 @@ func TestEvalResult_Transform(t *testing.T) {
 				".metadata.labels['app.kubernetes.io/name']":      "myapp",
 				".data['config.json']":                            "{}",
 			},
+			group:   "",
+			version: "v1",
+			kind:    "ConfigMap",
 			expected: map[string]any{
+				"apiVersion": "v1",
+				"kind":       "ConfigMap",
 				"metadata": map[string]any{
 					"annotations": map[string]any{
 						"example.com/managed-by": "controller",
@@ -173,9 +229,12 @@ func TestEvalResult_Transform(t *testing.T) {
 				"kind":       "Service",
 				"apiVersion": "v1",
 			},
+			group:   "",
+			version: "v2", // Policy version should overwrite the one from fields
+			kind:    "ServiceOverride",
 			expected: map[string]any{
-				"kind":       "Service",
-				"apiVersion": "v1",
+				"kind":       "ServiceOverride",
+				"apiVersion": "v2",
 			},
 		},
 		{
@@ -184,7 +243,12 @@ func TestEvalResult_Transform(t *testing.T) {
 				".spec['selector']['app']": "foo",
 				".data['key']['subkey']":   "bar",
 			},
+			group:   "",
+			version: "v1",
+			kind:    "ConfigMap",
 			expected: map[string]any{
+				"apiVersion": "v1",
+				"kind":       "ConfigMap",
 				"spec": map[string]any{
 					"selector": map[string]any{
 						"app": "foo",
@@ -203,6 +267,9 @@ func TestEvalResult_Transform(t *testing.T) {
 				".a":   "scalar-value", // This sets "a" = "scalar-value"
 				".a.b": "nested-value", // This requires "a" to be a map. Logic should overwrite "a" with map {"b": "nested-value"}
 			},
+			group:    "x",
+			version:  "v1",
+			kind:     "Y",
 			expected: nil, // skip
 		},
 	}
@@ -212,7 +279,13 @@ func TestEvalResult_Transform(t *testing.T) {
 			continue
 		}
 		t.Run(tt.name, func(t *testing.T) {
-			r := &EvalResult{Matched: true, Fields: tt.fields}
+			r := &EvalResult{
+				Matched: true,
+				Fields:  tt.fields,
+				Group:   tt.group,
+				Version: tt.version,
+				Kind:    tt.kind,
+			}
 			doc := r.Transform()
 
 			// Use assert.Equal which compares map structure values deeply
