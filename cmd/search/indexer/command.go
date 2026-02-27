@@ -26,6 +26,9 @@ type ResourceIndexerOptions struct {
 	NatsURL               string
 	NatsAuditConsumerName string
 	NatsStreamName        string
+	NatsTLSCA             string
+	NatsTLSCert           string
+	NatsTLSKey            string
 
 	// NATS re-index consumer settings (separate REINDEX_EVENTS stream)
 	NatsReindexStream       string
@@ -73,6 +76,9 @@ func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 
 	fs.StringVar(&o.NatsReindexStream, "nats-reindex-stream", o.NatsReindexStream, "The JetStream stream name for re-index messages.")
 	fs.StringVar(&o.NatsReindexConsumerName, "nats-reindex-consumer-name", o.NatsReindexConsumerName, "The name of the re-index JetStream consumer (must match the manifest).")
+	fs.StringVar(&o.NatsTLSCA, "nats-tls-ca", o.NatsTLSCA, "The path to the NATS TLS CA file.")
+	fs.StringVar(&o.NatsTLSCert, "nats-tls-cert", o.NatsTLSCert, "The path to the NATS TLS certificate file.")
+	fs.StringVar(&o.NatsTLSKey, "nats-tls-key", o.NatsTLSKey, "The path to the NATS TLS key file.")
 
 	fs.StringVar(&o.MeilisearchDomain, "meilisearch-domain", o.MeilisearchDomain, "Domain of the Meilisearch instance.")
 	fs.DurationVar(&o.MeilisearchTaskWaitTimeout, "meilisearch-task-wait-timeout", o.MeilisearchTaskWaitTimeout, "Timeout for waiting for Meilisearch tasks to complete.")
@@ -214,7 +220,18 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 
 	// Connect to NATS
 	klog.Infof("Connecting to NATS at %s...", o.NatsURL)
-	nc, err := nats.Connect(o.NatsURL)
+
+	var natsOpts []nats.Option
+	if o.NatsTLSCert != "" && o.NatsTLSKey != "" {
+		if o.NatsTLSCA != "" {
+			klog.Infof("Using NATS TLS CA from %s", o.NatsTLSCA)
+			natsOpts = append(natsOpts, nats.RootCAs(o.NatsTLSCA))
+		}
+		klog.Infof("Using NATS TLS cert from %s and key from %s", o.NatsTLSCert, o.NatsTLSKey)
+		natsOpts = append(natsOpts, nats.ClientCert(o.NatsTLSCert, o.NatsTLSKey))
+	}
+
+	nc, err := nats.Connect(o.NatsURL, natsOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to connect to NATS: %w", err)
 	}
