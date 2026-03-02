@@ -127,33 +127,13 @@ tasks:
     silent: true
 
   generate:openapi:
-    desc: Generate OpenAPI definitions for search API types
-    deps:
-      - task: install-go-tool
-        vars:
-          NAME: openapi-gen
-          PACKAGE: k8s.io/code-generator/cmd/openapi-gen
-          VERSION: v0.23.0
+    desc: Generate Kubernetes OpenAPI definitions
     cmds:
-      - echo "Generating OpenAPI definitions..."
       - |
         set -e
-        # Packages to generate OpenAPI for
-        PACKAGES=(
-          "pkg/apis/search/v1alpha1"
-        )
-        
-        for REL_DIR in "${PACKAGES[@]}"; do
-          PKG="go.miloapis.net/search/$REL_DIR"
-          echo "Generating OpenAPI for $PKG..."
-          
-          "{{.TOOL_DIR}}/openapi-gen" \
-            --input-dirs "$PKG,k8s.io/apimachinery/pkg/apis/meta/v1,k8s.io/apimachinery/pkg/runtime,k8s.io/apimachinery/pkg/version" \
-            --output-package "$REL_DIR" \
-            --output-base "." \
-            --output-file-base "zz_generated.openapi" \
-            --go-header-file "hack/boilerplate.go.txt"
-        done
+        echo "🔄 Generating Kubernetes OpenAPI definitions..."
+        ./hack/update-codegen.sh
+        echo "✅ OpenAPI generation complete"
     silent: true
 
   # Test tasks

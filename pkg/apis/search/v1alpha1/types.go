@@ -6,6 +6,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
+// +k8s:openapi-gen=true
 // +genclient
 // +genclient:nonNamespaced
 // +genclient:onlyVerbs=create
