@@ -46,6 +46,6 @@ jobs:
     with:
       bundle-name: ghcr.io/datum-cloud/search-kustomize
       bundle-path: config
-      image-overlays: config/base
+      image-overlays: config/overlays/core-control-plane
       image-name: ghcr.io/datum-cloud/search
     secrets: inherit
