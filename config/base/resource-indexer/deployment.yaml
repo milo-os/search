@@ -22,9 +22,20 @@ spec:
         command:
         - /search
         - indexer
+        args:
+        - --nats-url=$(NATS_URL)
+        - --nats-tls-ca=$(NATS_TLS_CA)
+        - --nats-tls-cert=$(NATS_TLS_CERT)
+        - --nats-tls-key=$(NATS_TLS_KEY)
         env:
         - name: NATS_URL
           value: "nats://nats.nats-system.svc.cluster.local:4222"
+        - name: NATS_TLS_CA
+          value: ""
+        - name: NATS_TLS_CERT
+          value: ""
+        - name: NATS_TLS_KEY
+          value: ""
         - name: NATS_Subject
           value: "audit.>"
         - name: NATS_QUEUE_GROUP

@@ -43,6 +43,11 @@ spec:
         - --meilisearch-domain=$(MEILISEARCH_DOMAIN)
         - --meilisearch-task-wait-timeout=$(MEILISEARCH_TASK_WAIT_TIMEOUT)
         - --max-cel-depth=$(MAX_CEL_DEPTH)
+        - --nats-url=$(NATS_URL)
+        - --nats-tls-ca=$(NATS_TLS_CA)
+        - --nats-tls-cert=$(NATS_TLS_CERT)
+        - --nats-tls-key=$(NATS_TLS_KEY)
+        - --leader-elect-resource-namespace=$(LEADER_ELECT_RESOURCE_NAMESPACE)
         env:
         - name: POD_NAMESPACE
           valueFrom:
@@ -62,6 +67,16 @@ spec:
           value: "30s"
         - name: MAX_CEL_DEPTH
           value: "10"
+        - name: NATS_URL
+          value: ""
+        - name: NATS_TLS_CA
+          value: ""
+        - name: NATS_TLS_CERT
+          value: ""
+        - name: NATS_TLS_KEY
+          value: ""
+        - name: LEADER_ELECT_RESOURCE_NAMESPACE
+          value: ""
         - name: MEILISEARCH_API_KEY
           valueFrom:
             secretKeyRef:
