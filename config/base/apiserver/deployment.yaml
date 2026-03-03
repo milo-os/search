@@ -58,8 +58,9 @@ spec:
         - --requestheader-extra-headers-prefix=$(REQUESTHEADER_EXTRA_HEADERS_PREFIX)
         - --logging-format=$(LOGGING_FORMAT)
         - --tracing-config-file=$(TRACING_CONFIG_FILE)
-        - -v=$(LOG_LEVEL)
+        - --v=$(LOG_LEVEL)
         - --etcd-servers=$(ETCD_SERVERS)
+        - --meilisearch-domain=$(MEILISEARCH_DOMAIN)
         env:
         - name: ETCD_SERVERS
           value: "http://etcd.etcd-system.svc.cluster.local:2379"
@@ -97,6 +98,8 @@ spec:
           value: "4"
         - name: TRACING_CONFIG_FILE
           value: ""
+        - name: MEILISEARCH_DOMAIN
+          value: "http://meilisearch.meilisearch-system.svc.cluster.local:7700"
         envFrom:
         - secretRef:
             name: search-apiserver
