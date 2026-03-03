@@ -27,6 +27,7 @@ spec:
         - --nats-tls-ca=$(NATS_TLS_CA)
         - --nats-tls-cert=$(NATS_TLS_CERT)
         - --nats-tls-key=$(NATS_TLS_KEY)
+        - --meilisearch-domain=$(MEILISEARCH_DOMAIN)
         env:
         - name: NATS_URL
           value: "nats://nats.nats-system.svc.cluster.local:4222"
@@ -44,6 +45,8 @@ spec:
           value: "search-indexer"
         - name: NATS_STREAM_NAME
           value: "AUDIT_EVENTS"
+        - name: MEILISEARCH_DOMAIN
+          value: "http://meilisearch.meilisearch-system.svc.cluster.local:7700"
         envFrom:
         - secretRef:
             name: search-indexer
