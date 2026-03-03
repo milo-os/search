@@ -1,0 +1,17 @@
+apiVersion: iam.miloapis.com/v1alpha1
+kind: Role
+metadata:
+  name: search.miloapis.com-editor
+  namespace: milo-system
+  labels:
+    app.kubernetes.io/name: editor
+    app.kubernetes.io/part-of: search.miloapis.com
+spec:
+  launchStage: Beta
+  inheritedRoles:
+    - name: search.miloapis.com-viewer
+      namespace: milo-system
+  includedPermissions:
+    - search.miloapis.com/resourceindexpolicies.create
+    - search.miloapis.com/resourceindexpolicies.update
+    - search.miloapis.com/resourceindexpolicies.patch

@@ -3,3 +3,6 @@ kind: Component
 
 resources:
   - searcher.yaml
+  - viewer.yaml
+  - editor.yaml
+  - admin.yaml
