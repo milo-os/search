@@ -12,6 +12,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apiserver/pkg/registry/rest"
 	"k8s.io/klog/v2"
 
@@ -192,7 +194,10 @@ func (r *REST) resolveIndexUIDs(query *searchv1alpha1.SearchQuery) ([]string, er
 	policies := r.policyCache.GetPolicies()
 
 	if len(query.Spec.TargetResources) > 0 {
-		for _, tr := range query.Spec.TargetResources {
+		var errs field.ErrorList
+		targetResourcesPath := field.NewPath("spec", "targetResources")
+
+		for i, tr := range query.Spec.TargetResources {
 			found := false
 			for _, cp := range policies {
 				p := cp.Policy
@@ -206,8 +211,19 @@ func (r *REST) resolveIndexUIDs(query *searchv1alpha1.SearchQuery) ([]string, er
 				}
 			}
 			if !found {
-				return nil, apierrors.NewBadRequest(fmt.Sprintf("target resource %s/%s %s is not currently indexed or policy is not ready", tr.Group, tr.Version, tr.Kind))
+				errs = append(errs, field.NotFound(
+					targetResourcesPath.Index(i),
+					fmt.Sprintf("%s/%s %s", tr.Group, tr.Version, tr.Kind),
+				))
 			}
+		}
+
+		if len(errs) > 0 {
+			return nil, apierrors.NewInvalid(
+				schema.GroupKind{Group: searchv1alpha1.SchemeGroupVersion.Group, Kind: "SearchQuery"},
+				query.Name,
+				errs,
+			)
 		}
 	} else {
 		for _, cp := range policies {
