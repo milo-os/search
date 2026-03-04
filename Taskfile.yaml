@@ -651,17 +651,10 @@ tasks:
         echo "Redeploying Search's apiserver..."
 
         echo "Redeploying Search controller manager..."
-
-        # Restart the deployment to pick up new image
-        task test-infra:kubectl -- rollout restart deployment/search-apiserver -n search-system
-        task test-infra:kubectl -- rollout restart deployment/search-controller-manager -n search-system
-        task test-infra:kubectl -- rollout restart deployment/resource-indexer -n search-system
-
-        # Wait for rollout to complete
-        echo "Waiting for rollout to complete..."
-        task test-infra:kubectl -- rollout status deployment/search-apiserver -n search-system --timeout=1000s
-        task test-infra:kubectl -- rollout status deployment/search-controller-manager -n search-system --timeout=1000s
-        task test-infra:kubectl -- rollout status deployment/resource-indexer -n search-system --timeout=1000s
+        
+        task test-infra:kubectl -- delete pod -l app.kubernetes.io/name=search-apiserver -n search-system
+        task test-infra:kubectl -- delete pod -l app.kubernetes.io/name=search-controller-manager -n search-system
+        task test-infra:kubectl -- delete pod -l app.kubernetes.io/name=resource-indexer -n search-system
 
         echo "✅ Redeployment complete!"
         echo "Check pods with: task test-infra:kubectl -- get pods -n search-system"

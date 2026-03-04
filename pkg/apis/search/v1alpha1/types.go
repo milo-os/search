@@ -3,7 +3,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 // +k8s:openapi-gen=true
@@ -80,7 +80,7 @@ type SearchQueryStatus struct {
 // SearchResult represents a single search result with its relevance score.
 type SearchResult struct {
 	// Resource contains the actual Kubernetes resource.
-	Resource runtime.RawExtension `json:"resource"`
+	Resource unstructured.Unstructured `json:"resource"`
 
 	// RelevanceScore is the relevance score from Meilisearch.
 	// +optional

@@ -9,4 +9,3 @@ spec:
       kind: ConfigMap
   query: "" # Empty query returns everything, or put a specific string
   limit: 20
-  offset: 0

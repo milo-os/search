@@ -564,7 +564,7 @@ func schema_pkg_apis_search_v1alpha1_SearchResult(ref common.ReferenceCallback) 
 					"resource": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Resource contains the actual Kubernetes resource.",
-							Ref:         ref(runtime.RawExtension{}.OpenAPIModelName()),
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.Unstructured"),
 						},
 					},
 					"relevanceScore": {
@@ -579,7 +579,7 @@ func schema_pkg_apis_search_v1alpha1_SearchResult(ref common.ReferenceCallback) 
 			},
 		},
 		Dependencies: []string{
-			runtime.RawExtension{}.OpenAPIModelName()},
+			"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.Unstructured"},
 	}
 }
 

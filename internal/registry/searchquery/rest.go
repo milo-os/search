@@ -11,6 +11,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -280,8 +281,13 @@ func formatSearchResult(hit map[string]json.RawMessage) (searchv1alpha1.SearchRe
 		return searchv1alpha1.SearchResult{}, err
 	}
 
+	var obj unstructured.Unstructured
+	if err := obj.UnmarshalJSON(b); err != nil {
+		return searchv1alpha1.SearchResult{}, err
+	}
+
 	return searchv1alpha1.SearchResult{
-		Resource:       runtime.RawExtension{Raw: b},
+		Resource:       obj,
 		RelevanceScore: score,
 	}, nil
 }

@@ -183,7 +183,7 @@ func (o *SearchServerOptions) Config() (*searchapiserver.Config, error) {
 	genericConfig.EffectiveVersion = basecompatibility.NewEffectiveVersionFromString("1.35", "", "")
 
 	namer := apiopenapi.NewDefinitionNamer(searchapiserver.Scheme)
-	genericConfig.OpenAPIV3Config = genericapiserver.DefaultOpenAPIV3Config(openapi.GetOpenAPIDefinitions, namer)
+	genericConfig.OpenAPIV3Config = genericapiserver.DefaultOpenAPIV3Config(openapi.GetOpenAPIDefinitionsWithUnstructured, namer)
 	genericConfig.OpenAPIV3Config.Info.Title = "Search"
 	genericConfig.OpenAPIV3Config.Info.Version = version.Version
 	genericConfig.OpenAPIV3Config.GetDefinitionName = func(name string) (string, spec.Extensions) {
@@ -192,7 +192,7 @@ func (o *SearchServerOptions) Config() (*searchapiserver.Config, error) {
 	}
 
 	// Configure OpenAPI v2
-	genericConfig.OpenAPIConfig = genericapiserver.DefaultOpenAPIConfig(openapi.GetOpenAPIDefinitions, namer)
+	genericConfig.OpenAPIConfig = genericapiserver.DefaultOpenAPIConfig(openapi.GetOpenAPIDefinitionsWithUnstructured, namer)
 	genericConfig.OpenAPIConfig.Info.Title = "Search"
 	genericConfig.OpenAPIConfig.Info.Version = version.Version
 	genericConfig.OpenAPIConfig.GetDefinitionName = func(name string) (string, spec.Extensions) {
