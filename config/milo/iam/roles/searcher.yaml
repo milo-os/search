@@ -9,4 +9,4 @@ metadata:
 spec:
   launchStage: Beta
   includedPermissions:
-    - search.miloapis.com/searchqueries.create
+    - search.miloapis.com/resourcesearchqueries.create

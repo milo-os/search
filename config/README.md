@@ -50,7 +50,7 @@ kubectl get apiservices | grep search
 kubectl api-resources | grep datum
 
 # Try creating a resource (once storage is implemented)
-kubectl get searchqueries
+kubectl get resourcesearchqueries
 ```
 
 ## Components
@@ -58,17 +58,20 @@ kubectl get searchqueries
 Components are optional features that can be enabled in overlays. See [components/README.md](components/README.md) for details.
 
 ### Required Components
+
 - **api-registration**: Registers the aggregated API with Kubernetes (enabled by default in dev overlay)
 
 ### Optional Components
+
 - **namespace**: Manages the namespace via kustomize
 - **cert-manager-ca**: Uses cert-manager for TLS certificates
 - **observability**: Adds Prometheus metrics, alerts, and Grafana dashboards
 - **tracing**: Enables OpenTelemetry tracing
 
 ### Milo IAM Integration
+
 - **milo/iam**: Integrates with Milo for advanced IAM capabilities
-  - See https://github.com/datum-cloud/milo
+  - See <https://github.com/datum-cloud/milo>
 
 ## Customization
 
@@ -159,10 +162,12 @@ components:
 ```
 
 **Requires:**
+
 - Prometheus Operator (for ServiceMonitor)
 - Grafana (for dashboards)
 
 **Customize:**
+
 - Alerts: `components/observability/alerts/`
 - Dashboards: `components/observability/dashboards/`
 
@@ -179,6 +184,7 @@ kubectl get apiservice v1alpha1.search.miloapis.com -o yaml
 ```
 
 **Common causes:**
+
 - TLS certificate issues (check secret exists and is valid)
 - Service not ready (check pod status)
 - RBAC permissions missing

@@ -1,5 +1,5 @@
 apiVersion: search.miloapis.com/v1alpha1
-kind: SearchQuery
+kind: ResourceSearchQuery
 metadata:
   name: configmap-search-sample
 spec:

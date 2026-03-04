@@ -1,12 +1,12 @@
 apiVersion: iam.miloapis.com/v1alpha1
 kind: ProtectedResource
 metadata:
-  name: search.miloapis.com-searchqueries
+  name: search.miloapis.com-resourcesearchqueries
 spec:
   serviceRef:
     name: "search.miloapis.com"
-  kind: SearchQuery
-  plural: searchqueries
-  singular: searchquery
+  kind: ResourceSearchQuery
+  plural: resourcesearchqueries
+  singular: resourcesearchquery
   permissions:
     - create

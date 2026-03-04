@@ -1,4 +1,4 @@
-package searchquery
+package resourcesearchquery
 
 import (
 	"context"
@@ -23,7 +23,7 @@ import (
 	"go.miloapis.net/search/pkg/meilisearch"
 )
 
-// REST implements a RESTStorage for SearchQuery API.
+// REST implements a RESTStorage for ResourceSearchQuery API.
 type REST struct {
 	meiliClient        *meilisearch.SDKClient
 	policyCache        *indexer.PolicyCache
@@ -39,7 +39,7 @@ var _ rest.Creater = &REST{}
 var _ rest.Scoper = &REST{}
 var _ rest.SingularNameProvider = &REST{}
 
-// NewREST returns a RESTStorage object that will work against SearchQuery.
+// NewREST returns a RESTStorage object that will work against ResourceSearchQuery.
 func NewREST(meiliClient *meilisearch.SDKClient, policyCache *indexer.PolicyCache, maxSearchLimit int, defaultSearchLimit int, pagingSecret []byte, pagingTimeout time.Duration) *REST {
 	return &REST{
 		meiliClient:        meiliClient,
@@ -53,7 +53,7 @@ func NewREST(meiliClient *meilisearch.SDKClient, policyCache *indexer.PolicyCach
 
 // New returns an empty object that can be used with Create.
 func (r *REST) New() runtime.Object {
-	return &searchv1alpha1.SearchQuery{}
+	return &searchv1alpha1.ResourceSearchQuery{}
 }
 
 // Destroy cleans up its resources on shutdown.
@@ -66,14 +66,14 @@ func (r *REST) NamespaceScoped() bool {
 
 // GetSingularName implements the rest.SingularNameProvider interface
 func (r *REST) GetSingularName() string {
-	return "searchquery"
+	return "resourcesearchquery"
 }
 
 // Create creates a new version of a resource.
 func (r *REST) Create(ctx context.Context, obj runtime.Object, createValidation rest.ValidateObjectFunc, options *metav1.CreateOptions) (runtime.Object, error) {
-	query, ok := obj.(*searchv1alpha1.SearchQuery)
+	query, ok := obj.(*searchv1alpha1.ResourceSearchQuery)
 	if !ok {
-		return nil, fmt.Errorf("not a SearchQuery: %#v", obj)
+		return nil, fmt.Errorf("not a ResourceSearchQuery: %#v", obj)
 	}
 
 	if createValidation != nil {
@@ -95,7 +95,7 @@ func (r *REST) Create(ctx context.Context, obj runtime.Object, createValidation 
 	if len(indexUIDs) == 0 {
 		// No ready policies or matching indices exist yet
 		created := query.DeepCopy()
-		created.Status = searchv1alpha1.SearchQueryStatus{
+		created.Status = searchv1alpha1.ResourceSearchQueryStatus{
 			Results: []searchv1alpha1.SearchResult{},
 		}
 		return created, nil
@@ -119,7 +119,7 @@ func (r *REST) Create(ctx context.Context, obj runtime.Object, createValidation 
 
 	// Populate response status
 	created := query.DeepCopy()
-	created.Status = searchv1alpha1.SearchQueryStatus{
+	created.Status = searchv1alpha1.ResourceSearchQueryStatus{
 		Results:  results,
 		Continue: r.calculateNextContinueToken(offset, limit, len(resp.Hits), query),
 	}
@@ -137,7 +137,7 @@ type PagingClaims struct {
 
 // validateAndGetPagination validates the limit and continue token from the query and returns
 // their effective values.
-func (r *REST) validateAndGetPagination(query *searchv1alpha1.SearchQuery) (int64, int64, error) {
+func (r *REST) validateAndGetPagination(query *searchv1alpha1.ResourceSearchQuery) (int64, int64, error) {
 	limit := int64(r.defaultSearchLimit)
 	var offset int64 = 0
 
@@ -190,7 +190,7 @@ func (r *REST) validateAndGetPagination(query *searchv1alpha1.SearchQuery) (int6
 // resolveIndexUIDs retrieves the Meilisearch index UIDs for the targeted resources
 // in the query. If no target resources are specified, it returns all indices from
 // all ready policies.
-func (r *REST) resolveIndexUIDs(query *searchv1alpha1.SearchQuery) ([]string, error) {
+func (r *REST) resolveIndexUIDs(query *searchv1alpha1.ResourceSearchQuery) ([]string, error) {
 	var indexUIDs []string
 	policies := r.policyCache.GetPolicies()
 
@@ -221,7 +221,7 @@ func (r *REST) resolveIndexUIDs(query *searchv1alpha1.SearchQuery) ([]string, er
 
 		if len(errs) > 0 {
 			return nil, apierrors.NewInvalid(
-				schema.GroupKind{Group: searchv1alpha1.SchemeGroupVersion.Group, Kind: "SearchQuery"},
+				schema.GroupKind{Group: searchv1alpha1.SchemeGroupVersion.Group, Kind: "ResourceSearchQuery"},
 				query.Name,
 				errs,
 			)
@@ -240,7 +240,7 @@ func (r *REST) resolveIndexUIDs(query *searchv1alpha1.SearchQuery) ([]string, er
 // If the number of hits on the current page is equal to or greater than the limit,
 // it assumes there are more results and returns a signed JWT containing the next offset
 // and the original query parameters to ensure consistency.
-func (r *REST) calculateNextContinueToken(currentOffset, limit int64, totalHitsOnPage int, query *searchv1alpha1.SearchQuery) string {
+func (r *REST) calculateNextContinueToken(currentOffset, limit int64, totalHitsOnPage int, query *searchv1alpha1.ResourceSearchQuery) string {
 	if totalHitsOnPage > 0 && int64(totalHitsOnPage) >= limit {
 		claims := PagingClaims{
 			Offset:          currentOffset + limit,

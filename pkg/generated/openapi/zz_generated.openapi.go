@@ -22,10 +22,10 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"go.miloapis.net/search/pkg/apis/search/v1alpha1.ResourceIndexPolicyList":   schema_pkg_apis_search_v1alpha1_ResourceIndexPolicyList(ref),
 		"go.miloapis.net/search/pkg/apis/search/v1alpha1.ResourceIndexPolicySpec":   schema_pkg_apis_search_v1alpha1_ResourceIndexPolicySpec(ref),
 		"go.miloapis.net/search/pkg/apis/search/v1alpha1.ResourceIndexPolicyStatus": schema_pkg_apis_search_v1alpha1_ResourceIndexPolicyStatus(ref),
-		"go.miloapis.net/search/pkg/apis/search/v1alpha1.SearchQuery":               schema_pkg_apis_search_v1alpha1_SearchQuery(ref),
-		"go.miloapis.net/search/pkg/apis/search/v1alpha1.SearchQueryList":           schema_pkg_apis_search_v1alpha1_SearchQueryList(ref),
-		"go.miloapis.net/search/pkg/apis/search/v1alpha1.SearchQuerySpec":           schema_pkg_apis_search_v1alpha1_SearchQuerySpec(ref),
-		"go.miloapis.net/search/pkg/apis/search/v1alpha1.SearchQueryStatus":         schema_pkg_apis_search_v1alpha1_SearchQueryStatus(ref),
+		"go.miloapis.net/search/pkg/apis/search/v1alpha1.ResourceSearchQuery":       schema_pkg_apis_search_v1alpha1_ResourceSearchQuery(ref),
+		"go.miloapis.net/search/pkg/apis/search/v1alpha1.ResourceSearchQueryList":   schema_pkg_apis_search_v1alpha1_ResourceSearchQueryList(ref),
+		"go.miloapis.net/search/pkg/apis/search/v1alpha1.ResourceSearchQuerySpec":   schema_pkg_apis_search_v1alpha1_ResourceSearchQuerySpec(ref),
+		"go.miloapis.net/search/pkg/apis/search/v1alpha1.ResourceSearchQueryStatus": schema_pkg_apis_search_v1alpha1_ResourceSearchQueryStatus(ref),
 		"go.miloapis.net/search/pkg/apis/search/v1alpha1.SearchResult":              schema_pkg_apis_search_v1alpha1_SearchResult(ref),
 		"go.miloapis.net/search/pkg/apis/search/v1alpha1.TargetResource":            schema_pkg_apis_search_v1alpha1_TargetResource(ref),
 		resource.Quantity{}.OpenAPIModelName():                                      schema_apimachinery_pkg_api_resource_Quantity(ref),
@@ -359,11 +359,11 @@ func schema_pkg_apis_search_v1alpha1_ResourceIndexPolicyStatus(ref common.Refere
 	}
 }
 
-func schema_pkg_apis_search_v1alpha1_SearchQuery(ref common.ReferenceCallback) common.OpenAPIDefinition {
+func schema_pkg_apis_search_v1alpha1_ResourceSearchQuery(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "SearchQuery represents a generic search query resource.\n\nThis is a base type that can be extended for specific search implementations.\n\nQuick Start:\n\n\tapiVersion: search.miloapis.com/v1alpha1\n\tkind: SearchQuery\n\tmetadata:\n\t  name: example-search\n\tspec:\n\t  query: \"your search query\"\n\t  limit: 100",
+				Description: "ResourceSearchQuery represents a generic search query resource.\n\nThis is a base type that can be extended for specific search implementations.\n\nQuick Start:\n\n\tapiVersion: search.miloapis.com/v1alpha1\n\tkind: ResourceSearchQuery\n\tmetadata:\n\t  name: example-search\n\tspec:\n\t  query: \"your search query\"\n\t  limit: 100",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"kind": {
@@ -389,13 +389,13 @@ func schema_pkg_apis_search_v1alpha1_SearchQuery(ref common.ReferenceCallback) c
 					"spec": {
 						SchemaProps: spec.SchemaProps{
 							Default: map[string]interface{}{},
-							Ref:     ref("go.miloapis.net/search/pkg/apis/search/v1alpha1.SearchQuerySpec"),
+							Ref:     ref("go.miloapis.net/search/pkg/apis/search/v1alpha1.ResourceSearchQuerySpec"),
 						},
 					},
 					"status": {
 						SchemaProps: spec.SchemaProps{
 							Default: map[string]interface{}{},
-							Ref:     ref("go.miloapis.net/search/pkg/apis/search/v1alpha1.SearchQueryStatus"),
+							Ref:     ref("go.miloapis.net/search/pkg/apis/search/v1alpha1.ResourceSearchQueryStatus"),
 						},
 					},
 				},
@@ -403,15 +403,15 @@ func schema_pkg_apis_search_v1alpha1_SearchQuery(ref common.ReferenceCallback) c
 			},
 		},
 		Dependencies: []string{
-			"go.miloapis.net/search/pkg/apis/search/v1alpha1.SearchQuerySpec", "go.miloapis.net/search/pkg/apis/search/v1alpha1.SearchQueryStatus", v1.ObjectMeta{}.OpenAPIModelName()},
+			"go.miloapis.net/search/pkg/apis/search/v1alpha1.ResourceSearchQuerySpec", "go.miloapis.net/search/pkg/apis/search/v1alpha1.ResourceSearchQueryStatus", v1.ObjectMeta{}.OpenAPIModelName()},
 	}
 }
 
-func schema_pkg_apis_search_v1alpha1_SearchQueryList(ref common.ReferenceCallback) common.OpenAPIDefinition {
+func schema_pkg_apis_search_v1alpha1_ResourceSearchQueryList(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "SearchQueryList is a list of SearchQuery objects",
+				Description: "ResourceSearchQueryList is a list of ResourceSearchQuery objects",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"kind": {
@@ -441,7 +441,7 @@ func schema_pkg_apis_search_v1alpha1_SearchQueryList(ref common.ReferenceCallbac
 								Schema: &spec.Schema{
 									SchemaProps: spec.SchemaProps{
 										Default: map[string]interface{}{},
-										Ref:     ref("go.miloapis.net/search/pkg/apis/search/v1alpha1.SearchQuery"),
+										Ref:     ref("go.miloapis.net/search/pkg/apis/search/v1alpha1.ResourceSearchQuery"),
 									},
 								},
 							},
@@ -452,15 +452,15 @@ func schema_pkg_apis_search_v1alpha1_SearchQueryList(ref common.ReferenceCallbac
 			},
 		},
 		Dependencies: []string{
-			"go.miloapis.net/search/pkg/apis/search/v1alpha1.SearchQuery", v1.ListMeta{}.OpenAPIModelName()},
+			"go.miloapis.net/search/pkg/apis/search/v1alpha1.ResourceSearchQuery", v1.ListMeta{}.OpenAPIModelName()},
 	}
 }
 
-func schema_pkg_apis_search_v1alpha1_SearchQuerySpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+func schema_pkg_apis_search_v1alpha1_ResourceSearchQuerySpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "SearchQuerySpec defines the search parameters.\n\nThe actual fields will depend on the specific search implementation.",
+				Description: "ResourceSearchQuerySpec defines the search parameters.\n\nThe actual fields will depend on the specific search implementation.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"targetResources": {
@@ -513,11 +513,11 @@ func schema_pkg_apis_search_v1alpha1_SearchQuerySpec(ref common.ReferenceCallbac
 	}
 }
 
-func schema_pkg_apis_search_v1alpha1_SearchQueryStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+func schema_pkg_apis_search_v1alpha1_ResourceSearchQueryStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "SearchQueryStatus contains the query results and pagination state.",
+				Description: "ResourceSearchQueryStatus contains the query results and pagination state.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"results": {

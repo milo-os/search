@@ -59,7 +59,7 @@ func NewSearchServerCommand() *cobra.Command {
 		Long: `Search is a generic Kubernetes aggregated API server that can be extended
 with custom search implementations.
 
-Exposes SearchQuery resources accessible through kubectl or any Kubernetes client.`,
+Exposes ResourceSearchQuery resources accessible through kubectl or any Kubernetes client.`,
 	}
 
 	cmd.AddCommand(NewServeCommand())
@@ -79,7 +79,7 @@ func NewServeCommand() *cobra.Command {
 		Short: "Start the API server",
 		Long: `Start the API server and begin serving requests.
 
-Exposes SearchQuery resources through kubectl.`,
+Exposes ResourceSearchQuery resources through kubectl.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := options.Complete(); err != nil {
 				return err
@@ -155,8 +155,8 @@ func NewSearchServerOptions() *SearchServerOptions {
 func (o *SearchServerOptions) AddFlags(fs *pflag.FlagSet) {
 	o.RecommendedOptions.AddFlags(fs)
 	fs.StringVar(&o.MeilisearchDomain, "meilisearch-domain", o.MeilisearchDomain, "Domain of the Meilisearch instance.")
-	fs.IntVar(&o.MaxSearchLimit, "max-search-limit", o.MaxSearchLimit, "The maximum number of results a SearchQuery can return in a single request.")
-	fs.IntVar(&o.DefaultSearchLimit, "default-search-limit", o.DefaultSearchLimit, "The default number of results a SearchQuery returns when no limit is specified.")
+	fs.IntVar(&o.MaxSearchLimit, "max-search-limit", o.MaxSearchLimit, "The maximum number of results a ResourceSearchQuery can return in a single request.")
+	fs.IntVar(&o.DefaultSearchLimit, "default-search-limit", o.DefaultSearchLimit, "The default number of results a ResourceSearchQuery returns when no limit is specified.")
 	fs.DurationVar(&o.PagingTimeout, "paging-timeout", o.PagingTimeout, "The duration for which a paging (continue) token is valid.")
 }
 

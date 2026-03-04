@@ -16,7 +16,7 @@ import (
 	"go.miloapis.net/search/internal/indexer"
 	_ "go.miloapis.net/search/internal/metrics"
 	"go.miloapis.net/search/internal/registry/policy/resourceindexpolicy"
-	"go.miloapis.net/search/internal/registry/searchquery"
+	"go.miloapis.net/search/internal/registry/resourcesearchquery"
 	"go.miloapis.net/search/pkg/apis/search/install"
 	searchv1alpha1 "go.miloapis.net/search/pkg/apis/search/v1alpha1"
 	"go.miloapis.net/search/pkg/meilisearch"
@@ -39,8 +39,8 @@ func init() {
 	Scheme.AddKnownTypes(schema.GroupVersion{Group: searchv1alpha1.GroupName, Version: runtime.APIVersionInternal},
 		&searchv1alpha1.ResourceIndexPolicy{},
 		&searchv1alpha1.ResourceIndexPolicyList{},
-		&searchv1alpha1.SearchQuery{},
-		&searchv1alpha1.SearchQueryList{},
+		&searchv1alpha1.ResourceSearchQuery{},
+		&searchv1alpha1.ResourceSearchQueryList{},
 	)
 
 	// Register unversioned meta types required by the API machinery.
@@ -120,8 +120,8 @@ func (c completedConfig) New() (*SearchServer, error) {
 	searchV1alpha1Storage["resourceindexpolicies"] = policyStorage.Store
 	searchV1alpha1Storage["resourceindexpolicies/status"] = policyStorage.Status
 
-	// Add searchquery resources
-	searchqueryStorage := searchquery.NewREST(
+	// Add resourcesearchquery resources
+	resourcesearchqueryStorage := resourcesearchquery.NewREST(
 		c.ExtraConfig.MeiliClient,
 		c.ExtraConfig.PolicyCache,
 		c.ExtraConfig.MaxSearchLimit,
@@ -129,7 +129,7 @@ func (c completedConfig) New() (*SearchServer, error) {
 		c.ExtraConfig.PagingSecret,
 		c.ExtraConfig.PagingTimeout,
 	)
-	searchV1alpha1Storage["searchqueries"] = searchqueryStorage
+	searchV1alpha1Storage["resourcesearchqueries"] = resourcesearchqueryStorage
 
 	searchAPIGroupInfo.VersionedResourcesStorageMap["v1alpha1"] = searchV1alpha1Storage
 

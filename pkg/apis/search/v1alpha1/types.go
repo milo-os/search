@@ -12,31 +12,31 @@ import (
 // +genclient:onlyVerbs=create
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
-// SearchQuery represents a generic search query resource.
+// ResourceSearchQuery represents a generic search query resource.
 //
 // This is a base type that can be extended for specific search implementations.
 //
 // Quick Start:
 //
 //	apiVersion: search.miloapis.com/v1alpha1
-//	kind: SearchQuery
+//	kind: ResourceSearchQuery
 //	metadata:
 //	  name: example-search
 //	spec:
 //	  query: "your search query"
 //	  limit: 100
-type SearchQuery struct {
+type ResourceSearchQuery struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   SearchQuerySpec   `json:"spec"`
-	Status SearchQueryStatus `json:"status,omitempty"`
+	Spec   ResourceSearchQuerySpec   `json:"spec"`
+	Status ResourceSearchQueryStatus `json:"status,omitempty"`
 }
 
-// SearchQuerySpec defines the search parameters.
+// ResourceSearchQuerySpec defines the search parameters.
 //
 // The actual fields will depend on the specific search implementation.
-type SearchQuerySpec struct {
+type ResourceSearchQuerySpec struct {
 	// TargetResources limits the search to specific resource types.
 	// +optional
 	// +listType=atomic
@@ -62,8 +62,8 @@ type SearchQuerySpec struct {
 	Continue string `json:"continue,omitempty"`
 }
 
-// SearchQueryStatus contains the query results and pagination state.
-type SearchQueryStatus struct {
+// ResourceSearchQueryStatus contains the query results and pagination state.
+type ResourceSearchQueryStatus struct {
 	// Results contains the search results.
 	//
 	// +optional
@@ -89,10 +89,10 @@ type SearchResult struct {
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
-// SearchQueryList is a list of SearchQuery objects
-type SearchQueryList struct {
+// ResourceSearchQueryList is a list of ResourceSearchQuery objects
+type ResourceSearchQueryList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 
-	Items []SearchQuery `json:"items"`
+	Items []ResourceSearchQuery `json:"items"`
 }

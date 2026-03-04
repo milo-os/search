@@ -10,8 +10,8 @@ const (
 )
 
 var (
-	// SearchQueryTotal tracks the total number of search queries
-	SearchQueryTotal = metrics.NewCounterVec(
+	// ResourceSearchQueryTotal tracks the total number of search queries
+	ResourceSearchQueryTotal = metrics.NewCounterVec(
 		&metrics.CounterOpts{
 			Namespace:      namespace,
 			Name:           "query_total",
@@ -21,8 +21,8 @@ var (
 		[]string{"status"},
 	)
 
-	// SearchQueryDuration tracks the duration of search queries
-	SearchQueryDuration = metrics.NewHistogramVec(
+	// ResourceSearchQueryDuration tracks the duration of search queries
+	ResourceSearchQueryDuration = metrics.NewHistogramVec(
 		&metrics.HistogramOpts{
 			Namespace:      namespace,
 			Name:           "query_duration_seconds",
@@ -38,7 +38,7 @@ var (
 // This ensures they're included in the /metrics endpoint
 func init() {
 	legacyregistry.MustRegister(
-		SearchQueryTotal,
-		SearchQueryDuration,
+		ResourceSearchQueryTotal,
+		ResourceSearchQueryDuration,
 	)
 }
