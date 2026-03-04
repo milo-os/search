@@ -10,3 +10,4 @@ spec:
   singular: resourcesearchquery
   permissions:
     - create
+    - get

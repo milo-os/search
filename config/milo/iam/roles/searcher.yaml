@@ -10,3 +10,4 @@ spec:
   launchStage: Beta
   includedPermissions:
     - search.miloapis.com/resourcesearchqueries.create
+    - search.miloapis.com/resourcesearchqueries.get
