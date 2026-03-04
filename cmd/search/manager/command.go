@@ -43,6 +43,7 @@ func init() {
 type ControllerManagerOptions struct {
 	MetricsAddr                string
 	EnableLeaderElection       bool
+	LeaderElectionNamespace    string
 	ProbeAddr                  string
 	SecureMetrics              bool
 	EnableHTTP2                bool
@@ -55,6 +56,9 @@ type ControllerManagerOptions struct {
 	// NATS settings for publishing per-resource re-index messages.
 	NatsURL            string
 	NatsReindexSubject string
+	NatsTLSCA          string
+	NatsTLSCert        string
+	NatsTLSKey         string
 }
 
 // NewControllerManagerOptions creates a new ControllerManagerOptions with default values
@@ -63,6 +67,7 @@ func NewControllerManagerOptions() *ControllerManagerOptions {
 		MetricsAddr:                ":8080",
 		ProbeAddr:                  ":8081",
 		EnableLeaderElection:       true,
+		LeaderElectionNamespace:    "",
 		SecureMetrics:              false,
 		EnableHTTP2:                false,
 		MaxCELDepth:                50,
@@ -82,6 +87,8 @@ func (o *ControllerManagerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&o.EnableLeaderElection, "leader-elect", o.EnableLeaderElection,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
+	fs.StringVar(&o.LeaderElectionNamespace, "leader-elect-resource-namespace", o.LeaderElectionNamespace,
+		"The namespace in which the leader election resource will be created.")
 	fs.BoolVar(&o.SecureMetrics, "metrics-secure", o.SecureMetrics,
 		"If set the metrics endpoint is served securely")
 	fs.BoolVar(&o.EnableHTTP2, "enable-http2", o.EnableHTTP2,
@@ -97,6 +104,9 @@ func (o *ControllerManagerOptions) AddFlags(fs *pflag.FlagSet) {
 	// NATS
 	fs.StringVar(&o.NatsURL, "nats-url", o.NatsURL, "The URL of the NATS server used to publish re-index messages.")
 	fs.StringVar(&o.NatsReindexSubject, "nats-reindex-subject", o.NatsReindexSubject, "The NATS subject to publish per-resource re-index messages to.")
+	fs.StringVar(&o.NatsTLSCA, "nats-tls-ca", o.NatsTLSCA, "The path to the NATS TLS CA file.")
+	fs.StringVar(&o.NatsTLSCert, "nats-tls-cert", o.NatsTLSCert, "The path to the NATS TLS certificate file.")
+	fs.StringVar(&o.NatsTLSKey, "nats-tls-key", o.NatsTLSKey, "The path to the NATS TLS key file.")
 }
 
 // Validate validates the options
@@ -167,11 +177,12 @@ func Run(o *ControllerManagerOptions, ctx context.Context) error {
 	cfg := ctrl.GetConfigOrDie()
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsserver.Options{BindAddress: o.MetricsAddr, SecureServing: o.SecureMetrics, TLSOpts: tlsOpts},
-		HealthProbeBindAddress: o.ProbeAddr,
-		LeaderElection:         o.EnableLeaderElection,
-		LeaderElectionID:       "controller.search.miloapis.com",
+		Scheme:                  scheme,
+		Metrics:                 metricsserver.Options{BindAddress: o.MetricsAddr, SecureServing: o.SecureMetrics, TLSOpts: tlsOpts},
+		HealthProbeBindAddress:  o.ProbeAddr,
+		LeaderElection:          o.EnableLeaderElection,
+		LeaderElectionID:        "controller.search.miloapis.com",
+		LeaderElectionNamespace: o.LeaderElectionNamespace,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -205,7 +216,19 @@ func Run(o *ControllerManagerOptions, ctx context.Context) error {
 
 	// Connect to NATS and set up the re-index stream + publisher.
 	setupLog.Info("Connecting to NATS for re-index publishing", "url", o.NatsURL)
-	nc, err := nats.Connect(o.NatsURL)
+
+	var natsOpts []nats.Option
+	if o.NatsTLSCert != "" && o.NatsTLSKey != "" {
+		if o.NatsTLSCA != "" {
+			setupLog.Info("Using NATS TLS CA", "ca", o.NatsTLSCA)
+			natsOpts = append(natsOpts, nats.RootCAs(o.NatsTLSCA))
+		}
+		setupLog.Info("Using NATS TLS cert", "cert", o.NatsTLSCert)
+		setupLog.Info("Using NATS TLS key", "key", o.NatsTLSKey)
+		natsOpts = append(natsOpts, nats.ClientCert(o.NatsTLSCert, o.NatsTLSKey))
+	}
+
+	nc, err := nats.Connect(o.NatsURL, natsOpts...)
 	if err != nil {
 		setupLog.Error(err, "unable to connect to NATS")
 		os.Exit(1)

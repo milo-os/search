@@ -1,0 +1,17 @@
+apiVersion: iam.miloapis.com/v1alpha1
+kind: Role
+metadata:
+  name: search.miloapis.com-viewer
+  namespace: milo-system
+  labels:
+    app.kubernetes.io/name: viewer
+    app.kubernetes.io/part-of: search.miloapis.com
+spec:
+  launchStage: Beta
+  inheritedRoles:
+    - name: search.miloapis.com-searcher
+      namespace: milo-system
+  includedPermissions:
+    - search.miloapis.com/resourceindexpolicies.get
+    - search.miloapis.com/resourceindexpolicies.list
+    - search.miloapis.com/resourceindexpolicies.watch

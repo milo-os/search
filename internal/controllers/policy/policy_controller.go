@@ -85,6 +85,7 @@ const (
 
 // +kubebuilder:rbac:groups=search.miloapis.com,resources=resourceindexpolicies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=search.miloapis.com,resources=resourceindexpolicies/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch
 
 // Reconcile matches the state of the cluster with the desired state of a ResourceIndexPolicy.
 func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {

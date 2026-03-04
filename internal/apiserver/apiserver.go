@@ -2,6 +2,8 @@ package apiserver
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -11,11 +13,13 @@ import (
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	"k8s.io/klog/v2"
 
+	"go.miloapis.net/search/internal/indexer"
 	_ "go.miloapis.net/search/internal/metrics"
 	"go.miloapis.net/search/internal/registry/policy/resourceindexpolicy"
+	"go.miloapis.net/search/internal/registry/resourcesearchquery"
 	"go.miloapis.net/search/pkg/apis/search/install"
-	searchinstall "go.miloapis.net/search/pkg/apis/search/install"
 	searchv1alpha1 "go.miloapis.net/search/pkg/apis/search/v1alpha1"
+	"go.miloapis.net/search/pkg/meilisearch"
 )
 
 var (
@@ -27,7 +31,6 @@ var (
 
 func init() {
 	install.Install(Scheme)
-	searchinstall.Install(Scheme)
 
 	metav1.AddToGroupVersion(Scheme, schema.GroupVersion{Version: "v1"})
 
@@ -36,6 +39,8 @@ func init() {
 	Scheme.AddKnownTypes(schema.GroupVersion{Group: searchv1alpha1.GroupName, Version: runtime.APIVersionInternal},
 		&searchv1alpha1.ResourceIndexPolicy{},
 		&searchv1alpha1.ResourceIndexPolicyList{},
+		&searchv1alpha1.ResourceSearchQuery{},
+		&searchv1alpha1.ResourceSearchQueryList{},
 	)
 
 	// Register unversioned meta types required by the API machinery.
@@ -51,7 +56,12 @@ func init() {
 
 // ExtraConfig extends the generic apiserver configuration with search-specific settings.
 type ExtraConfig struct {
-	// Add custom configuration here as needed
+	MeiliClient        *meilisearch.SDKClient
+	PolicyCache        *indexer.PolicyCache
+	MaxSearchLimit     int
+	DefaultSearchLimit int
+	PagingSecret       []byte
+	PagingTimeout      time.Duration
 }
 
 // Config combines generic and search-specific configuration.
@@ -110,11 +120,41 @@ func (c completedConfig) New() (*SearchServer, error) {
 	searchV1alpha1Storage["resourceindexpolicies"] = policyStorage.Store
 	searchV1alpha1Storage["resourceindexpolicies/status"] = policyStorage.Status
 
+	// Add resourcesearchquery resources
+	resourcesearchqueryStorage := resourcesearchquery.NewREST(
+		c.ExtraConfig.MeiliClient,
+		c.ExtraConfig.PolicyCache,
+		c.ExtraConfig.MaxSearchLimit,
+		c.ExtraConfig.DefaultSearchLimit,
+		c.ExtraConfig.PagingSecret,
+		c.ExtraConfig.PagingTimeout,
+	)
+	searchV1alpha1Storage["resourcesearchqueries"] = resourcesearchqueryStorage
+
 	searchAPIGroupInfo.VersionedResourcesStorageMap["v1alpha1"] = searchV1alpha1Storage
 
 	if err := s.GenericAPIServer.InstallAPIGroup(&searchAPIGroupInfo); err != nil {
 		return nil, err
 	}
+
+	// Add PostStartHook to start policy cache
+	s.GenericAPIServer.AddPostStartHookOrDie("search-policy-cache", func(ctx genericapiserver.PostStartHookContext) error {
+		if err := c.ExtraConfig.PolicyCache.RegisterHandlers(ctx.Context); err != nil {
+			return fmt.Errorf("failed to register policy cache handlers: %w", err)
+		}
+
+		go func() {
+			klog.Info("Starting Search policy cache...")
+			if err := c.ExtraConfig.PolicyCache.Start(ctx.Context); err != nil {
+				klog.Errorf("Policy cache stopped with error: %v", err)
+			}
+		}()
+
+		if !c.ExtraConfig.PolicyCache.WaitForCacheSync(ctx.Context) {
+			return fmt.Errorf("failed to wait for policy cache sync")
+		}
+		return nil
+	})
 
 	klog.Info("Search server initialized successfully")
 

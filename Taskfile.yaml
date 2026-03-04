@@ -122,37 +122,18 @@ tasks:
       # Generate RBAC rules for the controllers.
       - echo "Generating RBAC rules for the controllers..."
       - "\"{{.TOOL_DIR}}/controller-gen\" rbac:roleName=milo-controller-manager paths=\"./internal/controllers/...\" output:dir=\"./config/overlays/controller-manager/core-control-plane/rbac\""
+      - "\"{{.TOOL_DIR}}/controller-gen\" rbac:roleName=milo-resource-indexer paths=\"./internal/indexer/...\" output:dir=\"./config/overlays/resource-indexer/core-control-plane/rbac\""
       - task: generate:openapi
     silent: true
 
   generate:openapi:
-    desc: Generate OpenAPI definitions for search API types
-    deps:
-      - task: install-go-tool
-        vars:
-          NAME: openapi-gen
-          PACKAGE: k8s.io/code-generator/cmd/openapi-gen
-          VERSION: v0.23.0
+    desc: Generate Kubernetes OpenAPI definitions
     cmds:
-      - echo "Generating OpenAPI definitions..."
       - |
         set -e
-        # Packages to generate OpenAPI for
-        PACKAGES=(
-          "pkg/apis/search/v1alpha1"
-        )
-        
-        for REL_DIR in "${PACKAGES[@]}"; do
-          PKG="go.miloapis.net/search/$REL_DIR"
-          echo "Generating OpenAPI for $PKG..."
-          
-          "{{.TOOL_DIR}}/openapi-gen" \
-            --input-dirs "$PKG,k8s.io/apimachinery/pkg/apis/meta/v1,k8s.io/apimachinery/pkg/runtime,k8s.io/apimachinery/pkg/version" \
-            --output-package "$REL_DIR" \
-            --output-base "." \
-            --output-file-base "zz_generated.openapi" \
-            --go-header-file "hack/boilerplate.go.txt"
-        done
+        echo "🔄 Generating Kubernetes OpenAPI definitions..."
+        ./hack/update-codegen.sh
+        echo "✅ OpenAPI generation complete"
     silent: true
 
   # Test tasks
@@ -376,6 +357,7 @@ tasks:
         echo "  Etcd:              task test-infra:kubectl -- logs -l app.kubernetes.io/name=etcd -n etcd-system -f"
         echo "  Search API Server:     task test-infra:kubectl -- logs -l app.kubernetes.io/name=search-apiserver -n search-system -f"
         echo "  Search Controller:     task test-infra:kubectl -- logs -l app.kubernetes.io/name=search-controller-manager -n search-system -f"
+        echo "  Search Indexer:     task test-infra:kubectl -- logs -l app.kubernetes.io/name=resource-indexer -n search-system -f"
 
   dev:generate-webhook-certs:
     desc: Generate all certificates for webhook server
@@ -409,7 +391,9 @@ tasks:
           --metrics-bind-address=:8085 \
           --health-probe-bind-address=:8086 \
           --leader-elect=false \
-          --meilisearch-domain="http://127.0.0.1:7700"
+          --meilisearch-domain="http://127.0.0.1:7700" \
+          --nats-url="nats://127.0.0.1:4222"
+          
     silent: true
 
   dev:run-indexer:
@@ -422,21 +406,10 @@ tasks:
         # Trap to kill background processes (port-forward) on exit
         trap 'kill $(jobs -p)' EXIT
 
-        echo "🚀 Starting NATS port-forward in background..."
-        task dev:pf-nats > /dev/null 2>&1 &
-
-        echo "🚀 Starting Meilisearch port-forward in background..."
-        task dev:pf-meilisearch > /dev/null 2>&1 &
-        
-        echo "Waiting for port-forward to be ready..."
-        sleep 5
-
         echo "🚀 Running indexer against local NATS..."
         MEILISEARCH_API_KEY=search-master-key \
         go run ./cmd/search indexer \
           --nats-url="nats://127.0.0.1:4222" \
-          --nats-subject="audit.>" \
-          --nats-queue-group="search-indexer" \
           --nats-audit-consumer-name="search-indexer" \
           --nats-reindex-consumer-name="search-reindexer" \
           --nats-stream-name="AUDIT_EVENTS" \
@@ -472,6 +445,15 @@ tasks:
       - echo "Port forwarding Etcd to localhost:2379..."
       - task test-infra:kubectl -- port-forward -n etcd-system svc/etcd 2379:2379
 
+  dev:pf-all:
+    desc: Port forward all dependencies for local development
+    cmds:
+      - |
+        task dev:pf-meilisearch &
+        task dev:pf-nats &
+        task dev:pf-etcd &
+        wait
+
   dev:run-apiserver:
     desc: Run the API server locally (requires dev:pf-etcd running)
     cmds:
@@ -495,6 +477,7 @@ tasks:
       - |
         # Use KUBECONFIG if set, otherwise fallback to default
         KCFG=${KUBECONFIG:-$HOME/.kube/config}
+        export MEILISEARCH_API_KEY=search-master-key
         go run ./cmd/search serve \
           --etcd-servers http://127.0.0.1:2379 \
           --secure-port 9443 \
@@ -504,7 +487,9 @@ tasks:
           --authorization-kubeconfig="$KCFG" \
           --kubeconfig="$KCFG" \
           --client-ca-file="{{.CERTS_DIR}}/kind-ca.crt" \
-          --authorization-always-allow-paths=/healthz,/readyz,/livez,/openapi,/openapi/v2,/openapi/v3,/apis,/api
+          --authorization-always-allow-paths=/healthz,/readyz,/livez,/openapi,/openapi/v2,/openapi/v3,/apis,/api \
+          --meilisearch-domain="http://127.0.0.1:7700" \
+          
 
   dev:undeploy:
     desc: Undeploy Search server from test-infra cluster
@@ -660,26 +645,22 @@ tasks:
     deps:
       - dev:build
       - dev:load
-      - dev:deploy
     cmds:
       - |
         set -e
         echo "Redeploying Search's apiserver..."
 
         echo "Redeploying Search controller manager..."
-
-        # Restart the deployment to pick up new image
-        task test-infra:kubectl -- rollout restart deployment/search-apiserver -n search-system
-        task test-infra:kubectl -- rollout restart deployment/search-controller-manager -n search-system
-
-        # Wait for rollout to complete
-        echo "Waiting for rollout to complete..."
-        task test-infra:kubectl -- rollout status deployment/search-controller-manager -n search-system --timeout=1000s
+        
+        task test-infra:kubectl -- delete pod -l app.kubernetes.io/name=search-apiserver -n search-system
+        task test-infra:kubectl -- delete pod -l app.kubernetes.io/name=search-controller-manager -n search-system
+        task test-infra:kubectl -- delete pod -l app.kubernetes.io/name=resource-indexer -n search-system
 
         echo "✅ Redeployment complete!"
-        echo "Check logs with: task test-infra:kubectl -- logs -n search-system -l app.kubernetes.io/name=search-controller-manager"
+        echo "Check pods with: task test-infra:kubectl -- get pods -n search-system"
 
   dev:nats-queue:
     desc: View the NATS queue for the indexer
     cmds:
       - task test-infra:kubectl -- exec -n nats-system $(task test-infra:kubectl -- get pods -n nats-system -l app.kubernetes.io/component=nats-box -o jsonpath="{.items[0].metadata.name}") -- nats consumer info AUDIT_EVENTS search-indexer
+      - task test-infra:kubectl -- exec -n nats-system $(task test-infra:kubectl -- get pods -n nats-system -l app.kubernetes.io/component=nats-box -o jsonpath="{.items[0].metadata.name}") -- nats consumer info REINDEX_EVENTS search-reindexer

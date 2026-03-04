@@ -5,6 +5,14 @@ metadata:
   name: milo-controller-manager
 rules:
 - apiGroups:
+  - '*'
+  resources:
+  - '*'
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - search.miloapis.com
   resources:
   - resourceindexpolicies

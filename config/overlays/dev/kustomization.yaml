@@ -5,9 +5,10 @@ namespace: search-system
 
 resources:
   - ../../base/apiserver
-  - ../../base/resource-indexer
   # Controller manager with RBAC
   - ../controller-manager/core-control-plane
+  # Resource indexer with RBAC
+  - ../resource-indexer/core-control-plane
 
 # Include components for development environment
 components:
@@ -51,4 +52,6 @@ secretGenerator:
 - name: search-indexer
   literals:
   - MEILISEARCH_API_KEY=search-master-key
-
+- name: search-apiserver
+  literals:
+  - MEILISEARCH_API_KEY=search-master-key

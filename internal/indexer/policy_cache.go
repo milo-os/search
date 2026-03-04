@@ -15,6 +15,9 @@ import (
 	runtimecache "sigs.k8s.io/controller-runtime/pkg/cache"
 )
 
+// +kubebuilder:rbac:groups=search.miloapis.com,resources=resourceindexpolicies,verbs=get;list;watch
+// +kubebuilder:rbac:groups=search.miloapis.com,resources=resourceindexpolicies/status,verbs=get;list;watch
+
 // PolicyCache maintains a thread-safe cache of compiled ResourceIndexPolicies.
 // It uses a controller-runtime informer to watch the API server for changes
 // via a watch stream, keeping policies in-sync without polling.
@@ -50,9 +53,9 @@ func NewPolicyCache(c runtimecache.Cache, requireReadyCondition bool) (*PolicyCa
 	}, nil
 }
 
-// Start registers informer event handlers for ResourceIndexPolicy objects
-func (c *PolicyCache) Start(ctx context.Context) error {
-	klog.Info("Starting policy cache informer")
+// RegisterHandlers registers informer event handlers for ResourceIndexPolicy objects.
+func (c *PolicyCache) RegisterHandlers(ctx context.Context) error {
+	klog.Info("Registering policy cache informer handlers")
 
 	informer, err := c.cache.GetInformer(ctx, &v1alpha1.ResourceIndexPolicy{})
 	if err != nil {
@@ -92,10 +95,6 @@ func (c *PolicyCache) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to add event handler to ResourceIndexPolicy informer: %w", err)
 	}
 
-	// Start runs all informers and blocks until ctx is cancelled.
-	if err := c.cache.Start(ctx); err != nil {
-		return fmt.Errorf("policy cache informer stopped with error: %w", err)
-	}
 	return nil
 }
 
@@ -109,7 +108,7 @@ func (c *PolicyCache) upsertPolicy(p *v1alpha1.ResourceIndexPolicy) {
 	// still being initialized (e.g. index creation or initial re-indexing).
 	if c.requireReadyCondition {
 		if !meta.IsStatusConditionTrue(p.Status.Conditions, "Ready") {
-			klog.Infof("Policy %s is not yet Ready; skipping cache", key)
+			klog.Infof("Policy %s is not yet Ready (Ready=True condition missing); skipping cache", key)
 			c.deletePolicy(key)
 			return
 		}
@@ -154,6 +153,16 @@ func (c *PolicyCache) deletePolicy(name string) {
 	delete(c.policies, name)
 	c.mu.Unlock()
 	klog.Infof("Policy %s removed from cache", name)
+}
+
+// Start starts the underlying cache.
+func (c *PolicyCache) Start(ctx context.Context) error {
+	return c.cache.Start(ctx)
+}
+
+// WaitForCacheSync waits for the underlying cache to sync.
+func (c *PolicyCache) WaitForCacheSync(ctx context.Context) bool {
+	return c.cache.WaitForCacheSync(ctx)
 }
 
 // GetPolicies returns a snapshot of all cached policies.

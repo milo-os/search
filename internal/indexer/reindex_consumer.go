@@ -64,6 +64,7 @@ func (r *ReindexConsumer) Start(ctx context.Context) error {
 		for _, cp := range policies {
 			// Skip if index name is not set yet
 			if cp.Policy.Status.IndexName == "" {
+				klog.V(2).Infof("ReindexConsumer: policy %s has no IndexName in status, skipping", cp.Policy.Name)
 				continue
 			}
 
@@ -86,6 +87,8 @@ func (r *ReindexConsumer) Start(ctx context.Context) error {
 				r.batcher.QueueUpsert(cp.Policy.Status.IndexName, doc, &msg)
 				queued = true
 			} else {
+				klog.V(4).Infof("ReindexConsumer: policy %s did not match resource %s/%s (id=%s), ensuring deletion", cp.Policy.Name, obj.GetNamespace(), obj.GetName(), event.ID)
+
 				// If it doesn't match this policy, we should ensure it's removed from the index
 				// in case it was previously indexed there.
 				r.batcher.QueueDelete(cp.Policy.Status.IndexName, resourceUID, &msg)

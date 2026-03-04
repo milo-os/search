@@ -1,0 +1,18 @@
+apiVersion: iam.miloapis.com/v1alpha1
+kind: ProtectedResource
+metadata:
+  name: search.miloapis.com-resourceindexpolicies
+spec:
+  serviceRef:
+    name: "search.miloapis.com"
+  kind: ResourceIndexPolicy
+  plural: resourceindexpolicies
+  singular: resourceindexpolicy
+  permissions:
+    - list
+    - get
+    - create
+    - update
+    - delete
+    - patch
+    - watch

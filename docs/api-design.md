@@ -20,18 +20,16 @@ searchable so it doesn't require software changes to index new resources.
 - Support full-text search capabilities configurable through dynamic index
   policies
 
-
 ## Proposal
 
 The Search API will initially offer these new API resources to end-users:
 
 - **ResourceIndexPolicy** configures which resources in the platform should be
   indexed and which fields within the resource are applicable to indexing
-- **ResourceSearchQuery** allows users to execute field filtering and full-text
+- **ResourceResourceSearchQuery** allows users to execute field filtering and full-text
   searching capabilities across all indexed resources
 - **ResourceFacetQuery** allows users to retrieve facet counts for building
   filter UIs, independent of search results
-
 
 > [!IMPORTANT]
 >
@@ -170,7 +168,7 @@ a condition after an update will be added to the index.
 > forward-looking design. The initial release of the search service will target
 > full-text searching only.
 
-The `ResourceSearchQuery` resource allows users to execute searches across all
+The `ResourceResourceSearchQuery` resource allows users to execute searches across all
 indexed resources, combining full-text search with field-based filtering.
 
 **Full-text search** (the `query` field) performs relevance-based matching across
@@ -195,7 +193,7 @@ production with at least 2 replicas."
 
 ```yaml
 apiVersion: search.miloapis.com/v1alpha1
-kind: ResourceSearchQuery
+kind: ResourceResourceSearchQuery
 metadata:
   name: find-production-deployments
 spec:

@@ -5,6 +5,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// +k8s:openapi-gen=true
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
@@ -49,11 +50,15 @@ type ResourceIndexPolicySpec struct {
 	// - Ternary: condition ? trueValue : falseValue
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=10
+	// +listType=map
+	// +listMapKey=name
 	Conditions []PolicyCondition `json:"conditions"`
 
 	// Fields defines which fields from the resource are indexed.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=10
+	// +listType=map
+	// +listMapKey=path
 	Fields []FieldPolicy `json:"fields"`
 }
 
@@ -110,6 +115,8 @@ type ResourceIndexPolicyStatus struct {
 	// Conditions represents the latest available observations of the policy's state.
 	// +kubebuilder:default={{type: "Ready", status: "Unknown", reason: "Unknown", message: "Waiting for control plane to reconcile", lastTransitionTime: "1970-01-01T00:00:00Z"}}
 	// +optional
+	// +listType=map
+	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// IndexName is the name of the search index created for this policy.

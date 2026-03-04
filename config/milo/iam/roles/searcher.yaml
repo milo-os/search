@@ -3,7 +3,10 @@ kind: Role
 metadata:
   name: search.miloapis.com-searcher
   namespace: milo-system
+  labels:
+    app.kubernetes.io/name: searcher
+    app.kubernetes.io/part-of: search.miloapis.com
 spec:
-  launchStage: Alpha
+  launchStage: Beta
   includedPermissions:
-    - search.miloapis.com/searchqueries.create
+    - search.miloapis.com/resourcesearchqueries.create

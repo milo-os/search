@@ -17,6 +17,7 @@ import (
 	"k8s.io/klog/v2"
 	runtimecache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // ResourceIndexerOptions holds the configuration for the resource indexer.
@@ -25,6 +26,9 @@ type ResourceIndexerOptions struct {
 	NatsURL               string
 	NatsAuditConsumerName string
 	NatsStreamName        string
+	NatsTLSCA             string
+	NatsTLSCert           string
+	NatsTLSKey            string
 
 	// NATS re-index consumer settings (separate REINDEX_EVENTS stream)
 	NatsReindexStream       string
@@ -72,6 +76,9 @@ func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 
 	fs.StringVar(&o.NatsReindexStream, "nats-reindex-stream", o.NatsReindexStream, "The JetStream stream name for re-index messages.")
 	fs.StringVar(&o.NatsReindexConsumerName, "nats-reindex-consumer-name", o.NatsReindexConsumerName, "The name of the re-index JetStream consumer (must match the manifest).")
+	fs.StringVar(&o.NatsTLSCA, "nats-tls-ca", o.NatsTLSCA, "The path to the NATS TLS CA file.")
+	fs.StringVar(&o.NatsTLSCert, "nats-tls-cert", o.NatsTLSCert, "The path to the NATS TLS certificate file.")
+	fs.StringVar(&o.NatsTLSKey, "nats-tls-key", o.NatsTLSKey, "The path to the NATS TLS key file.")
 
 	fs.StringVar(&o.MeilisearchDomain, "meilisearch-domain", o.MeilisearchDomain, "Domain of the Meilisearch instance.")
 	fs.DurationVar(&o.MeilisearchTaskWaitTimeout, "meilisearch-task-wait-timeout", o.MeilisearchTaskWaitTimeout, "Timeout for waiting for Meilisearch tasks to complete.")
@@ -159,6 +166,7 @@ func NewIndexerCommand() *cobra.Command {
 
 // Run starts the indexer consumer
 func Run(o *ResourceIndexerOptions, ctx context.Context) error {
+	ctrllog.SetLogger(klog.NewKlogr())
 	// Build a scheme and REST config for the controller-runtime cache.
 	scheme := runtime.NewScheme()
 	if err := searchv1alpha1.AddToScheme(scheme); err != nil {
@@ -188,21 +196,42 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 		return fmt.Errorf("failed to create policy cache: %w", err)
 	}
 
+	// Register handlers for both caches. They share the same underlying informer.
+	if err := indexPolicyCache.RegisterHandlers(ctx); err != nil {
+		return fmt.Errorf("failed to register index policy handlers: %w", err)
+	}
+	if err := reindexPolicyCache.RegisterHandlers(ctx); err != nil {
+		return fmt.Errorf("failed to register reindex policy handlers: %w", err)
+	}
+
+	// Start the shared cache and wait for it to be synced.
 	go func() {
-		if err := indexPolicyCache.Start(ctx); err != nil {
-			klog.Errorf("Index Policy cache stopped: %v", err)
+		klog.Info("Starting shared Kubernetes cache...")
+		if err := k8sCache.Start(ctx); err != nil {
+			klog.Fatalf("Kubernetes cache stopped with error: %v", err)
 		}
 	}()
 
-	go func() {
-		if err := reindexPolicyCache.Start(ctx); err != nil {
-			klog.Errorf("Reindex Policy cache stopped: %v", err)
-		}
-	}()
+	klog.Info("Waiting for cache to sync...")
+	if !k8sCache.WaitForCacheSync(ctx) {
+		return fmt.Errorf("failed to sync Kubernetes cache")
+	}
+	klog.Info("Cache synced successfully")
 
 	// Connect to NATS
 	klog.Infof("Connecting to NATS at %s...", o.NatsURL)
-	nc, err := nats.Connect(o.NatsURL)
+
+	var natsOpts []nats.Option
+	if o.NatsTLSCert != "" && o.NatsTLSKey != "" {
+		if o.NatsTLSCA != "" {
+			klog.Infof("Using NATS TLS CA from %s", o.NatsTLSCA)
+			natsOpts = append(natsOpts, nats.RootCAs(o.NatsTLSCA))
+		}
+		klog.Infof("Using NATS TLS cert from %s and key from %s", o.NatsTLSCert, o.NatsTLSKey)
+		natsOpts = append(natsOpts, nats.ClientCert(o.NatsTLSCert, o.NatsTLSKey))
+	}
+
+	nc, err := nats.Connect(o.NatsURL, natsOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to connect to NATS: %w", err)
 	}

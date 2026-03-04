@@ -16,6 +16,12 @@ type EvalResult struct {
 	Matched bool
 	// Fields contains the extracted field values from the resource, keyed by path.
 	Fields map[string]any
+	// Group is the API group of the matching policy.
+	Group string
+	// Version is the API version of the matching policy.
+	Version string
+	// Kind is the kind of the matching policy.
+	Kind string
 }
 
 // PolicyEvaluator evaluates whether a Kubernetes resource matches a policy
@@ -33,7 +39,12 @@ type CachedPolicy struct {
 // Evaluate checks if the resource matches the policy's target GVK, conditions,
 // and extracts the configured fields from matching resources.
 func (cp *CachedPolicy) Evaluate(u *unstructured.Unstructured) (*EvalResult, error) {
-	result := &EvalResult{Fields: map[string]any{}}
+	result := &EvalResult{
+		Fields:  map[string]any{},
+		Group:   cp.Policy.Spec.TargetResource.Group,
+		Version: cp.Policy.Spec.TargetResource.Version,
+		Kind:    cp.Policy.Spec.TargetResource.Kind,
+	}
 
 	// 1. Check GVK match
 	gvk := u.GroupVersionKind()
@@ -155,6 +166,15 @@ func (r *EvalResult) Transform() map[string]any {
 		leaf := segments[len(segments)-1]
 		current[leaf] = value
 	}
+
+	// Add policy GVK metadata to the document
+	if r.Group != "" {
+		doc["apiVersion"] = r.Group + "/" + r.Version
+	} else {
+		doc["apiVersion"] = r.Version
+	}
+	doc["kind"] = r.Kind
+
 	return doc
 }
 

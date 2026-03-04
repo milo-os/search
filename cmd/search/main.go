@@ -4,13 +4,17 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+
 	searchapiserver "go.miloapis.net/search/internal/apiserver"
 	"go.miloapis.net/search/internal/version"
 	searchv1alpha1 "go.miloapis.net/search/pkg/apis/search/v1alpha1"
+	"go.miloapis.net/search/pkg/generated/openapi"
+	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	apiopenapi "k8s.io/apiserver/pkg/endpoints/openapi"
 	genericapiserver "k8s.io/apiserver/pkg/server"
@@ -21,10 +25,15 @@ import (
 	"k8s.io/component-base/logs"
 	logsapi "k8s.io/component-base/logs/api/v1"
 	"k8s.io/klog/v2"
-	"k8s.io/kube-openapi/pkg/common"
+	openapiutil "k8s.io/kube-openapi/pkg/util"
+	"k8s.io/kube-openapi/pkg/validation/spec"
+	runtimecache "sigs.k8s.io/controller-runtime/pkg/cache"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"go.miloapis.net/search/cmd/search/indexer"
 	"go.miloapis.net/search/cmd/search/manager"
+	internalindexer "go.miloapis.net/search/internal/indexer"
+	"go.miloapis.net/search/pkg/meilisearch"
 
 	// Register JSON logging format
 	_ "k8s.io/component-base/logs/json/register"
@@ -34,31 +43,6 @@ func init() {
 	utilruntime.Must(logsapi.AddFeatureGates(utilfeature.DefaultMutableFeatureGate))
 	utilfeature.DefaultMutableFeatureGate.Set("LoggingBetaOptions=true")
 	utilfeature.DefaultMutableFeatureGate.Set("RemoteRequestHeaderUID=true")
-}
-
-func GetOpenAPIDefinitions(cb common.ReferenceCallback) map[string]common.OpenAPIDefinition {
-	defs := make(map[string]common.OpenAPIDefinition)
-
-	merge := func(pkgDefs map[string]common.OpenAPIDefinition) {
-		for k, v := range pkgDefs {
-			// For k8s.io types, store both the original key and the transformed key
-			// because the namer behavior is inconsistent across different types
-			if strings.HasPrefix(k, "k8s.io/") {
-				// Store original key (with slashes)
-				defs[k] = v
-				// Also store transformed key (io.k8s with dots)
-				newK := "io.k8s." + k[7:]
-				newK = strings.ReplaceAll(newK, "/", ".")
-				defs[newK] = v
-			} else {
-				// For non-k8s.io types, keep as-is
-				defs[k] = v
-			}
-		}
-	}
-
-	merge(searchv1alpha1.GetOpenAPIDefinitions(cb))
-	return defs
 }
 
 func main() {
@@ -75,7 +59,7 @@ func NewSearchServerCommand() *cobra.Command {
 		Long: `Search is a generic Kubernetes aggregated API server that can be extended
 with custom search implementations.
 
-Exposes SearchQuery resources accessible through kubectl or any Kubernetes client.`,
+Exposes ResourceSearchQuery resources accessible through kubectl or any Kubernetes client.`,
 	}
 
 	cmd.AddCommand(NewServeCommand())
@@ -95,7 +79,7 @@ func NewServeCommand() *cobra.Command {
 		Short: "Start the API server",
 		Long: `Start the API server and begin serving requests.
 
-Exposes SearchQuery resources through kubectl.`,
+Exposes ResourceSearchQuery resources through kubectl.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := options.Complete(); err != nil {
 				return err
@@ -140,8 +124,14 @@ func NewVersionCommand() *cobra.Command {
 
 // SearchServerOptions contains configuration for the search server.
 type SearchServerOptions struct {
-	RecommendedOptions *options.RecommendedOptions
-	Logs               *logsapi.LoggingConfiguration
+	RecommendedOptions         *options.RecommendedOptions
+	Logs                       *logsapi.LoggingConfiguration
+	MeilisearchDomain          string
+	MeilisearchHTTPTimeout     time.Duration
+	MeilisearchTaskWaitTimeout time.Duration
+	MaxSearchLimit             int
+	DefaultSearchLimit         int
+	PagingTimeout              time.Duration
 }
 
 // NewSearchServerOptions creates options with default values.
@@ -151,7 +141,12 @@ func NewSearchServerOptions() *SearchServerOptions {
 			"/registry/search.miloapis.com",
 			searchapiserver.Codecs.LegacyCodec(searchapiserver.Scheme.PrioritizedVersionsAllGroups()...),
 		),
-		Logs: logsapi.NewLoggingConfiguration(),
+		Logs:                   logsapi.NewLoggingConfiguration(),
+		MeilisearchDomain:      "http://meilisearch.meilisearch-system.svc.cluster.local:7700",
+		MeilisearchHTTPTimeout: 60 * time.Second,
+		MaxSearchLimit:         100,
+		DefaultSearchLimit:     10,
+		PagingTimeout:          24 * time.Hour,
 	}
 
 	return o
@@ -159,6 +154,10 @@ func NewSearchServerOptions() *SearchServerOptions {
 
 func (o *SearchServerOptions) AddFlags(fs *pflag.FlagSet) {
 	o.RecommendedOptions.AddFlags(fs)
+	fs.StringVar(&o.MeilisearchDomain, "meilisearch-domain", o.MeilisearchDomain, "Domain of the Meilisearch instance.")
+	fs.IntVar(&o.MaxSearchLimit, "max-search-limit", o.MaxSearchLimit, "The maximum number of results a ResourceSearchQuery can return in a single request.")
+	fs.IntVar(&o.DefaultSearchLimit, "default-search-limit", o.DefaultSearchLimit, "The default number of results a ResourceSearchQuery returns when no limit is specified.")
+	fs.DurationVar(&o.PagingTimeout, "paging-timeout", o.PagingTimeout, "The duration for which a paging (continue) token is valid.")
 }
 
 func (o *SearchServerOptions) Complete() error {
@@ -181,25 +180,77 @@ func (o *SearchServerOptions) Config() (*searchapiserver.Config, error) {
 	genericConfig := genericapiserver.NewRecommendedConfig(searchapiserver.Codecs)
 
 	// Set effective version to match the Kubernetes version we're built against.
-	genericConfig.EffectiveVersion = basecompatibility.NewEffectiveVersionFromString("1.34", "", "")
+	genericConfig.EffectiveVersion = basecompatibility.NewEffectiveVersionFromString("1.35", "", "")
 
 	namer := apiopenapi.NewDefinitionNamer(searchapiserver.Scheme)
-	genericConfig.OpenAPIV3Config = genericapiserver.DefaultOpenAPIV3Config(GetOpenAPIDefinitions, namer)
+	genericConfig.OpenAPIV3Config = genericapiserver.DefaultOpenAPIV3Config(openapi.GetOpenAPIDefinitionsWithUnstructured, namer)
 	genericConfig.OpenAPIV3Config.Info.Title = "Search"
 	genericConfig.OpenAPIV3Config.Info.Version = version.Version
+	genericConfig.OpenAPIV3Config.GetDefinitionName = func(name string) (string, spec.Extensions) {
+		friendlyName, extensions := namer.GetDefinitionName(name)
+		return openapiutil.ToRESTFriendlyName(friendlyName), extensions
+	}
 
 	// Configure OpenAPI v2
-	genericConfig.OpenAPIConfig = genericapiserver.DefaultOpenAPIConfig(GetOpenAPIDefinitions, namer)
+	genericConfig.OpenAPIConfig = genericapiserver.DefaultOpenAPIConfig(openapi.GetOpenAPIDefinitionsWithUnstructured, namer)
 	genericConfig.OpenAPIConfig.Info.Title = "Search"
 	genericConfig.OpenAPIConfig.Info.Version = version.Version
+	genericConfig.OpenAPIConfig.GetDefinitionName = func(name string) (string, spec.Extensions) {
+		friendlyName, extensions := namer.GetDefinitionName(name)
+		return openapiutil.ToRESTFriendlyName(friendlyName), extensions
+	}
 
 	if err := o.RecommendedOptions.ApplyTo(genericConfig); err != nil {
 		return nil, fmt.Errorf("failed to apply recommended options: %w", err)
 	}
 
+	meiliClient, err := meilisearch.NewSDKClient(meilisearch.SDKConfig{
+		Domain:      o.MeilisearchDomain,
+		APIKey:      os.Getenv("MEILISEARCH_API_KEY"),
+		WaitTimeout: o.MeilisearchTaskWaitTimeout,
+		HTTPTimeout: o.MeilisearchHTTPTimeout,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize meilisearch client: %w", err)
+	}
+
+	// Create a dedicated scheme for the policy cache that only contains versioned types.
+	// This avoids ambiguity when the main scheme registers the same type for both
+	// v1alpha1 and __internal versions.
+	policyScheme := runtime.NewScheme()
+	if err := searchv1alpha1.AddToScheme(policyScheme); err != nil {
+		return nil, fmt.Errorf("failed to add v1alpha1 to policy scheme: %w", err)
+	}
+
+	// Create a controller-runtime cache that uses a watch stream (informer)
+	// to keep ResourceIndexPolicies in-sync.
+	k8sCache, err := runtimecache.New(genericConfig.LoopbackClientConfig, runtimecache.Options{Scheme: policyScheme})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create controller-runtime cache: %w", err)
+	}
+
+	// Create the policy cache (strict ready checking enabled)
+	indexPolicyCache, err := internalindexer.NewPolicyCache(k8sCache, true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create policy cache: %w", err)
+	}
+
+	pagingSecret := []byte(os.Getenv("SEARCH_PAGING_SECRET"))
+	if len(pagingSecret) == 0 {
+		klog.Info("SEARCH_PAGING_SECRET not set, generating a random one")
+		pagingSecret = []byte(uuid.New().String())
+	}
+
 	serverConfig := &searchapiserver.Config{
 		GenericConfig: genericConfig,
-		ExtraConfig:   searchapiserver.ExtraConfig{},
+		ExtraConfig: searchapiserver.ExtraConfig{
+			MeiliClient:        meiliClient,
+			PolicyCache:        indexPolicyCache,
+			MaxSearchLimit:     o.MaxSearchLimit,
+			DefaultSearchLimit: o.DefaultSearchLimit,
+			PagingSecret:       pagingSecret,
+			PagingTimeout:      o.PagingTimeout,
+		},
 	}
 
 	return serverConfig, nil
@@ -210,6 +261,8 @@ func Run(options *SearchServerOptions, ctx context.Context) error {
 	if err := logsapi.ValidateAndApply(options.Logs, utilfeature.DefaultMutableFeatureGate); err != nil {
 		return fmt.Errorf("failed to apply logging configuration: %w", err)
 	}
+
+	ctrllog.SetLogger(klog.NewKlogr())
 
 	config, err := options.Config()
 	if err != nil {
