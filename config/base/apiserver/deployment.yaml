@@ -100,11 +100,11 @@ spec:
           value: ""
         - name: MEILISEARCH_DOMAIN
           value: "http://meilisearch.meilisearch-system.svc.cluster.local:7700"
-        envFrom:
-        - secretRef:
-            name: search-apiserver
-        # TEMPLATE NOTE: Add your service-specific environment variables here
-        # Example: database credentials, API keys, configuration values
+        - name: MEILISEARCH_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: meilisearch-master-key
+              key: MEILI_MASTER_KEY
         resources:
           requests:
             cpu: 100m

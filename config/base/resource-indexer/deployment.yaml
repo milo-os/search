@@ -47,7 +47,9 @@ spec:
           value: "AUDIT_EVENTS"
         - name: MEILISEARCH_DOMAIN
           value: "http://meilisearch.meilisearch-system.svc.cluster.local:7700"
-        envFrom:
-        - secretRef:
-            name: search-indexer
-        
+        - name: MEILISEARCH_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: meilisearch-master-key
+              key: MEILI_MASTER_KEY
+
