@@ -547,11 +547,10 @@ func (f *resourceIndexPolicyFinalizer) Finalize(ctx context.Context, obj client.
 	}
 
 	// Remove all documents then delete the index itself.
-	searchIndex := policy.Status.IndexName
-	if searchIndex == "" {
-		log.Info("No index name found, skipping cleanup")
-		return finalizer.Result{}, nil
-	}
+	// Calculate instead of using from status.indexName to avoid race condition
+	// where the index status update was not made
+	searchIndex := utils.GetSearchIndex(policy.Spec.TargetResource)
+
 	log.Info("Deleting all documents from search index", "index", searchIndex)
 	if err := f.SearchSDK.DeleteAllDocuments(searchIndex); err != nil {
 		log.Error(err, "Failed to delete all documents from search index")
