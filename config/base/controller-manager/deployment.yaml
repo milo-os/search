@@ -80,11 +80,8 @@ spec:
         - name: MEILISEARCH_API_KEY
           valueFrom:
             secretKeyRef:
-              name: search-controller-manager
-              key: MEILISEARCH_API_KEY
-        envFrom:
-        - secretRef:
-            name: search-controller-manager
+              name: meilisearch-master-key
+              key: MEILI_MASTER_KEY
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
