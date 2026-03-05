@@ -103,6 +103,16 @@ func (c *PolicyCache) RegisterHandlers(ctx context.Context) error {
 func (c *PolicyCache) upsertPolicy(p *v1alpha1.ResourceIndexPolicy) {
 	key := p.Name
 
+	// Evict policies that are being deleted so the indexer stops processing new
+	// resources against an index that is about to be torn down. DeletionTimestamp
+	// is set by Kubernetes as soon as a delete request is received — before the
+	// finalizer runs — giving us the earliest possible eviction signal.
+	if p.DeletionTimestamp != nil {
+		klog.Infof("Policy %s is being deleted; evicting from cache", key)
+		c.deletePolicy(key)
+		return
+	}
+
 	// If strict ready checking is enabled, we only cache policies that are fully Ready.
 	// This prevents the primary indexer from processing events for policies that are
 	// still being initialized (e.g. index creation or initial re-indexing).

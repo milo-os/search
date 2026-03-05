@@ -19,7 +19,15 @@ rules:
   verbs:
   - get
   - list
+  - patch
+  - update
   - watch
+- apiGroups:
+  - search.miloapis.com
+  resources:
+  - resourceindexpolicies/finalizers
+  verbs:
+  - update
 - apiGroups:
   - search.miloapis.com
   resources:

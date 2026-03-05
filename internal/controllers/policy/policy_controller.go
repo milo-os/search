@@ -19,6 +19,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/finalizer"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"go.miloapis.net/search/internal/cel"
@@ -57,12 +58,17 @@ type ResourceIndexPolicyReconciler struct {
 
 	RetryBaseDelay time.Duration
 	RetryMaxDelay  time.Duration
+
+	Finalizers finalizer.Finalizers
 }
 
 const (
-	ReadyConditionType      = "Ready"
-	ReadyConditionReason    = "PolicyReady"
-	NotReadyConditionReason = "PolicyNotReady"
+	FinalizerName = "search.miloapis.com/cleanup"
+
+	ReadyConditionType         = "Ready"
+	ReadyConditionReason       = "PolicyReady"
+	NotReadyConditionReason    = "PolicyNotReady"
+	TerminatingConditionReason = "Terminating"
 
 	SearchIndexReadyConditionType = "SearchIndexReady"
 	IndexCreatedReason            = "IndexCreated"
@@ -83,8 +89,9 @@ const (
 	ReindexingInProgressReason = "ReindexingInProgress"
 )
 
-// +kubebuilder:rbac:groups=search.miloapis.com,resources=resourceindexpolicies,verbs=get;list;watch
+// +kubebuilder:rbac:groups=search.miloapis.com,resources=resourceindexpolicies,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=search.miloapis.com,resources=resourceindexpolicies/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=search.miloapis.com,resources=resourceindexpolicies/finalizers,verbs=update
 // +kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch
 
 // Reconcile matches the state of the cluster with the desired state of a ResourceIndexPolicy.
@@ -104,9 +111,26 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{}, err
 	}
 
-	// Check if the policy is being deleted
+	// Run finalizers:
+	finalizeResult, err := r.Finalizers.Finalize(ctx, policy)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to run finalizers: %w", err)
+	}
+	if finalizeResult.Updated {
+		logger.Info("Finalizer updated the policy object, persisting to API server")
+		if updateErr := r.Client.Update(ctx, policy); updateErr != nil {
+			if errors.IsConflict(updateErr) {
+				logger.Info("Conflict updating policy after finalizer update; requeuing")
+				return ctrl.Result{Requeue: true}, nil
+			}
+			logger.Error(updateErr, "Failed to update ResourceIndexPolicy after finalizer update")
+			return ctrl.Result{}, updateErr
+		}
+		return ctrl.Result{}, nil
+	}
+
 	if policy.GetDeletionTimestamp() != nil {
-		logger.Info("ResourceIndexPolicy is being deleted")
+		logger.Info("ResourceIndexPolicy is being deleted, skipping reconciliation")
 		return ctrl.Result{}, nil
 	}
 
@@ -493,8 +517,67 @@ func (r *ResourceIndexPolicyReconciler) publishReindexMessages(
 	return nil
 }
 
+// resourceIndexPolicyFinalizer handles Meilisearch cleanup when a
+// ResourceIndexPolicy is deleted.
+type resourceIndexPolicyFinalizer struct {
+	Client    client.Client
+	SearchSDK *meilisearch.SDKClient
+}
+
+func (f *resourceIndexPolicyFinalizer) Finalize(ctx context.Context, obj client.Object) (finalizer.Result, error) {
+	log := logf.FromContext(ctx).WithName("resourceindexpolicy-finalizer")
+	log.Info("Finalizing ResourceIndexPolicy")
+
+	policy, ok := obj.(*searchv1alpha1.ResourceIndexPolicy)
+	if !ok {
+		return finalizer.Result{}, fmt.Errorf("object is not a ResourceIndexPolicy")
+	}
+
+	// Set Ready=False immediately so consumers can observe the terminating state.
+	oldStatus := policy.Status.DeepCopy()
+	meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
+		Type:    ReadyConditionType,
+		Status:  metav1.ConditionFalse,
+		Reason:  TerminatingConditionReason,
+		Message: "ResourceIndexPolicy is being deleted",
+	})
+	if err := utils.UpdateStatusIfChanged(ctx, f.Client, log, policy, oldStatus, &policy.Status); err != nil {
+		log.Error(err, "Failed to update ResourceIndexPolicy status")
+		return finalizer.Result{}, err
+	}
+
+	// Remove all documents then delete the index itself.
+	searchIndex := policy.Status.IndexName
+	if searchIndex == "" {
+		log.Info("No index name found, skipping cleanup")
+		return finalizer.Result{}, nil
+	}
+	log.Info("Deleting all documents from search index", "index", searchIndex)
+	if err := f.SearchSDK.DeleteAllDocuments(searchIndex); err != nil {
+		log.Error(err, "Failed to delete all documents from search index")
+		return finalizer.Result{}, err
+	}
+
+	log.Info("Deleting search index", "index", searchIndex)
+	if err := f.SearchSDK.DeleteIndex(searchIndex); err != nil {
+		log.Error(err, "Failed to delete search index")
+		return finalizer.Result{}, err
+	}
+
+	log.Info("ResourceIndexPolicy cleanup complete")
+	return finalizer.Result{}, nil
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *ResourceIndexPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.Finalizers = finalizer.NewFinalizers()
+	if err := r.Finalizers.Register(FinalizerName, &resourceIndexPolicyFinalizer{
+		Client:    r.Client,
+		SearchSDK: r.SearchSDK,
+	}); err != nil {
+		return fmt.Errorf("failed to register finalizer: %w", err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&searchv1alpha1.ResourceIndexPolicy{}).
 		Complete(r)
