@@ -337,6 +337,56 @@ func (s *SDKClient) UpdateSearchableAttributes(indexUID string, attributes []str
 	return &meilisearch.Task{TaskUID: resp.TaskUID, IndexUID: indexUID}, nil
 }
 
+// DeleteAllDocuments deletes all documents from the given index and waits for the
+// task to complete before returning. If the index does not exist, it is a no-op.
+func (s *SDKClient) DeleteAllDocuments(indexUID string) error {
+	resp, err := s.client.Index(indexUID).DeleteAllDocuments(nil)
+	if err != nil {
+		if strings.Contains(err.Error(), "index_not_found") {
+			klog.Infof("Index %s not found, skipping document deletion", indexUID)
+			return nil
+		}
+		return fmt.Errorf("failed to delete all documents from index %s: %w", indexUID, err)
+	}
+
+	task, err := s.waitForTask(resp.TaskUID)
+	if err != nil {
+		return fmt.Errorf("failed to wait for document deletion task: %w", err)
+	}
+
+	if task.Status != meilisearch.TaskStatusSucceeded {
+		return fmt.Errorf("document deletion task failed with status %s: %s", task.Status, task.Error.Message)
+	}
+
+	klog.Infof("All documents deleted from index %s", indexUID)
+	return nil
+}
+
+// DeleteIndex deletes the index with the given UID and waits for the task to
+// complete. If the index does not exist, it is a no-op.
+func (s *SDKClient) DeleteIndex(indexUID string) error {
+	resp, err := s.client.DeleteIndex(indexUID)
+	if err != nil {
+		if strings.Contains(err.Error(), "index_not_found") {
+			klog.Infof("Index %s not found, skipping deletion", indexUID)
+			return nil
+		}
+		return fmt.Errorf("failed to delete index %s: %w", indexUID, err)
+	}
+
+	task, err := s.waitForTask(resp.TaskUID)
+	if err != nil {
+		return fmt.Errorf("failed to wait for index deletion task: %w", err)
+	}
+
+	if task.Status != meilisearch.TaskStatusSucceeded {
+		return fmt.Errorf("index deletion task failed with status %s: %s", task.Status, task.Error.Message)
+	}
+
+	klog.Infof("Index %s deleted", indexUID)
+	return nil
+}
+
 // GetSettingsUpdateTask returns the most recent settings update task for the given index.
 func (s *SDKClient) GetSettingsUpdateTask(indexUID string) (*meilisearch.Task, error) {
 	resp, err := s.client.GetTasks(&meilisearch.TasksQuery{
