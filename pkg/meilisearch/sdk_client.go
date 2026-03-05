@@ -340,12 +340,17 @@ func (s *SDKClient) UpdateSearchableAttributes(indexUID string, attributes []str
 // DeleteAllDocuments deletes all documents from the given index and waits for the
 // task to complete before returning. If the index does not exist, it is a no-op.
 func (s *SDKClient) DeleteAllDocuments(indexUID string) error {
+	exists, err := s.IndexExists(indexUID)
+	if err != nil {
+		return fmt.Errorf("failed to check if index %s exists: %w", indexUID, err)
+	}
+	if !exists {
+		klog.Infof("Index %s not found, skipping document deletion", indexUID)
+		return nil
+	}
+
 	resp, err := s.client.Index(indexUID).DeleteAllDocuments(nil)
 	if err != nil {
-		if strings.Contains(err.Error(), "index_not_found") {
-			klog.Infof("Index %s not found, skipping document deletion", indexUID)
-			return nil
-		}
 		return fmt.Errorf("failed to delete all documents from index %s: %w", indexUID, err)
 	}
 
@@ -365,12 +370,17 @@ func (s *SDKClient) DeleteAllDocuments(indexUID string) error {
 // DeleteIndex deletes the index with the given UID and waits for the task to
 // complete. If the index does not exist, it is a no-op.
 func (s *SDKClient) DeleteIndex(indexUID string) error {
+	exists, err := s.IndexExists(indexUID)
+	if err != nil {
+		return fmt.Errorf("failed to check if index %s exists: %w", indexUID, err)
+	}
+	if !exists {
+		klog.Infof("Index %s not found, skipping deletion", indexUID)
+		return nil
+	}
+
 	resp, err := s.client.DeleteIndex(indexUID)
 	if err != nil {
-		if strings.Contains(err.Error(), "index_not_found") {
-			klog.Infof("Index %s not found, skipping deletion", indexUID)
-			return nil
-		}
 		return fmt.Errorf("failed to delete index %s: %w", indexUID, err)
 	}
 
