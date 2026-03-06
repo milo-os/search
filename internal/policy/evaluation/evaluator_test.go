@@ -61,7 +61,7 @@ func TestParsePath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := parsePath(tt.input)
+			result := ParsePath(tt.input)
 			assert.Equal(t, tt.expected, result)
 		})
 	}

@@ -86,7 +86,7 @@ func (cp *CachedPolicy) Evaluate(u *unstructured.Unstructured) (*EvalResult, err
 	// 4. Extract fields from the matched resource using the path segments
 	// 4. Extract fields from the matched resource using the path segments
 	for _, field := range cp.Policy.Spec.Fields {
-		segments := parsePath(field.Path)
+		segments := ParsePath(field.Path)
 		if len(segments) == 0 {
 			continue
 		}
@@ -129,7 +129,7 @@ func (r *EvalResult) Transform() map[string]any {
 	doc := make(map[string]any)
 
 	for path, value := range r.Fields {
-		segments := parsePath(path)
+		segments := ParsePath(path)
 		if len(segments) == 0 {
 			continue
 		}
@@ -178,9 +178,9 @@ func (r *EvalResult) Transform() map[string]any {
 	return doc
 }
 
-// parsePath converts ".spec.firstName" or ".metadata.labels['department']"
+// ParsePath converts ".spec.firstName" or ".metadata.labels['department']"
 // into []string{"spec", "firstName"} or []string{"metadata", "labels", "department"}.
-func parsePath(path string) []string {
+func ParsePath(path string) []string {
 	path = strings.TrimPrefix(path, ".")
 	if path == "" {
 		return nil

@@ -1,0 +1,294 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: searchable-attributes-bracket-notation
+spec:
+  description: |
+    End-to-end test verifying that bracket notation field paths
+    (e.g. .metadata.annotations['key'], .spec.selector['app']) are correctly
+    translated to dot-notation Meilisearch searchable attributes, and that
+    resources indexed via those paths can be found by search queries.
+    Also verifies spec and status field indexing.
+
+  namespace: default
+
+  steps:
+    # =========================================================================
+    # Pre-cleanup: remove any conflicting policies and leftover test resources
+    # so the test is idempotent.
+    # =========================================================================
+    - name: pre-cleanup
+      description: "Removes conflicting policies and stale test resources"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl delete resourceindexpolicy e2e-configmap-policy e2e-service-policy --ignore-not-found=true || true
+              kubectl delete configmap e2e-cm-platform e2e-cm-database --ignore-not-found=true || true
+              kubectl delete service e2e-svc-frontend --ignore-not-found=true || true
+              sleep 5
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 1: Create ConfigMaps with metadata annotations (bracket-notation paths)
+    # =========================================================================
+    - name: create-annotated-configmaps
+      description: "Creates ConfigMaps whose annotations will be indexed via bracket notation"
+      try:
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: e2e-cm-platform
+                namespace: default
+                annotations:
+                  app.kubernetes.io/description: "Platform configuration"
+                  app.kubernetes.io/owner: "platform-team"
+              data:
+                config-key: "platform-value"
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: e2e-cm-database
+                namespace: default
+                annotations:
+                  app.kubernetes.io/description: "Database connection settings"
+                  app.kubernetes.io/owner: "data-team"
+              data:
+                config-key: "database-value"
+
+    # =========================================================================
+    # Step 2: Create a Service with spec fields (bracket notation labels/selector)
+    # =========================================================================
+    - name: create-service-with-labels
+      description: "Creates a Service whose spec and status fields will be indexed"
+      try:
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: e2e-svc-frontend
+                namespace: default
+                labels:
+                  app: frontend
+              spec:
+                type: ClusterIP
+                selector:
+                  app: frontend
+                ports:
+                  - port: 80
+                    targetPort: 8080
+                    name: http
+
+    # =========================================================================
+    # Step 3: Create ResourceIndexPolicy for ConfigMaps
+    # Indexes annotation fields via bracket notation, and a data field.
+    # =========================================================================
+    - name: create-configmap-policy
+      description: "Creates policy with bracket notation annotation paths and data field"
+      try:
+        - apply:
+            resource:
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: e2e-configmap-policy
+              spec:
+                targetResource:
+                  group: ""
+                  version: v1
+                  kind: ConfigMap
+                conditions:
+                  - name: is-default-namespace
+                    expression: "metadata.namespace == 'default'"
+                fields:
+                  - path: ".metadata.name"
+                    searchable: true
+                  - path: ".metadata.annotations['app.kubernetes.io/description']"
+                    searchable: true
+                  - path: ".metadata.annotations['app.kubernetes.io/owner']"
+                    searchable: true
+                  - path: ".data['config-key']"
+                    searchable: true
+
+    # =========================================================================
+    # Step 4: Create ResourceIndexPolicy for Services
+    # Indexes spec fields (bracket notation selector/labels) and status field.
+    # =========================================================================
+    - name: create-service-policy
+      description: "Creates policy with bracket notation spec fields and status field"
+      try:
+        - apply:
+            resource:
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: e2e-service-policy
+              spec:
+                targetResource:
+                  group: ""
+                  version: v1
+                  kind: Service
+                conditions:
+                  - name: is-default-namespace
+                    expression: "metadata.namespace == 'default'"
+                fields:
+                  - path: ".metadata.name"
+                    searchable: true
+                  - path: ".metadata.labels['app']"
+                    searchable: true
+                  - path: ".spec.type"
+                    searchable: true
+                  - path: ".spec.selector['app']"
+                    searchable: true
+                  - path: ".status.loadBalancer"
+                    searchable: true
+
+    # =========================================================================
+    # Step 5: Wait for both policies to reach Ready=True
+    # =========================================================================
+    - name: wait-for-configmap-policy-ready
+      description: "Waits for the ConfigMap policy to finish reconciling"
+      try:
+        - wait:
+            apiVersion: search.miloapis.com/v1alpha1
+            kind: ResourceIndexPolicy
+            name: e2e-configmap-policy
+            timeout: 60s
+            for:
+              condition:
+                name: Ready
+                value: "True"
+
+    - name: wait-for-service-policy-ready
+      description: "Waits for the Service policy to finish reconciling"
+      try:
+        - wait:
+            apiVersion: search.miloapis.com/v1alpha1
+            kind: ResourceIndexPolicy
+            name: e2e-service-policy
+            timeout: 60s
+            for:
+              condition:
+                name: Ready
+                value: "True"
+
+    # =========================================================================
+    # Step 6: Wait for reindexing to complete
+    # =========================================================================
+    - name: wait-for-reindexing
+      description: "Sleeps 10 seconds for Meilisearch to finish processing indexed documents"
+      try:
+        - script:
+            timeout: 15s
+            content: sleep 10
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 7: Verify searchable attributes are registered in dot notation
+    # This is the core assertion of the bracket notation fix.
+    # =========================================================================
+    - name: verify-configmap-searchable-attributes
+      description: "Confirms annotation paths are stored as dot-notation (not bracket notation) in Meilisearch"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl run curl-cm-attrs-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -H "Authorization: Bearer search-master-key" http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_ConfigMap/settings/searchable-attributes
+            check:
+              (contains($stdout, 'metadata.annotations.app.kubernetes.io/description')): true
+              (contains($stdout, 'metadata.annotations.app.kubernetes.io/owner')): true
+              (contains($stdout, 'data.config-key')): true
+
+    - name: verify-service-searchable-attributes
+      description: "Confirms spec/status paths are stored as dot-notation in Meilisearch"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl run curl-svc-attrs-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -H "Authorization: Bearer search-master-key" http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_Service/settings/searchable-attributes
+            check:
+              (contains($stdout, 'metadata.labels.app')): true
+              (contains($stdout, 'spec.type')): true
+              (contains($stdout, 'spec.selector.app')): true
+              (contains($stdout, 'status.loadBalancer')): true
+
+    # =========================================================================
+    # Step 8: Search ConfigMaps by annotation values (bracket notation fix)
+    # =========================================================================
+    - name: search-configmap-by-annotation-description
+      description: "Finds ConfigMap by value in a bracket-notation annotation field"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl run curl-search-desc-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "Platform configuration"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_ConfigMap/search
+            check:
+              (contains($stdout, 'e2e-cm-platform')): true
+
+    - name: search-configmap-by-annotation-owner
+      description: "Finds ConfigMap by owner annotation value (bracket notation)"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl run curl-search-owner-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "data-team"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_ConfigMap/search
+            check:
+              (contains($stdout, 'e2e-cm-database')): true
+
+    # =========================================================================
+    # Step 9: Search ConfigMaps by data field value
+    # =========================================================================
+    - name: search-configmap-by-data-field
+      description: "Finds ConfigMap by value in a bracket-notation data field"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl run curl-search-data-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "database-value"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_ConfigMap/search
+            check:
+              (contains($stdout, 'e2e-cm-database')): true
+
+    # =========================================================================
+    # Step 10: Search Services by spec fields
+    # =========================================================================
+    - name: search-service-by-spec-type
+      description: "Finds Service by spec.type (standard dot-notation spec field)"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl run curl-search-type-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "ClusterIP"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_Service/search
+            check:
+              (contains($stdout, 'e2e-svc-frontend')): true
+
+    - name: search-service-by-spec-selector
+      description: "Finds Service by spec.selector.app (bracket notation spec field)"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl run curl-search-sel-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "frontend"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_Service/search
+            check:
+              (contains($stdout, 'e2e-svc-frontend')): true
+
+    # =========================================================================
+    # Cleanup
+    # =========================================================================
+    - name: cleanup
+      description: "Removes all resources created by this test"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl delete resourceindexpolicy e2e-configmap-policy e2e-service-policy --ignore-not-found=true || true
+              kubectl delete configmap e2e-cm-platform e2e-cm-database --ignore-not-found=true || true
+              kubectl delete service e2e-svc-frontend --ignore-not-found=true || true
+            check:
+              ($error): ~

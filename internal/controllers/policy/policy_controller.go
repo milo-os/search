@@ -23,6 +23,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"go.miloapis.net/search/internal/cel"
+	"go.miloapis.net/search/internal/policy/evaluation"
 	"go.miloapis.net/search/internal/policy/validation"
 	"go.miloapis.net/search/internal/utils"
 	searchv1alpha1 "go.miloapis.net/search/pkg/apis/search/v1alpha1"
@@ -246,9 +247,13 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		desiredAttributes := []string{}
 		for _, f := range policy.Spec.Fields {
 			if f.Searchable {
-				// Meilisearch expects "metadata.name" not ".metadata.name"
-				path := strings.TrimPrefix(f.Path, ".")
-				desiredAttributes = append(desiredAttributes, path)
+				// ParsePath handles bracket notation (e.g. ".metadata.annotations['key']")
+				// and returns segments that are joined with dots to produce the
+				// Meilisearch-compatible attribute name (e.g. "metadata.annotations.key").
+				segments := evaluation.ParsePath(f.Path)
+				if len(segments) > 0 {
+					desiredAttributes = append(desiredAttributes, strings.Join(segments, "."))
+				}
 			}
 		}
 		sort.Strings(desiredAttributes)
