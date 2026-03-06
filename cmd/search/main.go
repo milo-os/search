@@ -190,6 +190,12 @@ func (o *SearchServerOptions) Config() (*searchapiserver.Config, error) {
 		friendlyName, extensions := namer.GetDefinitionName(name)
 		return openapiutil.ToRESTFriendlyName(friendlyName), extensions
 	}
+	// Nil out the pre-computed Definitions map so the OpenAPI builder re-invokes
+	// GetDefinitions with a fresh ref callback that uses the updated GetDefinitionName
+	// above. Without this, the builder uses the pre-computed $refs (which were built
+	// before GetDefinitionName was overridden) and the schema component keys diverge
+	// from the $ref values in the generated spec.
+	genericConfig.OpenAPIV3Config.Definitions = nil
 
 	// Configure OpenAPI v2
 	genericConfig.OpenAPIConfig = genericapiserver.DefaultOpenAPIConfig(openapi.GetOpenAPIDefinitionsWithUnstructured, namer)
