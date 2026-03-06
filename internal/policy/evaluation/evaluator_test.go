@@ -1,6 +1,7 @@
 package evaluation
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/google/cel-go/cel"
@@ -57,11 +58,67 @@ func TestParsePath(t *testing.T) {
 			input:    `.status.conditions[0].lastTransitionTime`,
 			expected: []string{"status", "conditions", "0", "lastTransitionTime"},
 		},
+		{
+			name:     "fully qualified annotation key with single quotes",
+			input:    ".metadata.annotations['kubernetes.io/display-name']",
+			expected: []string{"metadata", "annotations", "kubernetes.io/display-name"},
+		},
+		{
+			name:     "fully qualified label key with single quotes",
+			input:    ".metadata.labels['app.kubernetes.io/name']",
+			expected: []string{"metadata", "labels", "app.kubernetes.io/name"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := ParsePath(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestMeilisearchAttributeName verifies that converting a field path to a
+// Meilisearch searchable attribute name (ParsePath + strings.Join with ".") produces
+// the correct dot-notation string for fully qualified Kubernetes label/annotation keys.
+// This mirrors the logic in the policy controller's desiredAttributes calculation.
+func TestMeilisearchAttributeName(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		expected string
+	}{
+		{
+			name:     "simple dot notation",
+			path:     ".metadata.name",
+			expected: "metadata.name",
+		},
+		{
+			name:     "fully qualified annotation key",
+			path:     ".metadata.annotations['kubernetes.io/display-name']",
+			expected: "metadata.annotations.kubernetes.io/display-name",
+		},
+		{
+			name:     "fully qualified label key",
+			path:     ".metadata.labels['app.kubernetes.io/name']",
+			expected: "metadata.labels.app.kubernetes.io/name",
+		},
+		{
+			name:     "spec field with bracket selector",
+			path:     ".spec.selector['app']",
+			expected: "spec.selector.app",
+		},
+		{
+			name:     "data field with dotted key",
+			path:     ".data['config.yaml']",
+			expected: "data.config.yaml",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			segments := ParsePath(tt.path)
+			result := strings.Join(segments, ".")
 			assert.Equal(t, tt.expected, result)
 		})
 	}

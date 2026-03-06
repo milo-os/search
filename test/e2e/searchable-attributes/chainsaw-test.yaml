@@ -46,6 +46,7 @@ spec:
                 annotations:
                   app.kubernetes.io/description: "Platform configuration"
                   app.kubernetes.io/owner: "platform-team"
+                  kubernetes.io/display-name: "Platform Config"
               data:
                 config-key: "platform-value"
         - apply:
@@ -76,6 +77,7 @@ spec:
                 namespace: default
                 labels:
                   app: frontend
+                  app.kubernetes.io/name: frontend-service
               spec:
                 type: ClusterIP
                 selector:
@@ -113,6 +115,8 @@ spec:
                     searchable: true
                   - path: ".metadata.annotations['app.kubernetes.io/owner']"
                     searchable: true
+                  - path: ".metadata.annotations['kubernetes.io/display-name']"
+                    searchable: true
                   - path: ".data['config-key']"
                     searchable: true
 
@@ -141,6 +145,8 @@ spec:
                   - path: ".metadata.name"
                     searchable: true
                   - path: ".metadata.labels['app']"
+                    searchable: true
+                  - path: ".metadata.labels['app.kubernetes.io/name']"
                     searchable: true
                   - path: ".spec.type"
                     searchable: true
@@ -204,6 +210,7 @@ spec:
             check:
               (contains($stdout, 'metadata.annotations.app.kubernetes.io/description')): true
               (contains($stdout, 'metadata.annotations.app.kubernetes.io/owner')): true
+              (contains($stdout, 'metadata.annotations.kubernetes.io/display-name')): true
               (contains($stdout, 'data.config-key')): true
 
     - name: verify-service-searchable-attributes
@@ -215,6 +222,7 @@ spec:
               kubectl run curl-svc-attrs-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -H "Authorization: Bearer search-master-key" http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_Service/settings/searchable-attributes
             check:
               (contains($stdout, 'metadata.labels.app')): true
+              (contains($stdout, 'metadata.labels.app.kubernetes.io/name')): true
               (contains($stdout, 'spec.type')): true
               (contains($stdout, 'spec.selector.app')): true
               (contains($stdout, 'status.loadBalancer')): true
@@ -242,6 +250,16 @@ spec:
             check:
               (contains($stdout, 'e2e-cm-database')): true
 
+    - name: search-configmap-by-display-name-annotation
+      description: "Finds ConfigMap by fully qualified kubernetes.io/display-name annotation"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl run curl-search-dn-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "Platform Config"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_ConfigMap/search
+            check:
+              (contains($stdout, 'e2e-cm-platform')): true
+
     # =========================================================================
     # Step 9: Search ConfigMaps by data field value
     # =========================================================================
@@ -265,6 +283,16 @@ spec:
             timeout: 30s
             content: |
               kubectl run curl-search-type-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "ClusterIP"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_Service/search
+            check:
+              (contains($stdout, 'e2e-svc-frontend')): true
+
+    - name: search-service-by-fully-qualified-label
+      description: "Finds Service by fully qualified app.kubernetes.io/name label (bracket notation)"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl run curl-search-fql-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "frontend-service"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_Service/search
             check:
               (contains($stdout, 'e2e-svc-frontend')): true
 
