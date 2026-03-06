@@ -64,7 +64,7 @@ spec:
         - name: MEILISEARCH_DOMAIN
           value: "http://meilisearch.meilisearch-system.svc.cluster.local:7700"
         - name: MEILISEARCH_TASK_WAIT_TIMEOUT
-          value: "30s"
+          value: "3s"
         - name: MAX_CEL_DEPTH
           value: "10"
         - name: NATS_URL
