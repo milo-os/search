@@ -46,12 +46,6 @@ patches:
           cert-manager.io/inject-ca-from: search-system/search-ca
 
 secretGenerator:
-- name: search-controller-manager
+- name: meilisearch-master-key
   literals:
-  - MEILISEARCH_API_KEY=search-master-key
-- name: search-indexer
-  literals:
-  - MEILISEARCH_API_KEY=search-master-key
-- name: search-apiserver
-  literals:
-  - MEILISEARCH_API_KEY=search-master-key
+  - MEILI_MASTER_KEY=search-master-key
