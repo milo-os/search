@@ -1,0 +1,499 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: search-flow-indexer-finalizer
+spec:
+  description: |
+    End-to-end tests for the resource-indexer backfill and the ResourceIndexPolicy
+    finalizer. Targets ResourceQuotas to avoid ResourceIndexPolicy conflicts with
+    parallel test suites. Covers: creating resources BEFORE the policy exists (to
+    verify backfill indexing), querying after the policy is ready (resources created
+    before the policy must be searchable), and deleting the policy (finalizer must
+    clean up the Meilisearch index, making subsequent queries return errors).
+
+    ResourceQuotas are created in a dedicated namespace (e2e-indexer-finalizer) to
+    prevent quota enforcement from affecting other tests running in the default namespace.
+
+  namespace: default
+
+  steps:
+    # =========================================================================
+    # Pre-cleanup: remove any leftover resources for idempotent runs
+    # =========================================================================
+    - name: pre-cleanup
+      description: "Removes leftover resources to ensure idempotent test execution"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl delete resourceindexpolicy e2e-finalizer-rq-policy --ignore-not-found=true || true
+              kubectl delete namespace e2e-indexer-finalizer --ignore-not-found=true || true
+              sleep 10
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 0: Create a dedicated namespace for ResourceQuotas
+    # This prevents quota enforcement from affecting other tests.
+    # =========================================================================
+    - name: create-test-namespace
+      description: "Creates a dedicated namespace for ResourceQuotas"
+      try:
+        - script:
+            timeout: 15s
+            content: |
+              kubectl create namespace e2e-indexer-finalizer --dry-run=client -o yaml | kubectl apply -f -
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 1: Create resources BEFORE the policy exists
+    # These must be backfill-indexed when the policy is created.
+    # =========================================================================
+    - name: create-resourcequotas-before-policy
+      description: "Creates 5 ResourceQuotas before any policy exists — tests backfill indexing"
+      try:
+        - script:
+            timeout: 15s
+            content: |
+              cat <<EOF | kubectl apply -f -
+              apiVersion: v1
+              kind: ResourceQuota
+              metadata:
+                name: e2e-rq-compute
+                namespace: e2e-indexer-finalizer
+                labels:
+                  e2e-finalizer-test: "true"
+                annotations:
+                  e2e.search.test/quota-type: "compute-resources-finalizer-xk7"
+              spec:
+                hard:
+                  cpu: "10"
+              EOF
+            check:
+              ($error): ~
+        - script:
+            timeout: 15s
+            content: |
+              cat <<EOF | kubectl apply -f -
+              apiVersion: v1
+              kind: ResourceQuota
+              metadata:
+                name: e2e-rq-storage
+                namespace: e2e-indexer-finalizer
+                labels:
+                  e2e-finalizer-test: "true"
+                annotations:
+                  e2e.search.test/quota-type: "storage-resources-finalizer-xk7"
+              spec:
+                hard:
+                  requests.storage: "100Gi"
+              EOF
+            check:
+              ($error): ~
+        - script:
+            timeout: 15s
+            content: |
+              cat <<EOF | kubectl apply -f -
+              apiVersion: v1
+              kind: ResourceQuota
+              metadata:
+                name: e2e-rq-objects
+                namespace: e2e-indexer-finalizer
+                labels:
+                  e2e-finalizer-test: "true"
+                annotations:
+                  e2e.search.test/quota-type: "object-count-finalizer-xk7"
+              spec:
+                hard:
+                  pods: "50"
+              EOF
+            check:
+              ($error): ~
+        - script:
+            timeout: 15s
+            content: |
+              cat <<EOF | kubectl apply -f -
+              apiVersion: v1
+              kind: ResourceQuota
+              metadata:
+                name: e2e-rq-network
+                namespace: e2e-indexer-finalizer
+                labels:
+                  e2e-finalizer-test: "true"
+                annotations:
+                  e2e.search.test/quota-type: "network-bandwidth-finalizer-xk7"
+              spec:
+                hard:
+                  services: "20"
+              EOF
+            check:
+              ($error): ~
+        - script:
+            timeout: 15s
+            content: |
+              cat <<EOF | kubectl apply -f -
+              apiVersion: v1
+              kind: ResourceQuota
+              metadata:
+                name: e2e-rq-services
+                namespace: e2e-indexer-finalizer
+                labels:
+                  e2e-finalizer-test: "true"
+                annotations:
+                  e2e.search.test/quota-type: "service-limits-finalizer-xk7"
+              spec:
+                hard:
+                  services.loadbalancers: "5"
+              EOF
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 2: Create the policy AFTER the resources already exist
+    # The resource-indexer must backfill all matching resources into the index.
+    # =========================================================================
+    - name: create-rq-policy
+      description: "Creates ResourceIndexPolicy targeting ResourceQuotas — triggers backfill"
+      try:
+        - apply:
+            resource:
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: e2e-finalizer-rq-policy
+              spec:
+                targetResource:
+                  group: ""
+                  version: v1
+                  kind: ResourceQuota
+                conditions:
+                  - name: is-e2e-finalizer-test
+                    expression: "'e2e-finalizer-test' in metadata.labels"
+                fields:
+                  - path: ".metadata.name"
+                    searchable: true
+                  - path: ".metadata.annotations['e2e.search.test/quota-type']"
+                    searchable: true
+
+    - name: wait-for-rq-policy-ready
+      description: "Waits for ResourceQuota policy to reach Ready=True"
+      try:
+        - wait:
+            apiVersion: search.miloapis.com/v1alpha1
+            kind: ResourceIndexPolicy
+            name: e2e-finalizer-rq-policy
+            timeout: 60s
+            for:
+              condition:
+                name: Ready
+                value: "True"
+
+    - name: wait-for-backfill-indexing
+      description: "Waits 30 seconds for the indexer to backfill all pre-existing resources"
+      try:
+        - script:
+            timeout: 35s
+            content: sleep 30
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 3: Verify backfill — all 5 pre-existing resources must be searchable
+    # =========================================================================
+    - name: B1-search-compute-quota
+      description: "B1: Pre-existing compute ResourceQuota must be searchable after backfill"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: b1-search-compute
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: ResourceQuota
+                query: "compute-resources-finalizer-xk7"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-rq-compute")] | length > 0'
+            check:
+              ($error): ~
+
+    - name: B2-search-storage-quota
+      description: "B2: Pre-existing storage ResourceQuota must be searchable after backfill"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: b2-search-storage
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: ResourceQuota
+                query: "storage-resources-finalizer-xk7"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-rq-storage")] | length > 0'
+            check:
+              ($error): ~
+
+    - name: B3-search-objects-quota
+      description: "B3: Pre-existing objects ResourceQuota must be searchable after backfill"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: b3-search-objects
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: ResourceQuota
+                query: "object-count-finalizer-xk7"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-rq-objects")] | length > 0'
+            check:
+              ($error): ~
+
+    - name: B4-search-network-quota
+      description: "B4: Pre-existing network ResourceQuota must be searchable after backfill"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: b4-search-network
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: ResourceQuota
+                query: "network-bandwidth-finalizer-xk7"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-rq-network")] | length > 0'
+            check:
+              ($error): ~
+
+    - name: B5-search-services-quota
+      description: "B5: Pre-existing services ResourceQuota must be searchable after backfill"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: b5-search-services
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: ResourceQuota
+                query: "service-limits-finalizer-xk7"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-rq-services")] | length > 0'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 3b: Verify documents exist directly in Meilisearch before deletion
+    # =========================================================================
+    - name: B6-verify-meilisearch-documents-exist
+      description: "B6: Query Meilisearch directly — index must have documents before policy deletion"
+      try:
+        - script:
+            timeout: 15s
+            content: |
+              OUTPUT=$(kubectl exec -n meilisearch-system meilisearch-0 -- \
+                curl -sf -H "Authorization: Bearer search-master-key" \
+                http://localhost:7700/indexes/_v1_ResourceQuota/stats)
+              echo "$OUTPUT"
+              echo "$OUTPUT" | grep -q '"numberOfDocuments"'
+            check:
+              ($error): ~
+
+    - name: B7-verify-meilisearch-search-returns-results
+      description: "B7: Search Meilisearch directly — must return documents matching our annotation"
+      try:
+        - script:
+            timeout: 15s
+            content: |
+              OUTPUT=$(kubectl exec -n meilisearch-system meilisearch-0 -- \
+                curl -sf -X POST \
+                -H "Authorization: Bearer search-master-key" \
+                -H "Content-Type: application/json" \
+                --data '{"q": "finalizer-xk7"}' \
+                http://localhost:7700/indexes/_v1_ResourceQuota/search)
+              echo "$OUTPUT"
+              echo "$OUTPUT" | grep -q 'e2e-rq-compute' && echo "$OUTPUT" | grep -q 'e2e-rq-storage'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 4: Delete the ResourceIndexPolicy
+    # The finalizer must clean up the Meilisearch index.
+    # =========================================================================
+    - name: delete-rq-policy
+      description: "Deletes the ResourceIndexPolicy — finalizer cleans up the index"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl delete resourceindexpolicy e2e-finalizer-rq-policy
+            check:
+              ($error): ~
+
+    - name: wait-for-finalizer-cleanup
+      description: "Waits 15 seconds for the finalizer to clean up the Meilisearch index"
+      try:
+        - script:
+            timeout: 20s
+            content: sleep 15
+            check:
+              ($error): ~
+
+    - name: verify-policy-deleted
+      description: "Confirms the ResourceIndexPolicy no longer exists"
+      try:
+        - script:
+            timeout: 15s
+            content: |
+              kubectl get resourceindexpolicy e2e-finalizer-rq-policy 2>&1 || true
+            check:
+              (contains($stdout, 'not found') || contains($stderr, 'not found') || contains($stdout, 'NotFound') || contains($stderr, 'NotFound')): true
+
+    # =========================================================================
+    # Step 5: Verify Meilisearch index is gone after finalizer cleanup
+    # =========================================================================
+    - name: F0-verify-meilisearch-documents-deleted
+      description: "F0: Meilisearch must have no documents or no index after finalizer cleanup"
+      try:
+        - script:
+            timeout: 15s
+            content: |
+              OUTPUT=$(kubectl exec -n meilisearch-system meilisearch-0 -- \
+                curl -s -H "Authorization: Bearer search-master-key" \
+                http://localhost:7700/indexes/_v1_ResourceQuota/stats)
+              echo "Response: $OUTPUT"
+
+              # Either the index is gone (index_not_found) or documents are 0
+              if echo "$OUTPUT" | grep -q "index_not_found"; then
+                echo "PASS: Meilisearch index was deleted by finalizer"
+                exit 0
+              fi
+              DOC_COUNT=$(echo "$OUTPUT" | grep -o '"numberOfDocuments":[0-9]*' | grep -o '[0-9]*')
+              if [ "$DOC_COUNT" = "0" ]; then
+                echo "PASS: All documents deleted from Meilisearch (count=0)"
+                exit 0
+              fi
+              echo "FAIL: Meilisearch still has $DOC_COUNT documents after policy deletion"
+              exit 1
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 6: Query after policy deletion — must return an error
+    # The index no longer exists, so the API must reject the query.
+    # =========================================================================
+    - name: F1-search-after-deletion-returns-error
+      description: "F1: Querying ResourceQuotas after policy deletion must return an error"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              OUTPUT=$(cat <<EOF | kubectl create -f - -o json 2>&1 || true
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: f1-search-after-delete
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: ResourceQuota
+                query: "compute-resources-finalizer-xk7"
+                limit: 10
+              EOF
+              )
+              echo "Response: $OUTPUT"
+
+              # API returns Invalid (422) with NotFound field errors when no policy exists
+              if echo "$OUTPUT" | grep -qi "Invalid\|NotFound\|not found\|error"; then
+                echo "PASS: API rejected query after policy deletion"
+                exit 0
+              fi
+              echo "FAIL: API did not reject query after policy deletion"
+              exit 1
+            check:
+              ($error): ~
+
+    - name: F2-search-different-term-after-deletion-also-errors
+      description: "F2: Any query for the deleted resource type must fail, not just specific terms"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              OUTPUT=$(cat <<EOF | kubectl create -f - -o json 2>&1 || true
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: f2-search-any-after-delete
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: ResourceQuota
+                query: "storage-resources-finalizer-xk7"
+                limit: 10
+              EOF
+              )
+              echo "Response: $OUTPUT"
+
+              if echo "$OUTPUT" | grep -qi "Invalid\|NotFound\|not found\|error"; then
+                echo "PASS: API rejected query after policy deletion"
+                exit 0
+              fi
+              echo "FAIL: API did not reject query after policy deletion"
+              exit 1
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Cleanup
+    # =========================================================================
+    - name: cleanup
+      description: "Removes all resources created by this test suite"
+      try:
+        - script:
+            timeout: 60s
+            content: |
+              kubectl delete resourceindexpolicy e2e-finalizer-rq-policy --ignore-not-found=true || true
+              kubectl delete namespace e2e-indexer-finalizer --ignore-not-found=true || true
+            check:
+              ($error): ~

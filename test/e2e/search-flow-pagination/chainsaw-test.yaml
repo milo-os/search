@@ -1,0 +1,343 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: search-flow-pagination
+spec:
+  description: |
+    End-to-end tests for continue token (cursor-based pagination) using the
+    ResourceSearchQuery API. Targets LimitRanges to avoid ResourceIndexPolicy
+    conflicts with parallel test suites. Covers: fetching all results at once,
+    walking through results one-by-one using limit + continue token, verifying
+    all resources are returned across paginated queries, and verifying that
+    changing the query while using a continue token is rejected.
+
+  namespace: default
+
+  steps:
+    # =========================================================================
+    # Pre-cleanup: remove any leftover resources for idempotent runs
+    # =========================================================================
+    - name: pre-cleanup
+      description: "Removes leftover resources to ensure idempotent test execution"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl delete resourceindexpolicy e2e-pagination-lr-policy --ignore-not-found=true || true
+              kubectl delete limitrange \
+                e2e-lr-alpha \
+                e2e-lr-beta \
+                e2e-lr-gamma \
+                -n default --ignore-not-found=true || true
+              sleep 3
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Setup: policy for LimitRanges
+    # =========================================================================
+    - name: create-lr-policy
+      description: "Creates ResourceIndexPolicy targeting LimitRanges with e2e-pagination label"
+      try:
+        - apply:
+            resource:
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: e2e-pagination-lr-policy
+              spec:
+                targetResource:
+                  group: ""
+                  version: v1
+                  kind: LimitRange
+                conditions:
+                  - name: is-e2e-pagination
+                    expression: "'e2e-pagination' in metadata.labels"
+                fields:
+                  - path: ".metadata.name"
+                    searchable: true
+                  - path: ".metadata.annotations['e2e.search.test/pagination-tag']"
+                    searchable: true
+
+    - name: wait-for-lr-policy-ready
+      description: "Waits for LimitRange policy to reach Ready=True"
+      try:
+        - wait:
+            apiVersion: search.miloapis.com/v1alpha1
+            kind: ResourceIndexPolicy
+            name: e2e-pagination-lr-policy
+            timeout: 60s
+            for:
+              condition:
+                name: Ready
+                value: "True"
+
+    # =========================================================================
+    # Create 3 LimitRanges with a shared annotation for pagination testing
+    # =========================================================================
+    - name: create-limitranges
+      description: "Creates three LimitRanges all sharing a unique pagination-tag annotation"
+      try:
+        - script:
+            timeout: 15s
+            content: |
+              for NAME in e2e-lr-alpha e2e-lr-beta e2e-lr-gamma; do
+                cat <<EOF | kubectl apply -f -
+              apiVersion: v1
+              kind: LimitRange
+              metadata:
+                name: $NAME
+                namespace: default
+                labels:
+                  e2e-pagination: "true"
+                annotations:
+                  e2e.search.test/pagination-tag: "e2e-continue-token-shared-pq3"
+              spec:
+                limits:
+                  - type: Container
+                    defaultRequest:
+                      cpu: "100m"
+              EOF
+              done
+            check:
+              ($error): ~
+
+    - name: wait-for-indexing
+      description: "Waits 30 seconds for all three LimitRanges to be indexed"
+      try:
+        - script:
+            timeout: 35s
+            content: sleep 30
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # P1: Fetch all results at once — verify all 3 are returned
+    # =========================================================================
+    - name: P1-fetch-all-at-once
+      description: "P1: limit=10 returns all three LimitRanges in a single query"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: p1-fetch-all
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: LimitRange
+                query: "e2e-continue-token-shared-pq3"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(
+                .resource.metadata.name == "e2e-lr-alpha" or
+                .resource.metadata.name == "e2e-lr-beta" or
+                .resource.metadata.name == "e2e-lr-gamma"
+              )] | length == 3'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # P2: Walk through all results one-by-one using continue tokens.
+    # Page 1: limit=1 → 1 result + continue token
+    # Page 2: limit=1 + continue → 1 different result + continue token
+    # Page 3: limit=1 + continue → 1 different result + no more continue
+    # Verify all 3 unique names collected across pages.
+    # =========================================================================
+    - name: P2-paginate-one-by-one
+      description: "P2: Walk all 3 results one at a time using continue tokens"
+      try:
+        - script:
+            timeout: 60s
+            content: |
+              set -e
+
+              # --- Page 1 ---
+              PAGE1=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: p2-page1
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: LimitRange
+                query: "e2e-continue-token-shared-pq3"
+                limit: 1
+              EOF
+              )
+              COUNT1=$(echo "$PAGE1" | jq '.status.results | length')
+              TOKEN1=$(echo "$PAGE1" | jq -r '.status.continue')
+              NAME1=$(echo "$PAGE1" | jq -r '.status.results[0].resource.metadata.name')
+
+              if [ "$COUNT1" != "1" ]; then
+                echo "FAIL: Page 1 expected 1 result, got $COUNT1"
+                exit 1
+              fi
+              if [ -z "$TOKEN1" ] || [ "$TOKEN1" = "null" ]; then
+                echo "FAIL: Page 1 expected a continue token"
+                exit 1
+              fi
+              echo "Page 1 OK: name=$NAME1, continue=$TOKEN1"
+
+              # --- Page 2 ---
+              PAGE2=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: p2-page2
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: LimitRange
+                query: "e2e-continue-token-shared-pq3"
+                limit: 1
+                continue: "$TOKEN1"
+              EOF
+              )
+              COUNT2=$(echo "$PAGE2" | jq '.status.results | length')
+              TOKEN2=$(echo "$PAGE2" | jq -r '.status.continue')
+              NAME2=$(echo "$PAGE2" | jq -r '.status.results[0].resource.metadata.name')
+
+              if [ "$COUNT2" != "1" ]; then
+                echo "FAIL: Page 2 expected 1 result, got $COUNT2"
+                exit 1
+              fi
+              if [ -z "$TOKEN2" ] || [ "$TOKEN2" = "null" ]; then
+                echo "FAIL: Page 2 expected a continue token"
+                exit 1
+              fi
+              if [ "$NAME2" = "$NAME1" ]; then
+                echo "FAIL: Page 2 returned same resource as Page 1: $NAME2"
+                exit 1
+              fi
+              echo "Page 2 OK: name=$NAME2, continue=$TOKEN2"
+
+              # --- Page 3 ---
+              PAGE3=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: p2-page3
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: LimitRange
+                query: "e2e-continue-token-shared-pq3"
+                limit: 1
+                continue: "$TOKEN2"
+              EOF
+              )
+              COUNT3=$(echo "$PAGE3" | jq '.status.results | length')
+              TOKEN3=$(echo "$PAGE3" | jq -r '.status.continue // empty')
+              NAME3=$(echo "$PAGE3" | jq -r '.status.results[0].resource.metadata.name')
+
+              if [ "$COUNT3" != "1" ]; then
+                echo "FAIL: Page 3 expected 1 result, got $COUNT3"
+                exit 1
+              fi
+              if [ "$NAME3" = "$NAME1" ] || [ "$NAME3" = "$NAME2" ]; then
+                echo "FAIL: Page 3 returned duplicate resource: $NAME3"
+                exit 1
+              fi
+              echo "Page 3 OK: name=$NAME3, continue=${TOKEN3:-none}"
+
+              # --- Verify all 3 unique names collected ---
+              NAMES=$(printf '%s\n' "$NAME1" "$NAME2" "$NAME3" | sort)
+              EXPECTED=$(printf '%s\n' "e2e-lr-alpha" "e2e-lr-beta" "e2e-lr-gamma" | sort)
+              if [ "$NAMES" != "$EXPECTED" ]; then
+                echo "FAIL: Expected all 3 LimitRanges but got: $NAME1, $NAME2, $NAME3"
+                exit 1
+              fi
+              echo "All 3 pages returned unique resources: $NAME1, $NAME2, $NAME3"
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # P3: Continue token with changed query must be rejected
+    # Get a valid continue token, then use it with a different query string.
+    # The API must return an error.
+    # =========================================================================
+    - name: P3-continue-with-changed-query-rejected
+      description: "P3: Using a continue token with a different query must fail"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              set -e
+
+              # Get a valid continue token
+              PAGE=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: p3-get-token
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: LimitRange
+                query: "e2e-continue-token-shared-pq3"
+                limit: 1
+              EOF
+              )
+              TOKEN=$(echo "$PAGE" | jq -r '.status.continue')
+              if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+                echo "FAIL: Could not get continue token for P3"
+                exit 1
+              fi
+              echo "Got continue token: $TOKEN"
+
+              # Use the token with a DIFFERENT query — must get BadRequest error
+              OUTPUT=$(cat <<EOF | kubectl create -f - -o json 2>&1 || true
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: p3-changed-query
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: LimitRange
+                query: "completely-different-query-xyz"
+                limit: 1
+                continue: "$TOKEN"
+              EOF
+              )
+              echo "Response: $OUTPUT"
+
+              # API returns: "query string cannot be changed when using a continue token"
+              if echo "$OUTPUT" | grep -q "cannot be changed"; then
+                echo "PASS: API rejected changed query with continue token"
+                exit 0
+              fi
+              echo "FAIL: API did not reject changed query with continue token"
+              exit 1
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Cleanup
+    # =========================================================================
+    - name: cleanup
+      description: "Removes all resources created by this test suite"
+      try:
+        - script:
+            timeout: 60s
+            content: |
+              kubectl delete resourceindexpolicy e2e-pagination-lr-policy --ignore-not-found=true || true
+              kubectl delete limitrange \
+                e2e-lr-alpha \
+                e2e-lr-beta \
+                e2e-lr-gamma \
+                -n default --ignore-not-found=true || true
+            check:
+              ($error): ~

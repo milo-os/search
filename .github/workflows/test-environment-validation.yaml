@@ -1,6 +1,9 @@
 name: Test Environment Setup and Validation
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       test_suite:

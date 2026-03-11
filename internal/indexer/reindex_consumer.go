@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/nats-io/nats.go/jetstream"
+	"go.miloapis.net/search/internal/utils"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/klog/v2"
 )
@@ -58,49 +59,7 @@ func (r *ReindexConsumer) Start(ctx context.Context) error {
 			return
 		}
 
-		queued := false
-		policies := r.policyCache.GetPolicies()
-
-		for _, cp := range policies {
-			// Skip if index name is not set yet
-			if cp.Policy.Status.IndexName == "" {
-				klog.V(2).Infof("ReindexConsumer: policy %s has no IndexName in status, skipping", cp.Policy.Name)
-				continue
-			}
-
-			evalResult, err := cp.Evaluate(obj)
-			if err != nil {
-				klog.Errorf("ReindexConsumer: policy %s evaluation error: %v", cp.Policy.Name, err)
-				continue
-			}
-
-			if evalResult.Matched {
-				klog.V(4).Infof("ReindexConsumer: match policy=%s resource=%s/%s (id=%s)",
-					cp.Policy.Name, obj.GetNamespace(), obj.GetName(), event.ID)
-
-				// Transform into indexable document
-				doc := evalResult.Transform()
-
-				// Ensure UID is set as primary key
-				ensureUID(doc, resourceUID)
-
-				r.batcher.QueueUpsert(cp.Policy.Status.IndexName, doc, &msg)
-				queued = true
-			} else {
-				klog.V(4).Infof("ReindexConsumer: policy %s did not match resource %s/%s (id=%s), ensuring deletion", cp.Policy.Name, obj.GetNamespace(), obj.GetName(), event.ID)
-
-				// If it doesn't match this policy, we should ensure it's removed from the index
-				// in case it was previously indexed there.
-				r.batcher.QueueDelete(cp.Policy.Status.IndexName, resourceUID, &msg)
-				queued = true
-			}
-		}
-
-		// If the message wasn't queued for any operation (e.g. no policies), acknowledge it
-		if !queued {
-			klog.Warningf("ReindexConsumer: event (id=%s) matched no active policies in cache, skipping", event.ID)
-			msg.Ack()
-		}
+		r.processTargetedEvent(msg, event, obj, resourceUID)
 	})
 
 	if err != nil {
@@ -112,4 +71,59 @@ func (r *ReindexConsumer) Start(ctx context.Context) error {
 	<-ctx.Done()
 	klog.Info("Shutting down ReindexConsumer...")
 	return nil
+}
+
+// processTargetedEvent evaluates a resource against the specific policy identified
+// in the event. It verifies the cached policy's spec hash matches the event's
+// spec hash to ensure evaluation uses the correct (updated) conditions.
+func (r *ReindexConsumer) processTargetedEvent(msg jetstream.Msg, event ReindexEvent, obj *unstructured.Unstructured, resourceUID string) {
+	if event.PolicyName == "" || event.IndexName == "" {
+		klog.Warningf("ReindexConsumer: event (id=%s) missing policyName or indexName, dropping", event.ID)
+		msg.Ack()
+		return
+	}
+
+	cp := r.policyCache.GetPolicy(event.PolicyName)
+	if cp == nil {
+		// Policy not in cache yet — NAK so the message is redelivered
+		// after the informer propagates the policy to the cache.
+		klog.V(2).Infof("ReindexConsumer: policy %s not in cache yet, NAK for redelivery (id=%s)",
+			event.PolicyName, event.ID)
+		msg.Nak()
+		return
+	}
+
+	// Verify the cached policy spec matches the version that triggered re-indexing.
+	if event.SpecHash != "" {
+		cachedHash := utils.ComputeSpecHash(&cp.Policy.Spec)
+		if cachedHash != event.SpecHash {
+			// Cache is stale — NAK so the message is redelivered after
+			// the informer propagates the updated policy spec.
+			klog.V(2).Infof("ReindexConsumer: policy %s cache stale (cached=%s, event=%s), NAK for redelivery (id=%s)",
+				event.PolicyName, cachedHash[:8], event.SpecHash[:8], event.ID)
+			msg.Nak()
+			return
+		}
+	}
+
+	evalResult, err := cp.Evaluate(obj)
+	if err != nil {
+		klog.Errorf("ReindexConsumer: policy %s evaluation error: %v", event.PolicyName, err)
+		msg.Ack()
+		return
+	}
+
+	if evalResult.Matched {
+		klog.V(4).Infof("ReindexConsumer: match policy=%s resource=%s/%s (id=%s)",
+			event.PolicyName, obj.GetNamespace(), obj.GetName(), event.ID)
+
+		doc := evalResult.Transform()
+		ensureUID(doc, resourceUID)
+		r.batcher.QueueUpsert(event.IndexName, doc, &msg)
+	} else {
+		klog.V(4).Infof("ReindexConsumer: policy %s did not match resource %s/%s (id=%s), deleting from index",
+			event.PolicyName, obj.GetNamespace(), obj.GetName(), event.ID)
+
+		r.batcher.QueueDelete(event.IndexName, resourceUID, &msg)
+	}
 }

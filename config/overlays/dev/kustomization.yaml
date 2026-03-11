@@ -28,6 +28,30 @@ images:
 
 patches:
   - path: patches/vector-sidecar-patch.yaml
+  # In kind, images are loaded directly via `kind load` — there is no registry
+  # to pull from. Setting imagePullPolicy: Never ensures the kubelet always uses
+  # the image that was loaded, and never falls back to a stale cached layer.
+  - target:
+      kind: Deployment
+      name: search-apiserver
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
+  - target:
+      kind: Deployment
+      name: search-controller-manager
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
+  - target:
+      kind: Deployment
+      name: resource-indexer
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
   - target:
       kind: APIService
       name: v1alpha1.search.miloapis.com

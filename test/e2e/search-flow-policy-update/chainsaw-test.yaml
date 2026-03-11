@@ -1,0 +1,331 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: search-flow-policy-update
+spec:
+  description: |
+    End-to-end test for updating a ResourceIndexPolicy's CEL conditions.
+    Targets Leases (coordination.k8s.io) to avoid ResourceIndexPolicy conflicts
+    with parallel test suites. Creates 5 Leases all matching an initial broad
+    CEL condition, verifies all 5 are searchable using the query "polupd-mk8",
+    then updates the policy to a narrower AND condition that only matches the 3
+    primary-tier Leases. The exact same query "polupd-mk8" must then return
+    exactly 3 results with the 2 secondary-tier Leases absent.
+
+  namespace: default
+
+  steps:
+    # =========================================================================
+    # Pre-cleanup
+    # =========================================================================
+    - name: pre-cleanup
+      description: "Removes leftover resources to ensure idempotent test execution"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl delete resourceindexpolicy e2e-policy-update-lease-policy --ignore-not-found=true || true
+              kubectl delete lease \
+                e2e-lease-web \
+                e2e-lease-api \
+                e2e-lease-worker \
+                e2e-lease-cache \
+                e2e-lease-db \
+                -n default --ignore-not-found=true || true
+              sleep 10
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 1: Create 5 Leases — 3 with tier=primary, 2 with tier=secondary
+    # All share the annotation suffix "polupd-mk8" as the common search term.
+    # =========================================================================
+    - name: create-leases
+      description: "Creates 5 Leases with shared annotation suffix polupd-mk8"
+      try:
+        - script:
+            timeout: 15s
+            content: |
+              cat <<EOF | kubectl apply -f -
+              apiVersion: coordination.k8s.io/v1
+              kind: Lease
+              metadata:
+                name: e2e-lease-web
+                namespace: default
+                labels:
+                  e2e-policy-update: "true"
+                  tier: primary
+                annotations:
+                  e2e.search.test/component: "web-frontend-polupd-mk8"
+              spec:
+                holderIdentity: "e2e-test"
+              EOF
+            check:
+              ($error): ~
+        - script:
+            timeout: 15s
+            content: |
+              cat <<EOF | kubectl apply -f -
+              apiVersion: coordination.k8s.io/v1
+              kind: Lease
+              metadata:
+                name: e2e-lease-api
+                namespace: default
+                labels:
+                  e2e-policy-update: "true"
+                  tier: primary
+                annotations:
+                  e2e.search.test/component: "api-gateway-polupd-mk8"
+              spec:
+                holderIdentity: "e2e-test"
+              EOF
+            check:
+              ($error): ~
+        - script:
+            timeout: 15s
+            content: |
+              cat <<EOF | kubectl apply -f -
+              apiVersion: coordination.k8s.io/v1
+              kind: Lease
+              metadata:
+                name: e2e-lease-worker
+                namespace: default
+                labels:
+                  e2e-policy-update: "true"
+                  tier: primary
+                annotations:
+                  e2e.search.test/component: "job-worker-polupd-mk8"
+              spec:
+                holderIdentity: "e2e-test"
+              EOF
+            check:
+              ($error): ~
+        - script:
+            timeout: 15s
+            content: |
+              cat <<EOF | kubectl apply -f -
+              apiVersion: coordination.k8s.io/v1
+              kind: Lease
+              metadata:
+                name: e2e-lease-cache
+                namespace: default
+                labels:
+                  e2e-policy-update: "true"
+                  tier: secondary
+                annotations:
+                  e2e.search.test/component: "redis-cache-polupd-mk8"
+              spec:
+                holderIdentity: "e2e-test"
+              EOF
+            check:
+              ($error): ~
+        - script:
+            timeout: 15s
+            content: |
+              cat <<EOF | kubectl apply -f -
+              apiVersion: coordination.k8s.io/v1
+              kind: Lease
+              metadata:
+                name: e2e-lease-db
+                namespace: default
+                labels:
+                  e2e-policy-update: "true"
+                  tier: secondary
+                annotations:
+                  e2e.search.test/component: "postgres-db-polupd-mk8"
+              spec:
+                holderIdentity: "e2e-test"
+              EOF
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 2: Create the initial broad policy — matches ALL 5 Leases
+    # =========================================================================
+    - name: create-broad-policy
+      description: "Creates policy with broad CEL condition matching all 5 Leases"
+      try:
+        - apply:
+            resource:
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: e2e-policy-update-lease-policy
+              spec:
+                targetResource:
+                  group: "coordination.k8s.io"
+                  version: v1
+                  kind: Lease
+                conditions:
+                  - name: is-e2e-policy-update
+                    expression: "'e2e-policy-update' in metadata.labels"
+                fields:
+                  - path: ".metadata.name"
+                    searchable: true
+                  - path: ".metadata.annotations['e2e.search.test/component']"
+                    searchable: true
+
+    - name: wait-for-policy-ready
+      description: "Waits for initial policy to reach Ready=True"
+      try:
+        - wait:
+            apiVersion: search.miloapis.com/v1alpha1
+            kind: ResourceIndexPolicy
+            name: e2e-policy-update-lease-policy
+            timeout: 60s
+            for:
+              condition:
+                name: Ready
+                value: "True"
+
+    - name: wait-for-initial-indexing
+      description: "Waits 30 seconds for all 5 Leases to be indexed"
+      try:
+        - script:
+            timeout: 35s
+            content: sleep 30
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 3: Verify all 5 Leases are searchable with the shared query
+    # =========================================================================
+    - name: A1-all-five-searchable
+      description: "A1: Query 'polupd-mk8' must return all 5 Leases before policy update"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: a1-all-five
+              spec:
+                targetResources:
+                  - group: "coordination.k8s.io"
+                    version: v1
+                    kind: Lease
+                query: "polupd-mk8"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(
+                .resource.metadata.name == "e2e-lease-web" or
+                .resource.metadata.name == "e2e-lease-api" or
+                .resource.metadata.name == "e2e-lease-worker" or
+                .resource.metadata.name == "e2e-lease-cache" or
+                .resource.metadata.name == "e2e-lease-db"
+              )] | length == 5'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 4: Update the policy — narrow to only match tier=primary (3 of 5)
+    # Uses a single AND condition so OR semantics don't widen the match.
+    # =========================================================================
+    - name: update-policy-narrow-condition
+      description: "Updates policy CEL condition to only match tier=primary Leases"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              cat <<EOF | kubectl apply -f -
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: e2e-policy-update-lease-policy
+              spec:
+                targetResource:
+                  group: "coordination.k8s.io"
+                  version: v1
+                  kind: Lease
+                conditions:
+                  - name: is-primary-tier-e2e
+                    expression: "'e2e-policy-update' in metadata.labels && 'tier' in metadata.labels && metadata.labels['tier'] == 'primary'"
+                fields:
+                  - path: ".metadata.name"
+                    searchable: true
+                  - path: ".metadata.annotations['e2e.search.test/component']"
+                    searchable: true
+              EOF
+            check:
+              ($error): ~
+
+    - name: wait-for-policy-reready
+      description: "Waits for the updated policy to reach Ready=True again"
+      try:
+        - wait:
+            apiVersion: search.miloapis.com/v1alpha1
+            kind: ResourceIndexPolicy
+            name: e2e-policy-update-lease-policy
+            timeout: 60s
+            for:
+              condition:
+                name: Ready
+                value: "True"
+
+    - name: wait-for-reindexing
+      description: "Waits 45 seconds for the re-indexing to complete after policy update"
+      try:
+        - script:
+            timeout: 50s
+            content: sleep 45
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 5: Run the exact same query — must now return exactly 3 results
+    # =========================================================================
+    - name: B1-same-query-returns-three
+      description: "B1: Same query 'polupd-mk8' must return exactly the 3 primary Leases"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: b1-same-query-three
+              spec:
+                targetResources:
+                  - group: "coordination.k8s.io"
+                    version: v1
+                    kind: Lease
+                query: "polupd-mk8"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '
+                ([.status.results[]? | select(
+                  .resource.metadata.name == "e2e-lease-web" or
+                  .resource.metadata.name == "e2e-lease-api" or
+                  .resource.metadata.name == "e2e-lease-worker"
+                )] | length == 3) and
+                ([.status.results[]? | select(
+                  .resource.metadata.name == "e2e-lease-cache" or
+                  .resource.metadata.name == "e2e-lease-db"
+                )] | length == 0)'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Cleanup
+    # =========================================================================
+    - name: cleanup
+      description: "Removes all resources created by this test suite"
+      try:
+        - script:
+            timeout: 60s
+            content: |
+              kubectl delete resourceindexpolicy e2e-policy-update-lease-policy --ignore-not-found=true || true
+              kubectl delete lease \
+                e2e-lease-web \
+                e2e-lease-api \
+                e2e-lease-worker \
+                e2e-lease-cache \
+                e2e-lease-db \
+                -n default --ignore-not-found=true || true
+            check:
+              ($error): ~
