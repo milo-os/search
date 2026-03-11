@@ -1,0 +1,325 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: search-flow
+spec:
+  description: |
+    End-to-end tests for the full search flow using the Kubernetes aggregated API
+    (ResourceSearchQuery). Targets Secrets to avoid ResourceIndexPolicy conflicts
+    with parallel test suites. Covers happy paths (H1: search by name, H2: search
+    by annotation, H3: CEL condition matching) and negative paths (N1: empty results,
+    N2: CEL condition exclusion, N3: duplicate field path rejection).
+
+  namespace: default
+
+  steps:
+    # =========================================================================
+    # Pre-cleanup: remove any leftover test resources for idempotency
+    # =========================================================================
+    - name: pre-cleanup
+      description: "Removes leftover resources to ensure idempotent test execution"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl delete resourceindexpolicy e2e-search-flow-secret-policy e2e-duplicate-fields-secret-policy --ignore-not-found=true || true
+              kubectl delete secret e2e-search-target-secret -n default --ignore-not-found=true || true
+              kubectl delete namespace e2e-search-excluded --ignore-not-found=true || true
+              sleep 3
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Setup: create namespace for the N2 non-matching resource
+    # =========================================================================
+    - name: create-e2e-namespace
+      description: "Creates namespace for non-matching resource used by N2 scenario"
+      try:
+        - script:
+            timeout: 15s
+            content: |
+              kubectl create namespace e2e-search-excluded --dry-run=client -o yaml | kubectl apply -f -
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 1: Create the ResourceIndexPolicy targeting Secrets
+    # =========================================================================
+    - name: create-search-policy
+      description: "Creates ResourceIndexPolicy targeting Secrets in default namespace"
+      try:
+        - apply:
+            resource:
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: e2e-search-flow-secret-policy
+              spec:
+                targetResource:
+                  group: ""
+                  version: v1
+                  kind: Secret
+                conditions:
+                  - name: is-default-namespace
+                    expression: "metadata.namespace == 'default'"
+                fields:
+                  - path: ".metadata.name"
+                    searchable: true
+                  - path: ".metadata.annotations['e2e.search.test/description']"
+                    searchable: true
+                  - path: ".metadata.annotations['e2e.search.test/app-label']"
+                    searchable: true
+
+    # =========================================================================
+    # Step 2: Wait for policy to reach Ready=True
+    # =========================================================================
+    - name: wait-for-policy-ready
+      description: "Waits for the ResourceIndexPolicy to reach Ready=True"
+      try:
+        - wait:
+            apiVersion: search.miloapis.com/v1alpha1
+            kind: ResourceIndexPolicy
+            name: e2e-search-flow-secret-policy
+            timeout: 60s
+            for:
+              condition:
+                name: Ready
+                value: "True"
+
+    # =========================================================================
+    # Step 3: Create the primary indexed Secret (for H1, H2, H3)
+    # =========================================================================
+    - name: create-indexed-secret
+      description: "Creates Secret in default namespace that matches the policy condition"
+      try:
+        - script:
+            timeout: 15s
+            content: |
+              kubectl create secret generic e2e-search-target-secret -n default \
+                --from-literal=placeholder=value \
+                --dry-run=client -o yaml | \
+              kubectl annotate -f - --local -o yaml \
+                e2e.search.test/description=unique-e2e-search-description-alpha7 \
+                e2e.search.test/app-label=e2e-app-value | \
+              kubectl apply -f -
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 4: Create Secret in excluded namespace (for N2)
+    # =========================================================================
+    - name: create-nonmatching-secret
+      description: "Creates Secret in excluded namespace; must not satisfy policy CEL condition"
+      try:
+        - script:
+            timeout: 15s
+            content: |
+              kubectl create secret generic e2e-search-excluded-secret -n e2e-search-excluded \
+                --from-literal=placeholder=value \
+                --dry-run=client -o yaml | \
+              kubectl annotate -f - --local -o yaml \
+                e2e.search.test/description=excluded-namespace-resource-should-not-index | \
+              kubectl apply -f -
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 5: Wait for indexer to process the audit events
+    # =========================================================================
+    - name: wait-for-indexing
+      description: "Sleeps 15 seconds for the indexer to process audit events via NATS"
+      try:
+        - script:
+            timeout: 20s
+            content: sleep 15
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # H1: Full pipeline — search by Secret name, assert found
+    # =========================================================================
+    - name: H1-search-by-name
+      description: "H1: Search by Secret name via aggregated API — must be found"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: h1-search-by-name
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: Secret
+                query: "e2e-search-target-secret"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-search-target-secret")] | length > 0'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # H2: Annotation field indexing — search by annotation value, assert found
+    # =========================================================================
+    - name: H2-search-by-annotation
+      description: "H2: Search by annotation value via aggregated API — must be found"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: h2-search-by-annotation
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: Secret
+                query: "unique-e2e-search-description-alpha7"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-search-target-secret")] | length > 0'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # H3: CEL condition — resource in matching namespace is found
+    # =========================================================================
+    - name: H3-search-matching-namespace
+      description: "H3: Resource in matching namespace (default) must appear in results"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: h3-search-matching-ns
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: Secret
+                query: "e2e-app-value"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-search-target-secret")] | length > 0'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # N1: No matching documents — expect empty results
+    # =========================================================================
+    - name: N1-search-no-results
+      description: "N1: Search for term with no matching documents — results must be empty"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: n1-search-no-results
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: Secret
+                query: "xk9z-nonexistent-term-8q2w"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '(.status.results // []) | length == 0'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # N2: CEL condition exclusion — excluded namespace resource must not appear
+    # =========================================================================
+    - name: N2-search-excluded-resource
+      description: "N2: Resource in non-matching namespace must not appear in results"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: n2-excluded-resource
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: Secret
+                query: "excluded-namespace-resource-should-not-index"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-search-excluded-secret")] | length == 0'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # N3: Webhook rejects policy with duplicate field paths
+    # =========================================================================
+    - name: N3-duplicate-field-paths-rejected
+      description: "N3: Policy with duplicate field paths must be rejected by validating webhook"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              cat <<EOF | kubectl apply -f - 2>&1 || true
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: e2e-duplicate-fields-secret-policy
+              spec:
+                targetResource:
+                  group: ""
+                  version: v1
+                  kind: Secret
+                conditions:
+                  - name: is-default-namespace
+                    expression: "metadata.namespace == 'default'"
+                fields:
+                  - path: ".metadata.name"
+                    searchable: true
+                  - path: ".metadata.name"
+                    searchable: true
+              EOF
+            check:
+              (contains($stdout, 'Invalid') || contains($stderr, 'Invalid') || contains($stdout, 'duplicate') || contains($stderr, 'duplicate') || contains($stdout, 'error') || contains($stderr, 'error')): true
+
+        - script:
+            timeout: 15s
+            content: |
+              kubectl get resourceindexpolicy e2e-duplicate-fields-secret-policy 2>&1 || true
+            check:
+              (contains($stdout, 'not found') || contains($stderr, 'not found') || contains($stdout, 'NotFound') || contains($stderr, 'NotFound')): true
+
+    # =========================================================================
+    # Cleanup
+    # =========================================================================
+    - name: cleanup
+      description: "Removes all resources created by this test"
+      try:
+        - script:
+            timeout: 60s
+            content: |
+              kubectl delete resourceindexpolicy e2e-search-flow-secret-policy e2e-duplicate-fields-secret-policy --ignore-not-found=true || true
+              kubectl delete secret e2e-search-target-secret -n default --ignore-not-found=true || true
+              kubectl delete secret e2e-search-excluded-secret -n e2e-search-excluded --ignore-not-found=true || true
+              kubectl delete namespace e2e-search-excluded --ignore-not-found=true || true
+            check:
+              ($error): ~

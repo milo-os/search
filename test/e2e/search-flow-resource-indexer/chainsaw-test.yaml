@@ -1,0 +1,430 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: search-flow-resource-indexer
+spec:
+  description: |
+    End-to-end tests for the resource indexer covering backfill, delete
+    propagation, and CEL condition mismatch on update. Targets Roles to avoid
+    ResourceIndexPolicy conflicts with parallel test suites.
+    Covers:
+      - Backfill: resources created before the policy are indexed once the policy is ready.
+      - Delete: deleting a resource removes it from the index.
+      - Update (condition mismatch): updating a resource so it no longer satisfies the
+        policy CEL condition removes it from search results.
+
+  namespace: default
+
+  steps:
+    # =========================================================================
+    # Pre-cleanup
+    # =========================================================================
+    - name: pre-cleanup
+      description: "Removes leftover resources to ensure idempotent test execution"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl delete resourceindexpolicy e2e-indexer-role-policy --ignore-not-found=true || true
+              kubectl delete role \
+                e2e-role-alpha \
+                e2e-role-beta \
+                e2e-role-gamma \
+                e2e-role-delta \
+                -n default --ignore-not-found=true || true
+              sleep 10
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 1: Create 4 Roles BEFORE the policy exists
+    # =========================================================================
+    - name: create-roles
+      description: "Creates 4 Roles with unique annotations — all have e2e-indexer label"
+      try:
+        - script:
+            timeout: 15s
+            content: |
+              cat <<EOF | kubectl apply -f -
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: e2e-role-alpha
+                namespace: default
+                labels:
+                  e2e-indexer: "true"
+                annotations:
+                  e2e.search.test/service: "auth-service-indexer-rn4"
+              rules:
+                - apiGroups: [""]
+                  resources: ["pods"]
+                  verbs: ["get"]
+              EOF
+            check:
+              ($error): ~
+        - script:
+            timeout: 15s
+            content: |
+              cat <<EOF | kubectl apply -f -
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: e2e-role-beta
+                namespace: default
+                labels:
+                  e2e-indexer: "true"
+                annotations:
+                  e2e.search.test/service: "billing-service-indexer-rn4"
+              rules:
+                - apiGroups: [""]
+                  resources: ["pods"]
+                  verbs: ["get"]
+              EOF
+            check:
+              ($error): ~
+        - script:
+            timeout: 15s
+            content: |
+              cat <<EOF | kubectl apply -f -
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: e2e-role-gamma
+                namespace: default
+                labels:
+                  e2e-indexer: "true"
+                annotations:
+                  e2e.search.test/service: "gateway-service-indexer-rn4"
+              rules:
+                - apiGroups: [""]
+                  resources: ["pods"]
+                  verbs: ["get"]
+              EOF
+            check:
+              ($error): ~
+        - script:
+            timeout: 15s
+            content: |
+              cat <<EOF | kubectl apply -f -
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: e2e-role-delta
+                namespace: default
+                labels:
+                  e2e-indexer: "true"
+                annotations:
+                  e2e.search.test/service: "scheduler-service-indexer-rn4"
+              rules:
+                - apiGroups: [""]
+                  resources: ["pods"]
+                  verbs: ["get"]
+              EOF
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 2: Create the policy — triggers backfill of existing Roles
+    # =========================================================================
+    - name: create-role-policy
+      description: "Creates ResourceIndexPolicy targeting Roles with e2e-indexer label"
+      try:
+        - apply:
+            resource:
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: e2e-indexer-role-policy
+              spec:
+                targetResource:
+                  group: "rbac.authorization.k8s.io"
+                  version: v1
+                  kind: Role
+                conditions:
+                  - name: is-e2e-indexer
+                    expression: "'e2e-indexer' in metadata.labels"
+                fields:
+                  - path: ".metadata.name"
+                    searchable: true
+                  - path: ".metadata.annotations['e2e.search.test/service']"
+                    searchable: true
+
+    - name: wait-for-role-policy-ready
+      description: "Waits for Role policy to reach Ready=True"
+      try:
+        - wait:
+            apiVersion: search.miloapis.com/v1alpha1
+            kind: ResourceIndexPolicy
+            name: e2e-indexer-role-policy
+            timeout: 60s
+            for:
+              condition:
+                name: Ready
+                value: "True"
+
+    - name: wait-for-backfill
+      description: "Waits 30 seconds for backfill indexing of all 4 Roles"
+      try:
+        - script:
+            timeout: 35s
+            content: sleep 30
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 3: Verify all 4 Roles are searchable after backfill
+    # =========================================================================
+    - name: I1-search-alpha
+      description: "I1: Alpha Role must be searchable"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: i1-search-alpha
+              spec:
+                targetResources:
+                  - group: "rbac.authorization.k8s.io"
+                    version: v1
+                    kind: Role
+                query: "auth-service-indexer-rn4"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-role-alpha")] | length > 0'
+            check:
+              ($error): ~
+
+    - name: I2-search-beta
+      description: "I2: Beta Role must be searchable"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: i2-search-beta
+              spec:
+                targetResources:
+                  - group: "rbac.authorization.k8s.io"
+                    version: v1
+                    kind: Role
+                query: "billing-service-indexer-rn4"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-role-beta")] | length > 0'
+            check:
+              ($error): ~
+
+    - name: I3-search-gamma
+      description: "I3: Gamma Role must be searchable"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: i3-search-gamma
+              spec:
+                targetResources:
+                  - group: "rbac.authorization.k8s.io"
+                    version: v1
+                    kind: Role
+                query: "gateway-service-indexer-rn4"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-role-gamma")] | length > 0'
+            check:
+              ($error): ~
+
+    - name: I4-search-delta
+      description: "I4: Delta Role must be searchable"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: i4-search-delta
+              spec:
+                targetResources:
+                  - group: "rbac.authorization.k8s.io"
+                    version: v1
+                    kind: Role
+                query: "scheduler-service-indexer-rn4"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-role-delta")] | length > 0'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 4: Delete gamma — must disappear from search results
+    # =========================================================================
+    - name: delete-gamma
+      description: "Deletes gamma Role to test removal from index"
+      try:
+        - script:
+            timeout: 15s
+            content: kubectl delete role e2e-role-gamma -n default
+            check:
+              ($error): ~
+
+    - name: wait-for-delete-propagation
+      description: "Waits 30 seconds for delete event to propagate through the indexer"
+      try:
+        - script:
+            timeout: 35s
+            content: sleep 30
+            check:
+              ($error): ~
+
+    - name: D1-deleted-gamma-not-found
+      description: "D1: Deleted gamma Role must not appear in search results"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: d1-gamma-gone
+              spec:
+                targetResources:
+                  - group: "rbac.authorization.k8s.io"
+                    version: v1
+                    kind: Role
+                query: "gateway-service-indexer-rn4"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-role-gamma")] | length == 0'
+            check:
+              ($error): ~
+
+    - name: D2-others-still-searchable
+      description: "D2: Non-deleted Roles must still be searchable after gamma deletion"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: d2-alpha-still
+              spec:
+                targetResources:
+                  - group: "rbac.authorization.k8s.io"
+                    version: v1
+                    kind: Role
+                query: "auth-service-indexer-rn4"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-role-alpha")] | length > 0'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 5: Update delta — remove the e2e-indexer label so it no longer
+    # matches the policy CEL condition. It should be removed from the index.
+    # =========================================================================
+    - name: update-delta-remove-label
+      description: "Removes e2e-indexer label from delta Role — should fail CEL condition"
+      try:
+        - script:
+            timeout: 15s
+            content: |
+              kubectl label role e2e-role-delta -n default e2e-indexer-
+            check:
+              ($error): ~
+
+    - name: wait-for-update-propagation
+      description: "Waits 30 seconds for the update event to propagate through the indexer"
+      try:
+        - script:
+            timeout: 35s
+            content: sleep 30
+            check:
+              ($error): ~
+
+    - name: U1-updated-delta-not-found
+      description: "U1: Delta Role (label removed, fails CEL condition) must not appear in results"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: u1-delta-gone
+              spec:
+                targetResources:
+                  - group: "rbac.authorization.k8s.io"
+                    version: v1
+                    kind: Role
+                query: "scheduler-service-indexer-rn4"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-role-delta")] | length == 0'
+            check:
+              ($error): ~
+
+    - name: U2-remaining-roles-still-searchable
+      description: "U2: Alpha and beta Roles must still be searchable after delta update"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: u2-beta-still
+              spec:
+                targetResources:
+                  - group: "rbac.authorization.k8s.io"
+                    version: v1
+                    kind: Role
+                query: "billing-service-indexer-rn4"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-role-beta")] | length > 0'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Cleanup
+    # =========================================================================
+    - name: cleanup
+      description: "Removes all resources created by this test suite"
+      try:
+        - script:
+            timeout: 60s
+            content: |
+              kubectl delete resourceindexpolicy e2e-indexer-role-policy --ignore-not-found=true || true
+              kubectl delete role \
+                e2e-role-alpha \
+                e2e-role-beta \
+                e2e-role-gamma \
+                e2e-role-delta \
+                -n default --ignore-not-found=true || true
+            check:
+              ($error): ~

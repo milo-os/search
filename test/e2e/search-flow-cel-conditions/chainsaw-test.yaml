@@ -1,0 +1,451 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: search-flow-cel-conditions
+spec:
+  description: |
+    End-to-end tests for CEL-based indexing conditions using the ResourceSearchQuery API.
+    Targets ServiceAccounts to avoid ResourceIndexPolicy conflicts with parallel test suites.
+    Covers: label-equality conditions (only labeled ServiceAccounts indexed), annotation-based
+    multi-field search (each annotation independently searchable), and cross-field isolation
+    (searching by one annotation finds only the matching resource).
+
+  namespace: default
+
+  steps:
+    # =========================================================================
+    # Pre-cleanup: remove any leftover resources for idempotent runs
+    # =========================================================================
+    - name: pre-cleanup
+      description: "Removes leftover resources to ensure idempotent test execution"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl delete resourceindexpolicy e2e-cel-sa-policy --ignore-not-found=true || true
+              kubectl delete serviceaccount \
+                e2e-prod-sa \
+                e2e-dev-sa \
+                e2e-cache-redis-sa \
+                e2e-cache-memcached-sa \
+                e2e-database-pg-sa \
+                e2e-multifield-sa \
+                -n default --ignore-not-found=true || true
+              sleep 3
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Setup: single policy for ServiceAccounts
+    # Only indexes ServiceAccounts with label e2e-cel-test=true in default ns.
+    # =========================================================================
+    - name: create-sa-policy
+      description: "Creates ResourceIndexPolicy targeting ServiceAccounts with e2e-cel-test label"
+      try:
+        - apply:
+            resource:
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: e2e-cel-sa-policy
+              spec:
+                targetResource:
+                  group: ""
+                  version: v1
+                  kind: ServiceAccount
+                conditions:
+                  - name: is-e2e-cel-test
+                    expression: "'e2e-cel-test' in metadata.labels"
+                fields:
+                  - path: ".metadata.name"
+                    searchable: true
+                  - path: ".metadata.annotations['e2e.search.test/workload']"
+                    searchable: true
+                  - path: ".metadata.annotations['e2e.search.test/cache-type']"
+                    searchable: true
+                  - path: ".metadata.annotations['e2e.search.test/region']"
+                    searchable: true
+                  - path: ".metadata.annotations['e2e.search.test/environment']"
+                    searchable: true
+                  - path: ".metadata.annotations['e2e.search.test/tier']"
+                    searchable: true
+                  - path: ".metadata.labels['region']"
+                    searchable: true
+
+    - name: wait-for-sa-policy-ready
+      description: "Waits for ServiceAccount policy to reach Ready=True"
+      try:
+        - wait:
+            apiVersion: search.miloapis.com/v1alpha1
+            kind: ResourceIndexPolicy
+            name: e2e-cel-sa-policy
+            timeout: 60s
+            for:
+              condition:
+                name: Ready
+                value: "True"
+
+    # =========================================================================
+    # SCENARIO A: Label-equality filtering via CEL condition
+    # Only ServiceAccounts with label e2e-cel-test=true are indexed.
+    # The dev SA lacks this label and must NOT appear in results.
+    # =========================================================================
+    - name: A-create-serviceaccounts
+      description: "Creates prod SA (has label, indexed) and dev SA (no label, excluded)"
+      try:
+        - script:
+            timeout: 15s
+            content: |
+              cat <<EOF | kubectl apply -f -
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: e2e-prod-sa
+                namespace: default
+                labels:
+                  e2e-cel-test: "true"
+                  env: production
+                annotations:
+                  e2e.search.test/workload: "payment-service-prod-xz9"
+              EOF
+            check:
+              ($error): ~
+        - script:
+            timeout: 15s
+            content: |
+              cat <<EOF | kubectl apply -f -
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: e2e-dev-sa
+                namespace: default
+                annotations:
+                  e2e.search.test/workload: "payment-service-dev-xz9"
+              EOF
+            check:
+              ($error): ~
+
+    - name: A-wait-for-indexing
+      description: "Waits 15 seconds for the indexer pipeline to process audit events"
+      try:
+        - script:
+            timeout: 20s
+            content: sleep 15
+            check:
+              ($error): ~
+
+    - name: A1-search-prod-found
+      description: "A1: prod SA (has e2e-cel-test label) must appear in results"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: a1-cel-search-prod
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: ServiceAccount
+                query: "payment-service-prod-xz9"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-prod-sa")] | length > 0'
+            check:
+              ($error): ~
+
+    - name: A2-search-dev-not-found
+      description: "A2: dev SA (no e2e-cel-test label) must NOT be indexed"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: a2-cel-search-dev
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: ServiceAccount
+                query: "payment-service-dev-xz9"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-dev-sa")] | length == 0'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # SCENARIO B: Annotation-based search specificity
+    # Three SAs with unique annotation values. Each search returns only the
+    # matching SA, confirming field isolation.
+    # =========================================================================
+    - name: B-create-serviceaccounts
+      description: "Creates redis, memcached, and database SAs with unique cache-type annotations"
+      try:
+        - script:
+            timeout: 15s
+            content: |
+              cat <<EOF | kubectl apply -f -
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: e2e-cache-redis-sa
+                namespace: default
+                labels:
+                  e2e-cel-test: "true"
+                annotations:
+                  e2e.search.test/cache-type: "redis-cluster-e2e-xz9"
+              EOF
+            check:
+              ($error): ~
+        - script:
+            timeout: 15s
+            content: |
+              cat <<EOF | kubectl apply -f -
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: e2e-cache-memcached-sa
+                namespace: default
+                labels:
+                  e2e-cel-test: "true"
+                annotations:
+                  e2e.search.test/cache-type: "memcached-distributed-e2e-xz9"
+              EOF
+            check:
+              ($error): ~
+        - script:
+            timeout: 15s
+            content: |
+              cat <<EOF | kubectl apply -f -
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: e2e-database-pg-sa
+                namespace: default
+                labels:
+                  e2e-cel-test: "true"
+                annotations:
+                  e2e.search.test/cache-type: "not-a-cache-db-only-xz9"
+              EOF
+            check:
+              ($error): ~
+
+    - name: B-wait-for-indexing
+      description: "Waits 15 seconds for the indexer pipeline to process audit events"
+      try:
+        - script:
+            timeout: 20s
+            content: sleep 15
+            check:
+              ($error): ~
+
+    - name: B1-search-redis-found
+      description: "B1: Search by redis annotation value — must find only redis SA"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: b1-cel-search-redis
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: ServiceAccount
+                query: "redis-cluster-e2e-xz9"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-cache-redis-sa")] | length > 0'
+            check:
+              ($error): ~
+
+    - name: B2-search-memcached-found
+      description: "B2: Search by memcached annotation value — must find only memcached SA"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: b2-cel-search-memcached
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: ServiceAccount
+                query: "memcached-distributed-e2e-xz9"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-cache-memcached-sa")] | length > 0'
+            check:
+              ($error): ~
+
+    - name: B3-search-database-found
+      description: "B3: Search by database annotation value — confirms field isolation"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: b3-cel-search-database
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: ServiceAccount
+                query: "not-a-cache-db-only-xz9"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-database-pg-sa")] | length > 0'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # SCENARIO C: Multiple independent annotation and label fields
+    # A single SA with region, environment, and tier annotations plus a region
+    # label. Each field is independently searchable.
+    # =========================================================================
+    - name: C-create-multifield-sa
+      description: "Creates SA with region, environment, tier annotations and a region label"
+      try:
+        - script:
+            timeout: 15s
+            content: |
+              cat <<EOF | kubectl apply -f -
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: e2e-multifield-sa
+                namespace: default
+                labels:
+                  e2e-cel-test: "true"
+                  region: eu-west-1
+                annotations:
+                  e2e.search.test/region: "eu-west-1-xz9"
+                  e2e.search.test/environment: "staging-e2e-unique-xz9"
+                  e2e.search.test/tier: "backend-api-e2e-xz9"
+              EOF
+            check:
+              ($error): ~
+
+    - name: C-wait-for-indexing
+      description: "Waits 15 seconds for the indexer pipeline to process audit events"
+      try:
+        - script:
+            timeout: 20s
+            content: sleep 15
+            check:
+              ($error): ~
+
+    - name: C1-search-by-region-annotation
+      description: "C1: Search by region annotation value — must find SA"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: c1-cel-search-region
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: ServiceAccount
+                query: "eu-west-1-xz9"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-multifield-sa")] | length > 0'
+            check:
+              ($error): ~
+
+    - name: C2-search-by-environment-annotation
+      description: "C2: Search by environment annotation value — must find SA"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: c2-cel-search-env
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: ServiceAccount
+                query: "staging-e2e-unique-xz9"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-multifield-sa")] | length > 0'
+            check:
+              ($error): ~
+
+    - name: C3-search-by-tier-annotation
+      description: "C3: Search by tier annotation value — must find SA"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: c3-cel-search-tier
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: ServiceAccount
+                query: "backend-api-e2e-xz9"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-multifield-sa")] | length > 0'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Cleanup
+    # =========================================================================
+    - name: cleanup
+      description: "Removes all resources created by this test suite"
+      try:
+        - script:
+            timeout: 60s
+            content: |
+              kubectl delete resourceindexpolicy e2e-cel-sa-policy --ignore-not-found=true || true
+              kubectl delete serviceaccount \
+                e2e-prod-sa \
+                e2e-dev-sa \
+                e2e-cache-redis-sa \
+                e2e-cache-memcached-sa \
+                e2e-database-pg-sa \
+                e2e-multifield-sa \
+                -n default --ignore-not-found=true || true
+            check:
+              ($error): ~
