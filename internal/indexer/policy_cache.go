@@ -175,6 +175,13 @@ func (c *PolicyCache) WaitForCacheSync(ctx context.Context) bool {
 	return c.cache.WaitForCacheSync(ctx)
 }
 
+// GetPolicy returns a single cached policy by name, or nil if not found.
+func (c *PolicyCache) GetPolicy(name string) *policyevaluation.CachedPolicy {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.policies[name]
+}
+
 // GetPolicies returns a snapshot of all cached policies.
 func (c *PolicyCache) GetPolicies() []*policyevaluation.CachedPolicy {
 	c.mu.RLock()

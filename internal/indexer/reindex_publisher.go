@@ -15,6 +15,13 @@ type ReindexEvent struct {
 	ID string `json:"id"`
 	// Resource is the full Kubernetes resource object to be re-indexed.
 	Resource map[string]any `json:"resource"`
+	// PolicyName identifies the policy that triggered this re-index.
+	PolicyName string `json:"policyName"`
+	// IndexName is the Meilisearch index name from the policy status.
+	IndexName string `json:"indexName"`
+	// SpecHash is the SHA-256 hash of the policy spec at the time of publishing.
+	// The consumer uses this to ensure it evaluates against the correct policy version.
+	SpecHash string `json:"specHash"`
 }
 
 // ReindexPublisher publishes ReindexEvents to the REINDEX_EVENTS JetStream stream.
@@ -29,10 +36,13 @@ func NewReindexPublisher(js jetstream.JetStream, subject string) *ReindexPublish
 }
 
 // PublishResource publishes a single Kubernetes resource for re-indexing.
-func (p *ReindexPublisher) PublishResource(ctx context.Context, resource map[string]any, id string) error {
+func (p *ReindexPublisher) PublishResource(ctx context.Context, resource map[string]any, id, policyName, indexName, specHash string) error {
 	evt := ReindexEvent{
-		ID:       id,
-		Resource: resource,
+		ID:         id,
+		Resource:   resource,
+		PolicyName: policyName,
+		IndexName:  indexName,
+		SpecHash:   specHash,
 	}
 
 	data, err := json.Marshal(evt)

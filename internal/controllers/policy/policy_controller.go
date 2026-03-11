@@ -2,9 +2,6 @@ package policy
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -35,7 +32,9 @@ import (
 // single Kubernetes resource for background re-indexing (e.g. the NATS-backed
 type ResourceReindexPublisher interface {
 	// PublishResource publishes a single resource object for re-indexing.
-	PublishResource(ctx context.Context, resource map[string]any, resourceID string) error
+	// policyName, indexName, and specHash identify the policy version that triggered the re-index
+	// so the consumer can evaluate against the correct policy conditions.
+	PublishResource(ctx context.Context, resource map[string]any, resourceID, policyName, indexName, specHash string) error
 }
 
 // ResourceIndexPolicyReconciler reconciles a ResourceIndexPolicy object
@@ -437,17 +436,9 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 
 }
 
-// computeSpecHash returns a short SHA-256 hex digest of the policy spec.
-// It is stored in an annotation to detect spec changes on aggregated API
-// servers that do not manage metadata.generation automatically.
+// computeSpecHash delegates to the shared utility for computing a policy spec hash.
 func computeSpecHash(spec *searchv1alpha1.ResourceIndexPolicySpec) string {
-	b, err := json.Marshal(spec)
-	if err != nil {
-		// Extremely unlikely; fall back to a zero string so we always re-index.
-		return ""
-	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
+	return utils.ComputeSpecHash(spec)
 }
 
 // publishReindexMessages lists all resources matching the policy's TargetResource
@@ -498,13 +489,16 @@ func (r *ResourceIndexPolicyReconciler) publishReindexMessages(
 			return fmt.Errorf("failed to list %v resources: %w", gvk, err)
 		}
 
+		indexName := policy.Status.IndexName
+		specHash := computeSpecHash(&policy.Spec)
+
 		for i := range list.Items {
 			obj := &list.Items[i]
 			logger.Info("Publishing re-index message", "resource", obj.GetName(), "namespace", obj.GetNamespace())
 			// Use "reindex/<policyName>/<uid>" as the resourceID so that duplicate
 			// messages from rapid policy updates are deduplicated by NATS.
 			resourceID := fmt.Sprintf("reindex/%s/%s", policy.Name, obj.GetUID())
-			if err := r.ReindexPublisher.PublishResource(ctx, obj.Object, resourceID); err != nil {
+			if err := r.ReindexPublisher.PublishResource(ctx, obj.Object, resourceID, policy.Name, indexName, specHash); err != nil {
 				logger.Error(err, "Failed to publish re-index message",
 					"resource", obj.GetName(), "namespace", obj.GetNamespace())
 				continue
