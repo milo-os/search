@@ -14,7 +14,7 @@ on:
 
 jobs:
   validate-kustomize:
-    uses: datum-cloud/actions/.github/workflows/validate-kustomize.yaml@v1.9.0
+    uses: datum-cloud/actions/.github/workflows/validate-kustomize.yaml@v1.11.0
 
   publish-container-image:
     # No point in trying to build the container image if the deployment
@@ -26,7 +26,7 @@ jobs:
       contents: read
       packages: write
       attestations: write
-    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.9.0
+    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.11.0
     with:
       image-name: search
     secrets: inherit
@@ -42,7 +42,7 @@ jobs:
       id-token: write
       contents: read
       packages: write
-    uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@v1.9.0
+    uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@v1.11.0
     with:
       bundle-name: ghcr.io/datum-cloud/search-kustomize
       bundle-path: config
