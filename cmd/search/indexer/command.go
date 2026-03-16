@@ -302,7 +302,7 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 	auditBatcher.Start(ctx)
 	reindexBatcher.Start(ctx)
 
-	auditIdx := indexer.NewIndexer(auditConsumer, indexPolicyCache, auditBatcher)
+	auditIdx := indexer.NewIndexer(auditConsumer, indexPolicyCache, auditBatcher, o.MultiTenant)
 	reindexIdx := indexer.NewReindexConsumer(reindexJSConsumer, reindexPolicyCache, reindexBatcher)
 
 	klog.Info("Starting audit indexer and re-index consumer...")

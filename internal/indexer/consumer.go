@@ -16,6 +16,7 @@ type Indexer struct {
 	consumer    jetstream.Consumer
 	policyCache *PolicyCache
 	batcher     *Batcher
+	multiTenant bool
 	mu          sync.Mutex
 }
 
@@ -59,17 +60,24 @@ func extractTenantFromAuditEvent(event *auditEvent) (tenantName string, tenantTy
 }
 
 // NewIndexer creates a new Indexer instance.
-func NewIndexer(consumer jetstream.Consumer, policyCache *PolicyCache, batcher *Batcher) *Indexer {
+func NewIndexer(consumer jetstream.Consumer, policyCache *PolicyCache, batcher *Batcher, multiTenant bool) *Indexer {
 	return &Indexer{
 		consumer:    consumer,
 		policyCache: policyCache,
 		batcher:     batcher,
+		multiTenant: multiTenant,
 	}
 }
 
 var upsertVerbs = map[string]bool{"create": true, "update": true, "patch": true}
 
-const deleteVerb = "delete"
+const (
+	deleteVerb = "delete"
+	// tenantTypePlatform mirrors tenant.TenantTypePlatform. A local copy is used
+	// to avoid an import cycle: internal/tenant/project_watcher.go already
+	// imports internal/indexer, so internal/indexer cannot import internal/tenant.
+	tenantTypePlatform = "platform"
+)
 
 // Start starts the indexer consumer loop.
 // Note: the Batcher must be started separately by the caller (via batcher.Start)
@@ -147,8 +155,14 @@ func (i *Indexer) Start(ctx context.Context) error {
 					continue
 				}
 
-				// Inject tenant context extracted from the audit event's user extra fields.
+				// Always extract tenant context from the audit event's user extra fields.
+				// In single-tenant mode, skip non-platform resources so that project-tenant
+				// resources are never incorrectly indexed as platform resources.
 				evalResult.Tenant, evalResult.TenantType = extractTenantFromAuditEvent(&event)
+				if !i.multiTenant && evalResult.TenantType != tenantTypePlatform {
+					msg.Ack()
+					continue
+				}
 
 				// Transform the matching resource into an indexable document
 				doc := evalResult.Transform()

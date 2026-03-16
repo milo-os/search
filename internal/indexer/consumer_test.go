@@ -136,7 +136,7 @@ func TestIndexer_Start_ConsumeFlow(t *testing.T) {
 	mockSearch.On("WaitForTasks", mock.Anything).Return(nil, nil).Once()
 
 	// 4. Run Indexer
-	indexer := NewIndexer(mockConsumer, policyCache, batcher)
+	indexer := NewIndexer(mockConsumer, policyCache, batcher, false)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Run Start in a goroutine
@@ -275,7 +275,7 @@ func TestIndexer_Consume_Delete(t *testing.T) {
 	})).Return(nil, nil).Once()
 	mockSearch.On("WaitForTasks", mock.Anything).Return(nil, nil).Once()
 
-	indexer := NewIndexer(mockConsumer, policyCache, batcher)
+	indexer := NewIndexer(mockConsumer, policyCache, batcher, false)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go indexer.Start(ctx)

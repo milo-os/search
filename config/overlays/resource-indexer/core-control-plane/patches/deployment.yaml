@@ -7,3 +7,8 @@ spec:
     spec:
       serviceAccountName: resource-indexer
       automountServiceAccountToken: true
+      containers:
+      - name: indexer
+        env:
+        - name: MULTI_TENANT
+          value: "true"
