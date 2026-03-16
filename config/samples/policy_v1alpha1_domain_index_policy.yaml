@@ -1,0 +1,29 @@
+apiVersion: search.miloapis.com/v1alpha1
+kind: ResourceIndexPolicy
+metadata:
+  name: domain-index-policy
+spec:
+  targetResource:
+    group: networking.datumapis.com
+    version: v1alpha
+    kind: Domain
+
+  conditions:
+    - name: has-name
+      expression: "metadata.name != ''"
+
+  fields:
+    - path: ".metadata.name"
+      searchable: true
+    - path: ".metadata.namespace"
+      searchable: true
+    - path: ".spec.domainName"
+      searchable: true
+    - path: ".status.apex"
+      searchable: true
+    - path: ".status.nameservers[0].hostname"
+      searchable: true
+    - path: ".status.registration.registrar.name"
+      searchable: true
+    - path: ".status.registration.registry.name"
+      searchable: true
