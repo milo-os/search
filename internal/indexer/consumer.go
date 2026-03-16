@@ -33,7 +33,7 @@ type auditEvent struct {
 	} `json:"objectRef"`
 	ResponseObject map[string]any `json:"responseObject"`
 	// User carries authenticated user information including tenant context in extra fields.
-	User struct {
+	User *struct {
 		Extra map[string][]string `json:"extra,omitempty"`
 	} `json:"user,omitempty"`
 }
@@ -45,7 +45,7 @@ func extractTenantFromAuditEvent(event *auditEvent) (tenantName string, tenantTy
 	tenantName = "platform"
 	tenantType = "platform"
 
-	if event.User.Extra == nil {
+	if event.User == nil || event.User.Extra == nil {
 		return
 	}
 
@@ -134,6 +134,14 @@ func (i *Indexer) Start(ctx context.Context) error {
 			return
 		}
 
+		// In single-tenant mode, skip non-platform
+		// events entirely so that no policy can accidentally queue them.
+		tenantName, tenantType := extractTenantFromAuditEvent(&event)
+		if !i.multiTenant && tenantType != tenantTypePlatform {
+			msg.Ack()
+			return
+		}
+
 		queued := false
 
 		policies := i.policyCache.GetPolicies()
@@ -155,14 +163,9 @@ func (i *Indexer) Start(ctx context.Context) error {
 					continue
 				}
 
-				// Always extract tenant context from the audit event's user extra fields.
-				// In single-tenant mode, skip non-platform resources so that project-tenant
-				// resources are never incorrectly indexed as platform resources.
-				evalResult.Tenant, evalResult.TenantType = extractTenantFromAuditEvent(&event)
-				if !i.multiTenant && evalResult.TenantType != tenantTypePlatform {
-					msg.Ack()
-					continue
-				}
+				// Attach the already-extracted tenant context to the eval result.
+				evalResult.Tenant = tenantName
+				evalResult.TenantType = tenantType
 
 				// Transform the matching resource into an indexable document
 				doc := evalResult.Transform()

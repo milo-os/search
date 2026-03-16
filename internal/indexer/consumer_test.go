@@ -159,9 +159,13 @@ func TestIndexer_Start_ConsumeFlow(t *testing.T) {
 
 func TestExtractTenantFromAuditEvent_WithUserExtra(t *testing.T) {
 	event := &auditEvent{}
-	event.User.Extra = map[string][]string{
-		"iam.miloapis.com/parent-type": {"project"},
-		"iam.miloapis.com/parent-name": {"my-project"},
+	event.User = &struct {
+		Extra map[string][]string `json:"extra,omitempty"`
+	}{
+		Extra: map[string][]string{
+			"iam.miloapis.com/parent-type": {"project"},
+			"iam.miloapis.com/parent-name": {"my-project"},
+		},
 	}
 
 	name, typ := extractTenantFromAuditEvent(event)
@@ -192,8 +196,12 @@ func TestExtractTenantFromAuditEvent_PartialUserExtra_TypeOnlyNoName(t *testing.
 	// Only parent-type is set; parent-name is absent.
 	// Expect: tenantType reflects the extra field, tenantName falls back to "platform".
 	event := &auditEvent{}
-	event.User.Extra = map[string][]string{
-		"iam.miloapis.com/parent-type": {"project"},
+	event.User = &struct {
+		Extra map[string][]string `json:"extra,omitempty"`
+	}{
+		Extra: map[string][]string{
+			"iam.miloapis.com/parent-type": {"project"},
+		},
 	}
 
 	name, typ := extractTenantFromAuditEvent(event)
@@ -209,9 +217,13 @@ func TestExtractTenantFromAuditEvent_PartialUserExtra_TypeOnlyNoName(t *testing.
 func TestExtractTenantFromAuditEvent_EmptySliceValues(t *testing.T) {
 	// Keys present but with empty slices should not override the defaults.
 	event := &auditEvent{}
-	event.User.Extra = map[string][]string{
-		"iam.miloapis.com/parent-type": {},
-		"iam.miloapis.com/parent-name": {},
+	event.User = &struct {
+		Extra map[string][]string `json:"extra,omitempty"`
+	}{
+		Extra: map[string][]string{
+			"iam.miloapis.com/parent-type": {},
+			"iam.miloapis.com/parent-name": {},
+		},
 	}
 
 	name, typ := extractTenantFromAuditEvent(event)
