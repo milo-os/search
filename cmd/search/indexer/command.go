@@ -46,6 +46,9 @@ type ResourceIndexerOptions struct {
 	BatchSize                 int
 	FlushInterval             time.Duration
 	BatchMaxConcurrentUploads int
+
+	// Multi-tenancy settings.
+	MultiTenant bool
 }
 
 // NewResourceIndexerOptions creates a new ResourceIndexerOptions with default values.
@@ -65,6 +68,7 @@ func NewResourceIndexerOptions() *ResourceIndexerOptions {
 		MeilisearchMaxRetries:      3,
 		MeilisearchRetryDelay:      500 * time.Millisecond,
 		BatchMaxConcurrentUploads:  100,
+		MultiTenant:                false,
 	}
 }
 
@@ -89,6 +93,9 @@ func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&o.MeilisearchMaxRetries, "meilisearch-max-retries", o.MeilisearchMaxRetries, "The maximum number of retries for transient Meilisearch errors.")
 	fs.DurationVar(&o.MeilisearchRetryDelay, "meilisearch-retry-delay", o.MeilisearchRetryDelay, "The base delay between Meilisearch retries.")
 	fs.IntVar(&o.BatchMaxConcurrentUploads, "batch-max-concurrent-uploads", o.BatchMaxConcurrentUploads, "The maximum number of concurrent uploads to Meilisearch.")
+
+	// Multi-tenancy
+	fs.BoolVar(&o.MultiTenant, "multi-tenant", o.MultiTenant, "Enable multi-tenant mode to index resources from all project control planes.")
 }
 
 // Validate checks if the resource indexer options are valid.

@@ -22,6 +22,12 @@ type EvalResult struct {
 	Version string
 	// Kind is the kind of the matching policy.
 	Kind string
+	// Tenant is the tenant name for the indexed document (e.g. "platform" or a project name).
+	// When empty, Transform() defaults to "platform".
+	Tenant string
+	// TenantType is the tenant type for the indexed document (e.g. "platform" or "project").
+	// When empty, Transform() defaults to "platform".
+	TenantType string
 }
 
 // PolicyEvaluator evaluates whether a Kubernetes resource matches a policy
@@ -174,6 +180,19 @@ func (r *EvalResult) Transform() map[string]any {
 		doc["apiVersion"] = r.Version
 	}
 	doc["kind"] = r.Kind
+
+	// Add tenant metadata fields. Default to "platform" when not set so that
+	// single-tenant deployments produce consistent filterable attribute values.
+	tenant := r.Tenant
+	if tenant == "" {
+		tenant = "platform"
+	}
+	tenantType := r.TenantType
+	if tenantType == "" {
+		tenantType = "platform"
+	}
+	doc["_tenant"] = tenant
+	doc["_tenant_type"] = tenantType
 
 	return doc
 }

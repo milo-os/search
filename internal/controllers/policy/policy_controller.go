@@ -22,6 +22,7 @@ import (
 	"go.miloapis.net/search/internal/cel"
 	"go.miloapis.net/search/internal/policy/evaluation"
 	"go.miloapis.net/search/internal/policy/validation"
+	"go.miloapis.net/search/internal/tenant"
 	"go.miloapis.net/search/internal/utils"
 	searchv1alpha1 "go.miloapis.net/search/pkg/apis/search/v1alpha1"
 
@@ -34,7 +35,9 @@ type ResourceReindexPublisher interface {
 	// PublishResource publishes a single resource object for re-indexing.
 	// policyName, indexName, and specHash identify the policy version that triggered the re-index
 	// so the consumer can evaluate against the correct policy conditions.
-	PublishResource(ctx context.Context, resource map[string]any, resourceID, policyName, indexName, specHash string) error
+	// tenant and tenantType identify which tenant the resource belongs to;
+	// use "platform" and "platform" for single-tenant deployments.
+	PublishResource(ctx context.Context, resource map[string]any, resourceID, policyName, indexName, specHash, tenant, tenantType string) error
 }
 
 // ResourceIndexPolicyReconciler reconciles a ResourceIndexPolicy object
@@ -55,6 +58,11 @@ type ResourceIndexPolicyReconciler struct {
 	// ReindexPublisher is called once per target resource after a
 	// successful reconcile to trigger background re-indexing.
 	ReindexPublisher ResourceReindexPublisher
+
+	// TenantRegistry provides the set of active tenants and per-tenant dynamic
+	// clients. When nil, the reconciler falls back to single-tenant mode using
+	// DynamicClient directly with "platform" as the tenant identity.
+	TenantRegistry tenant.TenantRegistry
 
 	RetryBaseDelay time.Duration
 	RetryMaxDelay  time.Duration
@@ -84,6 +92,8 @@ const (
 	AttributesUpdatingReason          = "AttributesUpdating"
 	AttributesFailedReason            = "AttributesFailed"
 
+	FilterableAttributesConditionType = "FilterableAttributesConfigured"
+
 	ReindexingConditionType    = "Reindexing"
 	ReindexingCompleteReason   = "ReindexingComplete"
 	ReindexingInProgressReason = "ReindexingInProgress"
@@ -93,6 +103,7 @@ const (
 // +kubebuilder:rbac:groups=search.miloapis.com,resources=resourceindexpolicies/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=search.miloapis.com,resources=resourceindexpolicies/finalizers,verbs=update
 // +kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch
+// +kubebuilder:rbac:groups=resourcemanager.miloapis.com,resources=projects,verbs=get;list;watch
 
 // Reconcile matches the state of the cluster with the desired state of a ResourceIndexPolicy.
 func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -179,6 +190,14 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		Status:  metav1.ConditionTrue,
 		Reason:  AttributesSyncedReason,
 		Message: "Searchable attributes are configured",
+	}
+
+	// Prepare filterable attributes condition
+	filterableAttributesCondition := metav1.Condition{
+		Type:    FilterableAttributesConditionType,
+		Status:  metav1.ConditionTrue,
+		Reason:  AttributesSyncedReason,
+		Message: "Filterable attributes are configured",
 	}
 
 	// Prepare reindexing condition
@@ -320,6 +339,73 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 	}
 
+	// Manage Filterable Attributes
+	// The baseline filterable attributes ensure that _tenant and _tenant_type are always
+	// present so multi-tenant filter queries work regardless of policy field configuration.
+	baseFilterableAttributes := []string{"uid", "metadata.name", "metadata.namespace", "_tenant", "_tenant_type"}
+	if searchIndexCondition.Status == metav1.ConditionTrue {
+		// Check for pending settings update (shared with searchable attributes above)
+		settingsTaskForFilter, err := r.SearchSDK.GetSettingsUpdateTask(searchIndex)
+		if err != nil {
+			logger.Error(err, "Failed to get settings update task for filterable attributes")
+			filterableAttributesCondition.Status = metav1.ConditionFalse
+			filterableAttributesCondition.Reason = fmt.Sprintf("%s: %s", AttributesFailedReason, err.Error())
+			filterableAttributesCondition.Message = "Failed to check settings status"
+		}
+
+		isFilterPending := false
+		if settingsTaskForFilter != nil && r.SearchSDK.IsTaskPending(settingsTaskForFilter) {
+			isFilterPending = true
+			filterableAttributesCondition.Status = metav1.ConditionFalse
+			filterableAttributesCondition.Reason = AttributesUpdatingReason
+			filterableAttributesCondition.Message = "Filterable attributes update is pending"
+			logger.Info("Filterable attributes update is pending")
+		}
+
+		if !isFilterPending {
+			currentFilterable, err := r.SearchSDK.GetFilterableAttributes(searchIndex)
+			if err != nil {
+				logger.Error(err, "Failed to get current filterable attributes")
+				filterableAttributesCondition.Status = metav1.ConditionFalse
+				filterableAttributesCondition.Reason = fmt.Sprintf("%s: %s", AttributesFailedReason, err.Error())
+				filterableAttributesCondition.Message = "Failed to get current filterable attributes"
+			} else {
+				// Ensure all baseline attributes are present; preserve any extras already configured.
+				desired := mergeFilterableAttributes(currentFilterable, baseFilterableAttributes)
+				sort.Strings(desired)
+
+				current := make([]string, len(currentFilterable))
+				copy(current, currentFilterable)
+				sort.Strings(current)
+
+				equal := len(current) == len(desired)
+				if equal {
+					for i := range current {
+						if current[i] != desired[i] {
+							equal = false
+							break
+						}
+					}
+				}
+
+				if !equal {
+					logger.Info("Updating filterable attributes", "current", current, "desired", desired)
+					_, err := r.SearchSDK.UpdateFilterableAttributes(searchIndex, desired)
+					if err != nil {
+						logger.Error(err, "Failed to update filterable attributes")
+						filterableAttributesCondition.Status = metav1.ConditionFalse
+						filterableAttributesCondition.Reason = fmt.Sprintf("%s: %s", AttributesFailedReason, err.Error())
+						filterableAttributesCondition.Message = "Failed to update filterable attributes: " + err.Error()
+					} else {
+						filterableAttributesCondition.Status = metav1.ConditionFalse
+						filterableAttributesCondition.Reason = AttributesUpdatingReason
+						filterableAttributesCondition.Message = "Updating filterable attributes"
+					}
+				}
+			}
+		}
+	}
+
 	errResult := false
 	// Verify validation errors
 	if len(valErr) > 0 {
@@ -355,6 +441,7 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 	if validationCondition.Status == metav1.ConditionFalse ||
 		searchIndexCondition.Status == metav1.ConditionFalse ||
 		searchableAttributesCondition.Status == metav1.ConditionFalse ||
+		filterableAttributesCondition.Status == metav1.ConditionFalse ||
 		reindexingCondition.Status == metav1.ConditionFalse {
 		readyCondition.Status = metav1.ConditionFalse
 		readyCondition.Reason = NotReadyConditionReason
@@ -363,7 +450,8 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	// Determine if actions made to Meilisearch are pending to complete
 	isPending := searchIndexCondition.Reason == IndexPendingReason ||
-		searchableAttributesCondition.Reason == AttributesUpdatingReason
+		searchableAttributesCondition.Reason == AttributesUpdatingReason ||
+		filterableAttributesCondition.Reason == AttributesUpdatingReason
 
 	// Clone policy to update status (we need the original status to compare against)
 	oldStatus := policy.Status.DeepCopy()
@@ -372,6 +460,7 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 	meta.SetStatusCondition(&policy.Status.Conditions, validationCondition)
 	meta.SetStatusCondition(&policy.Status.Conditions, searchIndexCondition)
 	meta.SetStatusCondition(&policy.Status.Conditions, searchableAttributesCondition)
+	meta.SetStatusCondition(&policy.Status.Conditions, filterableAttributesCondition)
 	meta.SetStatusCondition(&policy.Status.Conditions, reindexingCondition)
 
 	// Update status now. This persists any "InProgress" state before we start
@@ -436,18 +525,100 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 
 }
 
+// mergeFilterableAttributes returns a deduplicated union of existing and required attributes.
+// It preserves any extras already configured in the index while ensuring all required
+// attributes are present.
+func mergeFilterableAttributes(existing, required []string) []string {
+	seen := make(map[string]struct{}, len(existing)+len(required))
+	result := make([]string, 0, len(existing)+len(required))
+	for _, a := range existing {
+		if _, ok := seen[a]; !ok {
+			seen[a] = struct{}{}
+			result = append(result, a)
+		}
+	}
+	for _, a := range required {
+		if _, ok := seen[a]; !ok {
+			seen[a] = struct{}{}
+			result = append(result, a)
+		}
+	}
+	return result
+}
+
 // computeSpecHash delegates to the shared utility for computing a policy spec hash.
 func computeSpecHash(spec *searchv1alpha1.ResourceIndexPolicySpec) string {
 	return utils.ComputeSpecHash(spec)
 }
 
-// publishReindexMessages lists all resources matching the policy's TargetResource
-// and publishes one reindex message per resource to the re-index queue.
+// publishReindexMessages iterates all active tenants and publishes one reindex
+// message per resource per tenant to the re-index queue.
+// In single-tenant mode (TenantRegistry is nil), it behaves identically to the
+// original implementation, using DynamicClient with "platform" as the tenant.
 func (r *ResourceIndexPolicyReconciler) publishReindexMessages(
 	ctx context.Context,
 	policy *searchv1alpha1.ResourceIndexPolicy,
 ) error {
 	logger := logf.FromContext(ctx).WithName("resourceindexpolicy-controller")
+
+	// Determine which tenants to publish for. When TenantRegistry is nil we
+	// fall back to single-tenant mode: just the platform tenant using the
+	// reconciler's own DynamicClient.
+	type tenantEntry struct {
+		info   tenant.TenantInfo
+		client dynamic.Interface
+	}
+
+	var tenants []tenantEntry
+	if r.TenantRegistry != nil {
+		for _, ti := range r.TenantRegistry.ListTenants() {
+			dc := r.TenantRegistry.GetTenantClient(ti.Name)
+			if dc == nil {
+				logger.Info("No client for tenant; skipping", "tenant", ti.Name)
+				continue
+			}
+			tenants = append(tenants, tenantEntry{info: ti, client: dc})
+		}
+	} else {
+		tenants = []tenantEntry{
+			{
+				info:   tenant.PlatformTenantInfo,
+				client: r.DynamicClient,
+			},
+		}
+	}
+
+	var firstErr error
+	totalPublished := 0
+
+	for _, te := range tenants {
+		n, err := r.publishReindexMessagesForTenant(ctx, policy, te.info, te.client)
+		totalPublished += n
+		if err != nil {
+			logger.Error(err, "Failed to publish re-index messages for tenant; continuing",
+				"tenant", te.info.Name)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+
+	logger.Info("Published re-index messages", "policy", policy.Name, "count", totalPublished)
+	return firstErr
+}
+
+// publishReindexMessagesForTenant lists all resources matching the policy's
+// TargetResource using the provided dynamic client and publishes one reindex
+// message per resource, stamped with the given tenant identity.
+// It returns the number of messages published and the first error encountered.
+func (r *ResourceIndexPolicyReconciler) publishReindexMessagesForTenant(
+	ctx context.Context,
+	policy *searchv1alpha1.ResourceIndexPolicy,
+	tenantInfo tenant.TenantInfo,
+	dynamicClient dynamic.Interface,
+) (int, error) {
+	logger := logf.FromContext(ctx).WithName("resourceindexpolicy-controller").
+		WithValues("tenant", tenantInfo.Name)
 
 	target := policy.Spec.TargetResource
 	gvk := schema.GroupVersionKind{
@@ -461,21 +632,21 @@ func (r *ResourceIndexPolicyReconciler) publishReindexMessages(
 	if err != nil {
 		if meta.IsNoMatchError(err) {
 			logger.Info("Target resource type not found, skipping re-index", "gvk", gvk.String())
-			return nil
+			return 0, nil
 		}
 		logger.Error(err, "RESTMapper failure", "gvk", gvk.String(), "group", gvk.Group, "version", gvk.Version, "kind", gvk.Kind)
-		return fmt.Errorf("failed to get REST mapping for %v: %w", gvk, err)
+		return 0, fmt.Errorf("failed to get REST mapping for %v: %w", gvk, err)
 	}
 
 	// Determine whether the resource is cluster-scoped or namespace-scoped.
 	var resourceClient dynamic.ResourceInterface
 	if mapping.Scope.Name() == meta.RESTScopeNameRoot {
-		resourceClient = r.DynamicClient.Resource(mapping.Resource)
+		resourceClient = dynamicClient.Resource(mapping.Resource)
 	} else {
-		resourceClient = r.DynamicClient.Resource(mapping.Resource).Namespace(metav1.NamespaceAll)
+		resourceClient = dynamicClient.Resource(mapping.Resource).Namespace(metav1.NamespaceAll)
 	}
 
-	// Page through all resources and publish one synthetic audit event per resource.
+	// Page through all resources and publish one reindex event per resource.
 	var continueToken string
 	pageSize := int64(500)
 	published := 0
@@ -486,7 +657,7 @@ func (r *ResourceIndexPolicyReconciler) publishReindexMessages(
 			Continue: continueToken,
 		})
 		if err != nil {
-			return fmt.Errorf("failed to list %v resources: %w", gvk, err)
+			return published, fmt.Errorf("failed to list %v resources: %w", gvk, err)
 		}
 
 		indexName := policy.Status.IndexName
@@ -495,10 +666,10 @@ func (r *ResourceIndexPolicyReconciler) publishReindexMessages(
 		for i := range list.Items {
 			obj := &list.Items[i]
 			logger.Info("Publishing re-index message", "resource", obj.GetName(), "namespace", obj.GetNamespace())
-			// Use "reindex/<policyName>/<uid>" as the resourceID so that duplicate
-			// messages from rapid policy updates are deduplicated by NATS.
-			resourceID := fmt.Sprintf("reindex/%s/%s", policy.Name, obj.GetUID())
-			if err := r.ReindexPublisher.PublishResource(ctx, obj.Object, resourceID, policy.Name, indexName, specHash); err != nil {
+			// Use "reindex/<policyName>/<tenant>/<uid>" as the resourceID so that
+			// duplicate messages from rapid policy updates are deduplicated by NATS.
+			resourceID := fmt.Sprintf("reindex/%s/%s/%s", policy.Name, tenantInfo.Name, obj.GetUID())
+			if err := r.ReindexPublisher.PublishResource(ctx, obj.Object, resourceID, policy.Name, indexName, specHash, tenantInfo.Name, tenantInfo.Type); err != nil {
 				logger.Error(err, "Failed to publish re-index message",
 					"resource", obj.GetName(), "namespace", obj.GetNamespace())
 				continue
@@ -512,8 +683,8 @@ func (r *ResourceIndexPolicyReconciler) publishReindexMessages(
 		}
 	}
 
-	logger.Info("Published re-index messages", "policy", policy.Name, "count", published)
-	return nil
+	logger.Info("Published re-index messages for tenant", "policy", policy.Name, "tenant", tenantInfo.Name, "count", published)
+	return published, nil
 }
 
 // resourceIndexPolicyFinalizer handles Meilisearch cleanup when a

@@ -157,6 +157,73 @@ func TestIndexer_Start_ConsumeFlow(t *testing.T) {
 	msg.AssertExpectations(t)
 }
 
+func TestExtractTenantFromAuditEvent_WithUserExtra(t *testing.T) {
+	event := &auditEvent{}
+	event.User.Extra = map[string][]string{
+		"iam.miloapis.com/parent-type": {"project"},
+		"iam.miloapis.com/parent-name": {"my-project"},
+	}
+
+	name, typ := extractTenantFromAuditEvent(event)
+
+	if name != "my-project" {
+		t.Errorf("tenantName: got %q, want %q", name, "my-project")
+	}
+	if typ != "project" {
+		t.Errorf("tenantType: got %q, want %q", typ, "project")
+	}
+}
+
+func TestExtractTenantFromAuditEvent_NoUserExtra(t *testing.T) {
+	event := &auditEvent{}
+	// User.Extra is nil by default.
+
+	name, typ := extractTenantFromAuditEvent(event)
+
+	if name != "platform" {
+		t.Errorf("tenantName: got %q, want %q", name, "platform")
+	}
+	if typ != "platform" {
+		t.Errorf("tenantType: got %q, want %q", typ, "platform")
+	}
+}
+
+func TestExtractTenantFromAuditEvent_PartialUserExtra_TypeOnlyNoName(t *testing.T) {
+	// Only parent-type is set; parent-name is absent.
+	// Expect: tenantType reflects the extra field, tenantName falls back to "platform".
+	event := &auditEvent{}
+	event.User.Extra = map[string][]string{
+		"iam.miloapis.com/parent-type": {"project"},
+	}
+
+	name, typ := extractTenantFromAuditEvent(event)
+
+	if name != "platform" {
+		t.Errorf("tenantName: got %q, want %q (expected fallback)", name, "platform")
+	}
+	if typ != "project" {
+		t.Errorf("tenantType: got %q, want %q", typ, "project")
+	}
+}
+
+func TestExtractTenantFromAuditEvent_EmptySliceValues(t *testing.T) {
+	// Keys present but with empty slices should not override the defaults.
+	event := &auditEvent{}
+	event.User.Extra = map[string][]string{
+		"iam.miloapis.com/parent-type": {},
+		"iam.miloapis.com/parent-name": {},
+	}
+
+	name, typ := extractTenantFromAuditEvent(event)
+
+	if name != "platform" {
+		t.Errorf("tenantName: got %q, want %q", name, "platform")
+	}
+	if typ != "platform" {
+		t.Errorf("tenantType: got %q, want %q", typ, "platform")
+	}
+}
+
 func TestIndexer_Consume_Delete(t *testing.T) {
 	// Setup similar to above but for DELETE event
 	policy := &v1alpha1.ResourceIndexPolicy{

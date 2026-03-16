@@ -23,8 +23,10 @@ func TestEvalResult_Transform(t *testing.T) {
 			version: "v1alpha1",
 			kind:    "ResourceIndexPolicy",
 			expected: map[string]any{
-				"apiVersion": "search.miloapis.com/v1alpha1",
-				"kind":       "ResourceIndexPolicy",
+				"apiVersion":   "search.miloapis.com/v1alpha1",
+				"kind":         "ResourceIndexPolicy",
+				"_tenant":      "platform",
+				"_tenant_type": "platform",
 			},
 		},
 		{
@@ -34,9 +36,11 @@ func TestEvalResult_Transform(t *testing.T) {
 			version: "v1",
 			kind:    "ConfigMap",
 			expected: map[string]any{
-				"apiVersion": "v1",
-				"kind":       "ConfigMap",
-				"metadata":   map[string]any{"name": "test-cm"},
+				"apiVersion":   "v1",
+				"kind":         "ConfigMap",
+				"metadata":     map[string]any{"name": "test-cm"},
+				"_tenant":      "platform",
+				"_tenant_type": "platform",
 			},
 		},
 		{
@@ -59,6 +63,8 @@ func TestEvalResult_Transform(t *testing.T) {
 						"matchLabels": map[string]any{"app": "foo"},
 					},
 				},
+				"_tenant":      "platform",
+				"_tenant_type": "platform",
 			},
 		},
 		{
@@ -68,9 +74,11 @@ func TestEvalResult_Transform(t *testing.T) {
 			version: "v1",
 			kind:    "ConfigMap",
 			expected: map[string]any{
-				"apiVersion": "v1",
-				"kind":       "ConfigMap",
-				"data":       map[string]any{"config.yaml": "content"},
+				"apiVersion":   "v1",
+				"kind":         "ConfigMap",
+				"data":         map[string]any{"config.yaml": "content"},
+				"_tenant":      "platform",
+				"_tenant_type": "platform",
 			},
 		},
 		{
@@ -89,6 +97,8 @@ func TestEvalResult_Transform(t *testing.T) {
 					"name":      "test",
 					"namespace": "default",
 				},
+				"_tenant":      "platform",
+				"_tenant_type": "platform",
 			},
 		},
 		{
@@ -109,6 +119,8 @@ func TestEvalResult_Transform(t *testing.T) {
 						"component": "core",
 					},
 				},
+				"_tenant":      "platform",
+				"_tenant_type": "platform",
 			},
 		},
 		{
@@ -141,6 +153,8 @@ func TestEvalResult_Transform(t *testing.T) {
 						},
 					},
 				},
+				"_tenant":      "platform",
+				"_tenant_type": "platform",
 			},
 		},
 		{
@@ -171,6 +185,8 @@ func TestEvalResult_Transform(t *testing.T) {
 					},
 					"hostIP": "10.0.0.1",
 				},
+				"_tenant":      "platform",
+				"_tenant_type": "platform",
 			},
 		},
 		{
@@ -195,6 +211,8 @@ func TestEvalResult_Transform(t *testing.T) {
 						},
 					},
 				},
+				"_tenant":      "platform",
+				"_tenant_type": "platform",
 			},
 		},
 		{
@@ -221,6 +239,8 @@ func TestEvalResult_Transform(t *testing.T) {
 				"data": map[string]any{
 					"config.json": "{}",
 				},
+				"_tenant":      "platform",
+				"_tenant_type": "platform",
 			},
 		},
 		{
@@ -233,8 +253,10 @@ func TestEvalResult_Transform(t *testing.T) {
 			version: "v2", // Policy version should overwrite the one from fields
 			kind:    "ServiceOverride",
 			expected: map[string]any{
-				"kind":       "ServiceOverride",
-				"apiVersion": "v2",
+				"kind":         "ServiceOverride",
+				"apiVersion":   "v2",
+				"_tenant":      "platform",
+				"_tenant_type": "platform",
 			},
 		},
 		{
@@ -259,6 +281,8 @@ func TestEvalResult_Transform(t *testing.T) {
 						"subkey": "bar",
 					},
 				},
+				"_tenant":      "platform",
+				"_tenant_type": "platform",
 			},
 		},
 		{

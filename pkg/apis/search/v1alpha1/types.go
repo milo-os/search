@@ -77,6 +77,17 @@ type ResourceSearchQueryStatus struct {
 	Continue string `json:"continue,omitempty"`
 }
 
+// TenantInfo identifies the tenant from which a search result originates.
+type TenantInfo struct {
+	// Name is the tenant name. "platform" for the platform tenant,
+	// or the project name for project-scoped resources.
+	// +optional
+	Name string `json:"name,omitempty"`
+	// Type is the tenant type. One of "platform" or "project".
+	// +optional
+	Type string `json:"type,omitempty"`
+}
+
 // SearchResult represents a single search result with its relevance score.
 type SearchResult struct {
 	// Resource contains the actual Kubernetes resource.
@@ -85,6 +96,10 @@ type SearchResult struct {
 	// RelevanceScore is the relevance score from Meilisearch.
 	// +optional
 	RelevanceScore float64 `json:"relevanceScore,omitempty"`
+
+	// Tenant identifies the tenant from which this result originates.
+	// +optional
+	Tenant TenantInfo `json:"tenant,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

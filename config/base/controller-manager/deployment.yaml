@@ -48,6 +48,8 @@ spec:
         - --nats-tls-cert=$(NATS_TLS_CERT)
         - --nats-tls-key=$(NATS_TLS_KEY)
         - --leader-elect-resource-namespace=$(LEADER_ELECT_RESOURCE_NAMESPACE)
+        - --multi-tenant=$(MULTI_TENANT)
+        - --project-label-selector=$(PROJECT_LABEL_SELECTOR)
         env:
         - name: POD_NAMESPACE
           valueFrom:
@@ -76,6 +78,10 @@ spec:
         - name: NATS_TLS_KEY
           value: ""
         - name: LEADER_ELECT_RESOURCE_NAMESPACE
+          value: ""
+        - name: MULTI_TENANT
+          value: "false"
+        - name: PROJECT_LABEL_SELECTOR
           value: ""
         - name: MEILISEARCH_API_KEY
           valueFrom:

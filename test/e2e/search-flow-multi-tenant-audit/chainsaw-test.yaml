@@ -1,0 +1,265 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: search-flow-multi-tenant-audit
+spec:
+  description: |
+    Validates that resources injected via NATS AUDIT_EVENTS with tenant metadata carried
+    in user.extra fields are correctly indexed with _tenant/_tenant_type fields and that
+    search results expose tenant.name and tenant.type. Since project control planes are
+    not available in the test environment, this test directly publishes crafted audit
+    events to NATS to simulate the multi-tenant audit event indexing path.
+
+    This exercises the Indexer.Start() path (not ReindexConsumer), which:
+      1. Consumes from the AUDIT_EVENTS stream on subject audit.k8s.activity.
+      2. Iterates all active ResourceIndexPolicies and evaluates responseObject against
+         each policy's CEL conditions.
+      3. Calls extractTenantFromAuditEvent() to read tenant identity from
+         user.extra["iam.miloapis.com/parent-type"] and
+         user.extra["iam.miloapis.com/parent-name"].
+      4. Falls back to "platform"/"platform" when user.extra is absent.
+
+    Covers:
+      - A1: Project-tenant resource is searchable with tenant.name and tenant.type set.
+      - A2: Platform-tenant resource (no user.extra) is searchable with fallback
+            tenant.name="platform" and tenant.type="platform".
+      - A3: Mixed search returns both results with correct per-result tenant metadata.
+      - _tenant/_tenant_type internal fields are not exposed on the resource object.
+
+  namespace: default
+
+  steps:
+    # =========================================================================
+    # Pre-cleanup
+    # =========================================================================
+    - name: pre-cleanup
+      description: "Removes leftover resources to ensure idempotent test execution"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl delete resourceindexpolicy e2e-mt-audit-role-policy --ignore-not-found=true || true
+              kubectl delete job e2e-mt-audit-nats-publisher --ignore-not-found=true || true
+              kubectl delete configmap e2e-mt-audit-nats-events --ignore-not-found=true || true
+              sleep 5
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 2: Create a ResourceIndexPolicy
+    # =========================================================================
+    - name: create-role-policy
+      description: "Creates ResourceIndexPolicy targeting Roles with e2e-multi-tenant-audit label"
+      try:
+        - apply:
+            resource:
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: e2e-mt-audit-role-policy
+              spec:
+                targetResource:
+                  group: "rbac.authorization.k8s.io"
+                  version: v1
+                  kind: RoleBinding
+                conditions:
+                  - name: is-e2e-multi-tenant-audit
+                    expression: "'e2e-multi-tenant-audit' in metadata.labels"
+                fields:
+                  - path: ".metadata.name"
+                    searchable: true
+                  - path: ".metadata.annotations['e2e.search.test/service']"
+                    searchable: true
+
+    # =========================================================================
+    # Step 3: Wait for policy Ready=True
+    # =========================================================================
+    - name: wait-for-role-policy-ready
+      description: "Waits for audit multi-tenant Role policy to reach Ready=True"
+      try:
+        - wait:
+            apiVersion: search.miloapis.com/v1alpha1
+            kind: ResourceIndexPolicy
+            name: e2e-mt-audit-role-policy
+            timeout: 60s
+            for:
+              condition:
+                name: Ready
+                value: "True"
+
+    # =========================================================================
+    # Step 4: Publish two audit events via NATS
+    # =========================================================================
+    - name: publish-audit-events
+      description: "Publishes two audit events to NATS — one project-tenant, one platform-tenant (no user.extra)"
+      try:
+        - script:
+            timeout: 120s
+            content: |
+              # Event A: project-tenant resource.
+              # user.extra carries iam.miloapis.com/parent-type and parent-name so the
+              # indexer's extractTenantFromAuditEvent() will resolve the tenant as
+              # type="project", name="e2e-audit-test-project".
+              EVENT_A='{"auditID":"e2e-audit-project-event-001","verb":"create","objectRef":{"apiGroup":"rbac.authorization.k8s.io","apiVersion":"v1","resource":"rolebindings","name":"e2e-audit-project-role","namespace":"default","uid":"e2e-audit-project-uid-00000001"},"responseObject":{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding","metadata":{"name":"e2e-audit-project-role","namespace":"default","uid":"e2e-audit-project-uid-00000001","labels":{"e2e-multi-tenant-audit":"true"},"annotations":{"e2e.search.test/service":"audit-project-service-mt-rn2"}},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"Role","name":"view"},"subjects":[]},"user":{"extra":{"iam.miloapis.com/parent-type":["project"],"iam.miloapis.com/parent-name":["e2e-audit-test-project"]}}}'
+
+              # Event B: platform-tenant resource.
+              # No "user" field at all — exercises the fallback path in
+              # extractTenantFromAuditEvent() that returns "platform"/"platform"
+              # when user.extra is nil.
+              EVENT_B='{"auditID":"e2e-audit-platform-event-001","verb":"create","objectRef":{"apiGroup":"rbac.authorization.k8s.io","apiVersion":"v1","resource":"rolebindings","name":"e2e-audit-platform-role","namespace":"default","uid":"e2e-audit-platform-uid-00000001"},"responseObject":{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding","metadata":{"name":"e2e-audit-platform-role","namespace":"default","uid":"e2e-audit-platform-uid-00000001","labels":{"e2e-multi-tenant-audit":"true"},"annotations":{"e2e.search.test/service":"audit-platform-service-mt-rn2"}},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"Role","name":"view"},"subjects":[]}}'
+
+              # Store event payloads in a ConfigMap so they can be mounted into the
+              # Job container without shell escaping issues.
+              kubectl delete configmap e2e-mt-audit-nats-events --ignore-not-found=true || true
+              kubectl create configmap e2e-mt-audit-nats-events \
+                --from-literal=event_a="$EVENT_A" \
+                --from-literal=event_b="$EVENT_B"
+
+              # Create the Job that reads event files from the ConfigMap volume and
+              # publishes them sequentially to the AUDIT_EVENTS stream.
+              # <<'JOBEOF' (quoted heredoc) prevents the outer shell from expanding
+              # $(cat /events/event_a) — the $() is evaluated inside the container.
+              cat <<'JOBEOF' | kubectl apply -f -
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: e2e-mt-audit-nats-publisher
+                namespace: default
+              spec:
+                ttlSecondsAfterFinished: 120
+                template:
+                  spec:
+                    restartPolicy: Never
+                    volumes:
+                      - name: events
+                        configMap:
+                          name: e2e-mt-audit-nats-events
+                    containers:
+                      - name: publisher
+                        image: natsio/nats-box:latest
+                        command:
+                          - /bin/sh
+                          - -c
+                          - |
+                            nats pub audit.k8s.activity "$(cat /events/event_a)" --server nats://nats.nats-system.svc.cluster.local:4222 &&
+                            nats pub audit.k8s.activity "$(cat /events/event_b)" --server nats://nats.nats-system.svc.cluster.local:4222
+                        volumeMounts:
+                          - name: events
+                            mountPath: /events
+              JOBEOF
+
+              kubectl wait job/e2e-mt-audit-nats-publisher --for=condition=complete --timeout=60s
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 5: Wait for indexing to propagate
+    # =========================================================================
+    - name: wait-for-indexing
+      description: "Waits 30 seconds for audit events to be processed and indexed"
+      try:
+        - script:
+            timeout: 35s
+            content: sleep 30
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 6: Assert — project-tenant resource searchable with correct tenant info
+    # =========================================================================
+    - name: A1-audit-project-tenant-searchable
+      description: "A1: Project-tenant audit resource must be searchable with tenant.name and tenant.type extracted from user.extra"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: a1-audit-project-tenant
+              spec:
+                targetResources:
+                  - group: "rbac.authorization.k8s.io"
+                    version: v1
+                    kind: RoleBinding
+                query: "audit-project-service-mt-rn2"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-audit-project-role")] | length > 0'
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-audit-project-role") | select(.tenant.name == "e2e-audit-test-project") | select(.tenant.type == "project")] | length > 0'
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-audit-project-role") | select(.resource._tenant != null)] | length == 0'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 7: Assert — platform-tenant resource searchable with fallback tenant info
+    # =========================================================================
+    - name: A2-audit-platform-tenant-searchable
+      description: "A2: Platform-tenant audit resource (no user.extra) must be searchable with fallback tenant.name=platform and tenant.type=platform"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: a2-audit-platform-tenant
+              spec:
+                targetResources:
+                  - group: "rbac.authorization.k8s.io"
+                    version: v1
+                    kind: RoleBinding
+                query: "audit-platform-service-mt-rn2"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-audit-platform-role")] | length > 0'
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-audit-platform-role") | select(.tenant.name == "platform") | select(.tenant.type == "platform")] | length > 0'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 8: Assert — mixed search returns both results with distinct tenant types
+    # =========================================================================
+    - name: A3-mixed-audit-search
+      description: "A3: Mixed search must return both audit resources with one project and one platform tenant"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: a3-mixed-audit-tenant
+              spec:
+                targetResources:
+                  - group: "rbac.authorization.k8s.io"
+                    version: v1
+                    kind: RoleBinding
+                query: "mt-rn2"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.tenant.type == "project")] | length >= 1'
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.tenant.type == "platform")] | length >= 1'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Cleanup
+    # =========================================================================
+    - name: cleanup
+      description: "Removes all resources created by this test suite"
+      try:
+        - script:
+            timeout: 60s
+            content: |
+              kubectl delete job e2e-mt-audit-nats-publisher --ignore-not-found=true || true
+              kubectl delete configmap e2e-mt-audit-nats-events --ignore-not-found=true || true
+              kubectl delete resourceindexpolicy e2e-mt-audit-role-policy --ignore-not-found=true || true
+            check:
+              ($error): ~

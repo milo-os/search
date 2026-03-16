@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"go.miloapis.net/search/internal/indexer"
+	"go.miloapis.net/search/internal/tenant"
 	"go.miloapis.net/search/pkg/apis/search/install"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -59,6 +61,10 @@ type ControllerManagerOptions struct {
 	NatsTLSCA          string
 	NatsTLSCert        string
 	NatsTLSKey         string
+
+	// Multi-tenancy settings.
+	MultiTenant          bool
+	ProjectLabelSelector string
 }
 
 // NewControllerManagerOptions creates a new ControllerManagerOptions with default values
@@ -77,6 +83,7 @@ func NewControllerManagerOptions() *ControllerManagerOptions {
 		MeilisearchDomain:          "http://meilisearch.meilisearch-system.svc.cluster.local:7700",
 		NatsURL:                    "nats://nats.nats-system.svc.cluster.local:4222",
 		NatsReindexSubject:         "reindex.all",
+		MultiTenant:                false,
 	}
 }
 
@@ -107,6 +114,10 @@ func (o *ControllerManagerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.NatsTLSCA, "nats-tls-ca", o.NatsTLSCA, "The path to the NATS TLS CA file.")
 	fs.StringVar(&o.NatsTLSCert, "nats-tls-cert", o.NatsTLSCert, "The path to the NATS TLS certificate file.")
 	fs.StringVar(&o.NatsTLSKey, "nats-tls-key", o.NatsTLSKey, "The path to the NATS TLS key file.")
+
+	// Multi-tenancy
+	fs.BoolVar(&o.MultiTenant, "multi-tenant", o.MultiTenant, "Enable multi-tenant mode to index resources from all project control planes.")
+	fs.StringVar(&o.ProjectLabelSelector, "project-label-selector", o.ProjectLabelSelector, "Label selector to filter which projects are indexed (empty = all projects).")
 }
 
 // Validate validates the options
@@ -243,6 +254,46 @@ func Run(o *ControllerManagerOptions, ctx context.Context) error {
 
 	reindexPub := indexer.NewReindexPublisher(js, o.NatsReindexSubject)
 
+	// Build TenantRegistry based on deployment mode.
+	var registry tenant.TenantRegistry
+	if o.MultiTenant {
+		// Create a PolicyCache backed by the manager's shared informer cache.
+		// requireReadyCondition=true ensures the ProjectWatcher only bootstraps
+		// policies that are fully initialised (index created, attributes synced).
+		policyCache, err := indexer.NewPolicyCache(mgr.GetCache(), true)
+		if err != nil {
+			setupLog.Error(err, "unable to create policy cache")
+			os.Exit(1)
+		}
+		if err := policyCache.RegisterHandlers(ctx); err != nil {
+			setupLog.Error(err, "unable to register policy cache handlers")
+			os.Exit(1)
+		}
+
+		// ProjectWatcher handles tenant lifecycle: on engagement it bootstraps
+		// ready policies for the new project; on disengagement it purges all
+		// tenant documents from each index.
+		// bootstrapFunc is nil for MVP — the policy controller will re-trigger
+		// indexing on its next reconcile, making bootstrap best-effort.
+		projectWatcher := tenant.NewProjectWatcher(policyCache, searchSDK, nil)
+
+		multiRegistry := tenant.NewMultiTenantRegistry(
+			cfg,
+			dynamicClient,
+			o.ProjectLabelSelector,
+			projectWatcher.OnTenantEngaged,
+			projectWatcher.OnTenantDisengaged,
+		)
+		go func() {
+			if err := multiRegistry.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				setupLog.Error(err, "MultiTenantRegistry stopped unexpectedly")
+			}
+		}()
+		registry = multiRegistry
+	} else {
+		registry = tenant.NewSingleTenantRegistry(dynamicClient)
+	}
+
 	if err = (&policycontroller.ResourceIndexPolicyReconciler{
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
@@ -251,6 +302,7 @@ func Run(o *ControllerManagerOptions, ctx context.Context) error {
 		DynamicClient:    dynamicClient,
 		RESTMapper:       mgr.GetRESTMapper(),
 		ReindexPublisher: reindexPub,
+		TenantRegistry:   registry,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ResourceIndexPolicy")
 		os.Exit(1)

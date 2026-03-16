@@ -7,3 +7,10 @@ spec:
     spec:
       serviceAccountName: search-controller-manager
       automountServiceAccountToken: true
+      containers:
+      - name: manager
+        env:
+        - name: MULTI_TENANT
+          value: "true"
+        - name: PROJECT_LABEL_SELECTOR
+          value: ""

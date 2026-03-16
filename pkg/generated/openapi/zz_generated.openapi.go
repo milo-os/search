@@ -28,6 +28,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"go.miloapis.net/search/pkg/apis/search/v1alpha1.ResourceSearchQueryStatus": schema_pkg_apis_search_v1alpha1_ResourceSearchQueryStatus(ref),
 		"go.miloapis.net/search/pkg/apis/search/v1alpha1.SearchResult":              schema_pkg_apis_search_v1alpha1_SearchResult(ref),
 		"go.miloapis.net/search/pkg/apis/search/v1alpha1.TargetResource":            schema_pkg_apis_search_v1alpha1_TargetResource(ref),
+		"go.miloapis.net/search/pkg/apis/search/v1alpha1.TenantInfo":                schema_pkg_apis_search_v1alpha1_TenantInfo(ref),
 		resource.Quantity{}.OpenAPIModelName():                                      schema_apimachinery_pkg_api_resource_Quantity(ref),
 		v1.APIGroup{}.OpenAPIModelName():                                            schema_pkg_apis_meta_v1_APIGroup(ref),
 		v1.APIGroupList{}.OpenAPIModelName():                                        schema_pkg_apis_meta_v1_APIGroupList(ref),
@@ -574,12 +575,19 @@ func schema_pkg_apis_search_v1alpha1_SearchResult(ref common.ReferenceCallback) 
 							Format:      "double",
 						},
 					},
+					"tenant": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Tenant identifies the tenant from which this result originates.",
+							Default:     map[string]interface{}{},
+							Ref:         ref("go.miloapis.net/search/pkg/apis/search/v1alpha1.TenantInfo"),
+						},
+					},
 				},
 				Required: []string{"resource"},
 			},
 		},
 		Dependencies: []string{
-			"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.Unstructured"},
+			"go.miloapis.net/search/pkg/apis/search/v1alpha1.TenantInfo", "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.Unstructured"},
 	}
 }
 
@@ -616,6 +624,33 @@ func schema_pkg_apis_search_v1alpha1_TargetResource(ref common.ReferenceCallback
 					},
 				},
 				Required: []string{"group", "version", "kind"},
+			},
+		},
+	}
+}
+
+func schema_pkg_apis_search_v1alpha1_TenantInfo(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "TenantInfo identifies the tenant from which a search result originates.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"name": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Name is the tenant name. \"platform\" for the platform tenant, or the project name for project-scoped resources.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"type": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Type is the tenant type. One of \"platform\" or \"project\".",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
 			},
 		},
 	}

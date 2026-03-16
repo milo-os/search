@@ -31,6 +31,31 @@ type auditEvent struct {
 		UID        string `json:"uid"`
 	} `json:"objectRef"`
 	ResponseObject map[string]any `json:"responseObject"`
+	// User carries authenticated user information including tenant context in extra fields.
+	User struct {
+		Extra map[string][]string `json:"extra,omitempty"`
+	} `json:"user,omitempty"`
+}
+
+// extractTenantFromAuditEvent extracts tenant identity from audit event user extra fields.
+// Mirrors processor.ExtractTenant() in the Activity repo.
+// Falls back to "platform"/"platform" when fields are absent.
+func extractTenantFromAuditEvent(event *auditEvent) (tenantName string, tenantType string) {
+	tenantName = "platform"
+	tenantType = "platform"
+
+	if event.User.Extra == nil {
+		return
+	}
+
+	if values, ok := event.User.Extra["iam.miloapis.com/parent-type"]; ok && len(values) > 0 {
+		tenantType = values[0]
+	}
+	if values, ok := event.User.Extra["iam.miloapis.com/parent-name"]; ok && len(values) > 0 {
+		tenantName = values[0]
+	}
+
+	return
 }
 
 // NewIndexer creates a new Indexer instance.
@@ -121,6 +146,9 @@ func (i *Indexer) Start(ctx context.Context) error {
 					klog.Warningf("Policy %s matched but has no IndexName in status, skipping index", cp.Policy.Name)
 					continue
 				}
+
+				// Inject tenant context extracted from the audit event's user extra fields.
+				evalResult.Tenant, evalResult.TenantType = extractTenantFromAuditEvent(&event)
 
 				// Transform the matching resource into an indexable document
 				doc := evalResult.Transform()

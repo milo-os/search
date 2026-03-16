@@ -325,6 +325,64 @@ func (s *SDKClient) GetSearchableAttributes(indexUID string) ([]string, error) {
 	return *resp, nil
 }
 
+// GetFilterableAttributes returns the filterable attributes for the given index.
+func (s *SDKClient) GetFilterableAttributes(indexUID string) ([]string, error) {
+	resp, err := s.client.Index(indexUID).GetFilterableAttributes()
+	if err != nil {
+		klog.Errorf("Failed to get filterable attributes for index %s: %v", indexUID, err)
+		return nil, fmt.Errorf("failed to get filterable attributes: %w", err)
+	}
+	if resp == nil {
+		return nil, nil
+	}
+	// Convert []interface{} to []string
+	result := make([]string, 0, len(*resp))
+	for _, v := range *resp {
+		if s, ok := v.(string); ok {
+			result = append(result, s)
+		}
+	}
+	return result, nil
+}
+
+// UpdateFilterableAttributes updates the filterable attributes for the given index.
+func (s *SDKClient) UpdateFilterableAttributes(indexUID string, attributes []string) (*meilisearch.Task, error) {
+	klog.Infof("Updating filterable attributes for index %s: %v", indexUID, attributes)
+	// The meilisearch-go SDK expects *[]interface{} for filterable attributes.
+	iface := make([]interface{}, len(attributes))
+	for i, a := range attributes {
+		iface[i] = a
+	}
+	resp, err := s.client.Index(indexUID).UpdateFilterableAttributes(&iface)
+	if err != nil {
+		klog.Errorf("Failed to update filterable attributes for index %s: %v", indexUID, err)
+		return nil, fmt.Errorf("failed to update filterable attributes: %w", err)
+	}
+	return &meilisearch.Task{TaskUID: resp.TaskUID, IndexUID: indexUID}, nil
+}
+
+// DeleteDocumentsByFilter deletes documents matching the given filter expression and
+// waits for the task to complete before returning.
+func (s *SDKClient) DeleteDocumentsByFilter(indexUID string, filter string) error {
+	resp, err := s.client.Index(indexUID).DeleteDocumentsByFilter(filter, nil)
+	if err != nil {
+		klog.Errorf("Failed to delete documents by filter for index %s: %v", indexUID, err)
+		return fmt.Errorf("failed to delete documents by filter for index %s: %w", indexUID, err)
+	}
+
+	task, err := s.waitForTask(resp.TaskUID)
+	if err != nil {
+		return fmt.Errorf("failed to wait for delete-by-filter task: %w", err)
+	}
+
+	if task.Status != meilisearch.TaskStatusSucceeded {
+		return fmt.Errorf("delete-by-filter task failed with status %s: %s", task.Status, task.Error.Message)
+	}
+
+	klog.Infof("Documents deleted by filter %q from index %s", filter, indexUID)
+	return nil
+}
+
 // UpdateSearchableAttributes updates the searchable attributes for the given index.
 func (s *SDKClient) UpdateSearchableAttributes(indexUID string, attributes []string) (*meilisearch.Task, error) {
 	klog.Infof("Updating searchable attributes for index %s: %v", indexUID, attributes)
