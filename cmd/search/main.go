@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,6 +26,7 @@ import (
 	"k8s.io/component-base/logs"
 	logsapi "k8s.io/component-base/logs/api/v1"
 	"k8s.io/klog/v2"
+	openapicommon "k8s.io/kube-openapi/pkg/common"
 	openapiutil "k8s.io/kube-openapi/pkg/util"
 	"k8s.io/kube-openapi/pkg/validation/spec"
 	runtimecache "sigs.k8s.io/controller-runtime/pkg/cache"
@@ -182,29 +184,56 @@ func (o *SearchServerOptions) Config() (*searchapiserver.Config, error) {
 	// Set effective version to match the Kubernetes version we're built against.
 	genericConfig.EffectiveVersion = basecompatibility.NewEffectiveVersionFromString("1.35", "", "")
 
+	// Configure OpenAPI for SSA compatibility.
+	//
+	// The DefinitionNamer uses scheme.ToOpenAPIDefinitionName() which returns
+	// REST-friendly names. GVK extensions are only returned when the name matches
+	// what's in DefinitionNamer's internal map.
+	//
+	// The OpenAPI builder uses reflection to get type names (Go module paths like
+	// "go.miloapis.net/search/...") and looks them up in the definitions map. So
+	// definition keys must remain in Go module path format for lookups to work.
+	//
+	// Our approach:
+	// 1. GetOpenAPIDefinitionsWithUnstructured keeps keys in Go module path format
+	// 2. Custom GetDefinitionName transforms Go module paths to REST-friendly format
+	//    before looking up in DefinitionNamer (to get GVK extensions)
+	// 3. Re-compute Definitions so $refs use REST-friendly names matching the
+	//    definition names, which is what SSA TypeConverter expects
 	namer := apiopenapi.NewDefinitionNamer(searchapiserver.Scheme)
+
+	// Custom GetDefinitionName that transforms Go module paths to REST-friendly format
+	// before looking up in DefinitionNamer. This ensures GVK extensions are returned.
+	getDefinitionName := func(name string) (string, spec.Extensions) {
+		if strings.Contains(name, "/") {
+			name = openapiutil.ToRESTFriendlyName(name)
+		}
+		return namer.GetDefinitionName(name)
+	}
+
+	// OpenAPI v3 config
 	genericConfig.OpenAPIV3Config = genericapiserver.DefaultOpenAPIV3Config(openapi.GetOpenAPIDefinitionsWithUnstructured, namer)
 	genericConfig.OpenAPIV3Config.Info.Title = "Search"
 	genericConfig.OpenAPIV3Config.Info.Version = version.Version
-	genericConfig.OpenAPIV3Config.GetDefinitionName = func(name string) (string, spec.Extensions) {
-		friendlyName, extensions := namer.GetDefinitionName(name)
-		return openapiutil.ToRESTFriendlyName(friendlyName), extensions
-	}
-	// Nil out the pre-computed Definitions map so the OpenAPI builder re-invokes
-	// GetDefinitions with a fresh ref callback that uses the updated GetDefinitionName
-	// above. Without this, the builder uses the pre-computed $refs (which were built
-	// before GetDefinitionName was overridden) and the schema component keys diverge
-	// from the $ref values in the generated spec.
-	genericConfig.OpenAPIV3Config.Definitions = nil
+	genericConfig.OpenAPIV3Config.GetDefinitionName = getDefinitionName
+	// Re-compute Definitions with our custom getDefinitionName so $refs use REST-friendly names.
+	// DefaultOpenAPIV3Config computes Definitions with the original namer, but we need refs
+	// to match our transformed definition names for SSA TypeConverter lookups.
+	genericConfig.OpenAPIV3Config.Definitions = openapi.GetOpenAPIDefinitionsWithUnstructured(func(name string) spec.Ref {
+		defName, _ := getDefinitionName(name)
+		return spec.MustCreateRef("#/components/schemas/" + openapicommon.EscapeJsonPointer(defName))
+	})
 
-	// Configure OpenAPI v2
+	// OpenAPI v2 config
 	genericConfig.OpenAPIConfig = genericapiserver.DefaultOpenAPIConfig(openapi.GetOpenAPIDefinitionsWithUnstructured, namer)
 	genericConfig.OpenAPIConfig.Info.Title = "Search"
 	genericConfig.OpenAPIConfig.Info.Version = version.Version
-	genericConfig.OpenAPIConfig.GetDefinitionName = func(name string) (string, spec.Extensions) {
-		friendlyName, extensions := namer.GetDefinitionName(name)
-		return openapiutil.ToRESTFriendlyName(friendlyName), extensions
-	}
+	genericConfig.OpenAPIConfig.GetDefinitionName = getDefinitionName
+	// Re-compute Definitions for v2 as well
+	genericConfig.OpenAPIConfig.Definitions = openapi.GetOpenAPIDefinitionsWithUnstructured(func(name string) spec.Ref {
+		defName, _ := getDefinitionName(name)
+		return spec.MustCreateRef("#/definitions/" + openapicommon.EscapeJsonPointer(defName))
+	})
 
 	if err := o.RecommendedOptions.ApplyTo(genericConfig); err != nil {
 		return nil, fmt.Errorf("failed to apply recommended options: %w", err)

@@ -1,0 +1,126 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: server-side-apply
+spec:
+  description: |
+    Tests that Server-Side Apply (SSA) works correctly with ResourceIndexPolicy.
+    This is a regression test for the error:
+      "no corresponding type for search.miloapis.com/v1alpha1, Kind=ResourceIndexPolicy"
+    which was caused by OpenAPI $refs not matching definition names.
+
+  namespace: default
+
+  steps:
+    # =========================================================================
+    # Step 1: Create an initial ResourceIndexPolicy using SSA
+    # =========================================================================
+    - name: create-policy-via-ssa
+      description: "Create a ResourceIndexPolicy using server-side apply"
+      try:
+        - script:
+            content: |
+              kubectl apply --server-side --force-conflicts -f - <<EOF
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: test-ssa-policy
+              spec:
+                targetResource:
+                  group: "ssa-test.miloapis.com"
+                  version: v1
+                  kind: Contact
+                conditions:
+                  - name: is-active
+                    expression: "status.active == true"
+                fields:
+                  - path: ".spec.name"
+                    searchable: true
+                  - path: ".spec.email"
+                    searchable: true
+              EOF
+            check:
+              ($error == null): true
+
+    - name: verify-policy-created
+      description: "Verify the SSA-created policy exists with correct spec"
+      try:
+        - assert:
+            resource:
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: test-ssa-policy
+              spec:
+                targetResource:
+                  group: "ssa-test.miloapis.com"
+                  version: v1
+                  kind: Contact
+                fields:
+                  - path: ".spec.name"
+                    searchable: true
+                  - path: ".spec.email"
+                    searchable: true
+
+    # =========================================================================
+    # Step 2: Update the policy using SSA (add a field, change a condition)
+    # =========================================================================
+    - name: update-policy-via-ssa
+      description: "Update the ResourceIndexPolicy using server-side apply"
+      try:
+        - script:
+            content: |
+              kubectl apply --server-side --force-conflicts -f - <<EOF
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: test-ssa-policy
+              spec:
+                targetResource:
+                  group: "ssa-test.miloapis.com"
+                  version: v1
+                  kind: Contact
+                conditions:
+                  - name: is-active
+                    expression: "status.active == true"
+                  - name: has-email
+                    expression: "has(spec.email)"
+                fields:
+                  - path: ".spec.name"
+                    searchable: true
+                  - path: ".spec.email"
+                    searchable: true
+                  - path: ".spec.phone"
+                    searchable: true
+              EOF
+            check:
+              ($error == null): true
+        - assert:
+            resource:
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: test-ssa-policy
+              spec:
+                conditions:
+                  - name: is-active
+                    expression: "status.active == true"
+                  - name: has-email
+                    expression: "has(spec.email)"
+                fields:
+                  - path: ".spec.name"
+                    searchable: true
+                  - path: ".spec.email"
+                    searchable: true
+                  - path: ".spec.phone"
+                    searchable: true
+      catch:
+      - describe:
+          apiVersion: search.miloapis.com/v1alpha1
+          kind: ResourceIndexPolicy
+      finally:
+      - delete:
+          ref:
+            apiVersion: search.miloapis.com/v1alpha1
+            kind: ResourceIndexPolicy
+            name: test-ssa-policy
