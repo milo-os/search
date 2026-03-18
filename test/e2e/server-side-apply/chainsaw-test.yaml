@@ -27,7 +27,7 @@ spec:
                 name: test-ssa-policy
               spec:
                 targetResource:
-                  group: "contacts.miloapis.com"
+                  group: "ssa-test.miloapis.com"
                   version: v1
                   kind: Contact
                 conditions:
@@ -53,7 +53,7 @@ spec:
                 name: test-ssa-policy
               spec:
                 targetResource:
-                  group: "contacts.miloapis.com"
+                  group: "ssa-test.miloapis.com"
                   version: v1
                   kind: Contact
                 fields:
@@ -77,7 +77,7 @@ spec:
                 name: test-ssa-policy
               spec:
                 targetResource:
-                  group: "contacts.miloapis.com"
+                  group: "ssa-test.miloapis.com"
                   version: v1
                   kind: Contact
                 conditions:
