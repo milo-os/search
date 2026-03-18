@@ -95,10 +95,6 @@ spec:
               EOF
             check:
               ($error == null): true
-
-    - name: verify-policy-updated
-      description: "Verify the SSA update applied correctly"
-      try:
         - assert:
             resource:
               apiVersion: search.miloapis.com/v1alpha1
@@ -118,13 +114,11 @@ spec:
                     searchable: true
                   - path: ".spec.phone"
                     searchable: false
-
-    catch:
+      catch:
       - describe:
           apiVersion: search.miloapis.com/v1alpha1
           kind: ResourceIndexPolicy
-
-    finally:
+      finally:
       - delete:
           ref:
             apiVersion: search.miloapis.com/v1alpha1
