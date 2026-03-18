@@ -91,7 +91,7 @@ spec:
                   - path: ".spec.email"
                     searchable: true
                   - path: ".spec.phone"
-                    searchable: false
+                    searchable: true
               EOF
             check:
               ($error == null): true
@@ -113,7 +113,7 @@ spec:
                   - path: ".spec.email"
                     searchable: true
                   - path: ".spec.phone"
-                    searchable: false
+                    searchable: true
       catch:
       - describe:
           apiVersion: search.miloapis.com/v1alpha1
