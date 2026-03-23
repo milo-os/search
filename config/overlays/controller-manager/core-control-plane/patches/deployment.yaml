@@ -10,7 +10,7 @@ spec:
       containers:
       - name: manager
         env:
-        - name: MULTI_TENANT
+        - name: ENABLE_MULTI_TENANCY
           value: "true"
         - name: PROJECT_LABEL_SELECTOR
           value: ""

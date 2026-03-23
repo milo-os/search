@@ -63,7 +63,7 @@ type ControllerManagerOptions struct {
 	NatsTLSKey         string
 
 	// Multi-tenancy settings.
-	MultiTenant          bool
+	EnableMultiTenancy   bool
 	ProjectLabelSelector string
 }
 
@@ -83,7 +83,7 @@ func NewControllerManagerOptions() *ControllerManagerOptions {
 		MeilisearchDomain:          "http://meilisearch.meilisearch-system.svc.cluster.local:7700",
 		NatsURL:                    "nats://nats.nats-system.svc.cluster.local:4222",
 		NatsReindexSubject:         "reindex.all",
-		MultiTenant:                false,
+		EnableMultiTenancy:         false,
 	}
 }
 
@@ -116,7 +116,7 @@ func (o *ControllerManagerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.NatsTLSKey, "nats-tls-key", o.NatsTLSKey, "The path to the NATS TLS key file.")
 
 	// Multi-tenancy
-	fs.BoolVar(&o.MultiTenant, "multi-tenant", o.MultiTenant, "Enable multi-tenant mode to index resources from all project control planes.")
+	fs.BoolVar(&o.EnableMultiTenancy, "enable-multi-tenancy", o.EnableMultiTenancy, "Enable multi-tenant mode to index resources from all project control planes.")
 	fs.StringVar(&o.ProjectLabelSelector, "project-label-selector", o.ProjectLabelSelector, "Label selector to filter which projects are indexed (empty = all projects).")
 }
 
@@ -256,7 +256,7 @@ func Run(o *ControllerManagerOptions, ctx context.Context) error {
 
 	// Build TenantRegistry based on deployment mode.
 	var registry tenant.TenantRegistry
-	if o.MultiTenant {
+	if o.EnableMultiTenancy {
 		// Create a PolicyCache backed by the manager's shared informer cache.
 		// requireReadyCondition=true ensures the ProjectWatcher only bootstraps
 		// policies that are fully initialised (index created, attributes synced).

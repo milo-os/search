@@ -10,5 +10,5 @@ spec:
       containers:
       - name: indexer
         env:
-        - name: MULTI_TENANT
+        - name: ENABLE_MULTI_TENANCY
           value: "true"

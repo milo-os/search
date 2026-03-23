@@ -13,11 +13,11 @@ import (
 
 // Indexer is the component responsible for indexing resources.
 type Indexer struct {
-	consumer    jetstream.Consumer
-	policyCache *PolicyCache
-	batcher     *Batcher
-	multiTenant bool
-	mu          sync.Mutex
+	consumer           jetstream.Consumer
+	policyCache        *PolicyCache
+	batcher            *Batcher
+	enableMultiTenancy bool
+	mu                 sync.Mutex
 }
 
 type auditEvent struct {
@@ -62,10 +62,10 @@ func extractTenantFromAuditEvent(event *auditEvent) (tenantName string, tenantTy
 // NewIndexer creates a new Indexer instance.
 func NewIndexer(consumer jetstream.Consumer, policyCache *PolicyCache, batcher *Batcher, multiTenant bool) *Indexer {
 	return &Indexer{
-		consumer:    consumer,
-		policyCache: policyCache,
-		batcher:     batcher,
-		multiTenant: multiTenant,
+		consumer:           consumer,
+		policyCache:        policyCache,
+		batcher:            batcher,
+		enableMultiTenancy: multiTenant,
 	}
 }
 
@@ -137,7 +137,7 @@ func (i *Indexer) Start(ctx context.Context) error {
 		// In single-tenant mode, skip non-platform
 		// events entirely so that no policy can accidentally queue them.
 		tenantName, tenantType := extractTenantFromAuditEvent(&event)
-		if !i.multiTenant && tenantType != tenantTypePlatform {
+		if !i.enableMultiTenancy && tenantType != tenantTypePlatform {
 			msg.Ack()
 			return
 		}
