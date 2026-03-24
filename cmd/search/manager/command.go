@@ -258,8 +258,8 @@ func Run(o *ControllerManagerOptions, ctx context.Context) error {
 	var registry tenant.TenantRegistry
 	if o.EnableMultiTenancy {
 		// Create a PolicyCache backed by the manager's shared informer cache.
-		// requireReadyCondition=true ensures the ProjectWatcher only bootstraps
-		// policies that are fully initialised (index created, attributes synced).
+		// requireReadyCondition=true ensures only fully-initialized policies
+		// (index created, attributes synced) are included in the cache.
 		policyCache, err := indexer.NewPolicyCache(mgr.GetCache(), true)
 		if err != nil {
 			setupLog.Error(err, "unable to create policy cache")
@@ -270,12 +270,9 @@ func Run(o *ControllerManagerOptions, ctx context.Context) error {
 			os.Exit(1)
 		}
 
-		// ProjectWatcher handles tenant lifecycle: on engagement it bootstraps
-		// ready policies for the new project; on disengagement it purges all
+		// ProjectWatcher handles tenant lifecycle: on disengagement it purges all
 		// tenant documents from each index.
-		// bootstrapFunc is nil for MVP — the policy controller will re-trigger
-		// indexing on its next reconcile, making bootstrap best-effort.
-		projectWatcher := tenant.NewProjectWatcher(policyCache, searchSDK, nil)
+		projectWatcher := tenant.NewProjectWatcher(policyCache, searchSDK)
 
 		multiRegistry := tenant.NewMultiTenantRegistry(
 			cfg,

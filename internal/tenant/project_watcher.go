@@ -9,7 +9,6 @@ import (
 
 	"go.miloapis.net/search/internal/indexer"
 	policyevaluation "go.miloapis.net/search/internal/policy/evaluation"
-	searchv1alpha1 "go.miloapis.net/search/pkg/apis/search/v1alpha1"
 	"go.miloapis.net/search/pkg/meilisearch"
 )
 
@@ -27,60 +26,27 @@ type policyCacheReader interface {
 	GetPolicies() []*policyevaluation.CachedPolicy
 }
 
-// BootstrapFunc is called per-policy when a new tenant engages.
-// It is the responsibility of the caller (policy controller/watcher wire-up) to implement this.
-// The function should list resources for the given tenant and publish them for re-indexing.
-type BootstrapFunc func(ctx context.Context, policy *searchv1alpha1.ResourceIndexPolicy, tenant TenantInfo, client dynamic.Interface) error
-
 // ProjectWatcher handles tenant lifecycle events from the MultiTenantRegistry.
-// On engagement, it bootstraps resources from the new project into all existing policies.
 // On disengagement, it deletes all documents for that tenant from each index.
 type ProjectWatcher struct {
-	policyCache   policyCacheReader
-	searchSDK     filterDeleteClient
-	bootstrapFunc BootstrapFunc
+	policyCache policyCacheReader
+	searchSDK   filterDeleteClient
 }
 
 // NewProjectWatcher creates a ProjectWatcher.
-// bootstrapFunc is called per-policy when a new tenant engages; it may be nil
-// (in which case engagement is a no-op). bootstrapFunc is provided by the
-// caller to decouple ProjectWatcher from the policy controller implementation.
 func NewProjectWatcher(
 	policyCache *indexer.PolicyCache,
 	searchSDK *meilisearch.SDKClient,
-	bootstrapFunc BootstrapFunc,
 ) *ProjectWatcher {
 	return &ProjectWatcher{
-		policyCache:   policyCache,
-		searchSDK:     searchSDK,
-		bootstrapFunc: bootstrapFunc,
+		policyCache: policyCache,
+		searchSDK:   searchSDK,
 	}
 }
 
 // OnTenantEngaged is the TenantEngagementCallback.
-// It bootstraps all ready policies for the newly engaged project by iterating
-// each policy in the cache and invoking bootstrapFunc. Best-effort: failures
-// are logged but do not abort processing of other policies.
-func (w *ProjectWatcher) OnTenantEngaged(ctx context.Context, tenant TenantInfo, client dynamic.Interface) {
-	klog.Infof("ProjectWatcher: tenant %q (%s) engaged; bootstrapping policies", tenant.Name, tenant.Type)
-
-	if w.bootstrapFunc == nil {
-		klog.V(4).Infof("ProjectWatcher: no bootstrap func registered; skipping bootstrap for tenant %q", tenant.Name)
-		return
-	}
-
-	policies := w.policyCache.GetPolicies()
-	for _, cp := range policies {
-		if cp.Policy.Status.IndexName == "" {
-			// Policy not yet initialized; skip.
-			continue
-		}
-		if err := w.bootstrapFunc(ctx, cp.Policy, tenant, client); err != nil {
-			klog.Errorf("ProjectWatcher: bootstrap failed for policy %s, tenant %s: %v",
-				cp.Policy.Name, tenant.Name, err)
-			// Best-effort: continue with other policies.
-		}
-	}
+func (w *ProjectWatcher) OnTenantEngaged(_ context.Context, tenant TenantInfo, _ dynamic.Interface) {
+	klog.Infof("ProjectWatcher: tenant %q (%s) engaged", tenant.Name, tenant.Type)
 }
 
 // OnTenantDisengaged is the TenantDisengagementCallback.
