@@ -163,7 +163,7 @@ func TestExtractTenantFromAuditEvent_WithUserExtra(t *testing.T) {
 		Extra map[string][]string `json:"extra,omitempty"`
 	}{
 		Extra: map[string][]string{
-			"iam.miloapis.com/parent-type": {"project"},
+			"iam.miloapis.com/parent-type": {"Project"},
 			"iam.miloapis.com/parent-name": {"my-project"},
 		},
 	}
@@ -173,8 +173,8 @@ func TestExtractTenantFromAuditEvent_WithUserExtra(t *testing.T) {
 	if name != "my-project" {
 		t.Errorf("tenantName: got %q, want %q", name, "my-project")
 	}
-	if typ != "project" {
-		t.Errorf("tenantType: got %q, want %q", typ, "project")
+	if typ != "Project" {
+		t.Errorf("tenantType: got %q, want %q", typ, "Project")
 	}
 }
 
@@ -200,7 +200,7 @@ func TestExtractTenantFromAuditEvent_PartialUserExtra_TypeOnlyNoName(t *testing.
 		Extra map[string][]string `json:"extra,omitempty"`
 	}{
 		Extra: map[string][]string{
-			"iam.miloapis.com/parent-type": {"project"},
+			"iam.miloapis.com/parent-type": {"Project"},
 		},
 	}
 
@@ -209,8 +209,8 @@ func TestExtractTenantFromAuditEvent_PartialUserExtra_TypeOnlyNoName(t *testing.
 	if name != "platform" {
 		t.Errorf("tenantName: got %q, want %q (expected fallback)", name, "platform")
 	}
-	if typ != "project" {
-		t.Errorf("tenantType: got %q, want %q", typ, "project")
+	if typ != "Project" {
+		t.Errorf("tenantType: got %q, want %q", typ, "Project")
 	}
 }
 

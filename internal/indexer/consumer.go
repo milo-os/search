@@ -7,6 +7,8 @@ import (
 	"sync"
 
 	"github.com/nats-io/nats.go/jetstream"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/klog/v2"
 )
@@ -50,7 +52,9 @@ func extractTenantFromAuditEvent(event *auditEvent) (tenantName string, tenantTy
 	}
 
 	if values, ok := event.User.Extra["iam.miloapis.com/parent-type"]; ok && len(values) > 0 {
-		tenantType = values[0]
+		// Normalize to title-case to match Milo's scope annotation conventions
+		// (e.g. the annotation value "project" becomes "Project").
+		tenantType = cases.Title(language.Und).String(values[0])
 	}
 	if values, ok := event.User.Extra["iam.miloapis.com/parent-name"]; ok && len(values) > 0 {
 		tenantName = values[0]

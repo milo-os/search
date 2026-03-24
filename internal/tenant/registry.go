@@ -40,7 +40,7 @@ type TenantDisengagementCallback func(tenantName string)
 
 const (
 	TenantTypePlatform = "platform"
-	TenantTypeProject  = "project"
+	TenantTypeProject  = "Project"
 )
 
 // PlatformTenantInfo is the canonical TenantInfo for the platform tenant.
