@@ -160,19 +160,19 @@ func TestMultiTenantRegistry_ProjectRestConfig(t *testing.T) {
 			name:        "base host without trailing slash",
 			baseHost:    "https://api.example.com",
 			projectName: "my-project",
-			wantHost:    "https://api.example.com/projects/my-project/control-plane",
+			wantHost:    "https://api.example.com/apis/resourcemanager.miloapis.com/v1alpha1/projects/my-project/control-plane",
 		},
 		{
 			name:        "base host with trailing slash",
 			baseHost:    "https://api.example.com/",
 			projectName: "my-project",
-			wantHost:    "https://api.example.com/projects/my-project/control-plane",
+			wantHost:    "https://api.example.com/apis/resourcemanager.miloapis.com/v1alpha1/projects/my-project/control-plane",
 		},
 		{
 			name:        "base host with path suffix",
 			baseHost:    "https://api.example.com/prefix",
 			projectName: "other-project",
-			wantHost:    "https://api.example.com/prefix/projects/other-project/control-plane",
+			wantHost:    "https://api.example.com/prefix/apis/resourcemanager.miloapis.com/v1alpha1/projects/other-project/control-plane",
 		},
 	}
 

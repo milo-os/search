@@ -74,7 +74,7 @@ func NewMultiTenantRegistry(
 // forProject() method.
 func (r *MultiTenantRegistry) projectRestConfig(projectName string) *rest.Config {
 	c := rest.CopyConfig(r.baseConfig)
-	c.Host = strings.TrimSuffix(r.baseConfig.Host, "/") + "/projects/" + projectName + "/control-plane"
+	c.Host = strings.TrimSuffix(r.baseConfig.Host, "/") + "/apis/resourcemanager.miloapis.com/v1alpha1/projects/" + projectName + "/control-plane"
 	return c
 }
 
