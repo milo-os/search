@@ -157,14 +157,30 @@ func TestIndexer_Start_ConsumeFlow(t *testing.T) {
 	msg.AssertExpectations(t)
 }
 
-func TestExtractTenantFromAuditEvent_WithUserExtra(t *testing.T) {
+func TestExtractTenantFromAuditEvent_NilResponseObject(t *testing.T) {
+	// No ResponseObject — should fall back to platform/platform.
 	event := &auditEvent{}
-	event.User = &struct {
-		Extra map[string][]string `json:"extra,omitempty"`
-	}{
-		Extra: map[string][]string{
-			"iam.miloapis.com/parent-type": {"Project"},
-			"iam.miloapis.com/parent-name": {"my-project"},
+
+	name, typ := extractTenantFromAuditEvent(event)
+
+	if name != "platform" {
+		t.Errorf("tenantName: got %q, want %q", name, "platform")
+	}
+	if typ != "platform" {
+		t.Errorf("tenantType: got %q, want %q", typ, "platform")
+	}
+}
+
+func TestExtractTenantFromAuditEvent_WithAnnotations(t *testing.T) {
+	// Both scope annotations present — should be extracted and type normalized to title-case.
+	event := &auditEvent{
+		ResponseObject: map[string]any{
+			"metadata": map[string]any{
+				"annotations": map[string]any{
+					ScopeTypeAnnotationKey: "project",
+					ScopeNameAnnotationKey: "my-project",
+				},
+			},
 		},
 	}
 
@@ -178,29 +194,16 @@ func TestExtractTenantFromAuditEvent_WithUserExtra(t *testing.T) {
 	}
 }
 
-func TestExtractTenantFromAuditEvent_NoUserExtra(t *testing.T) {
-	event := &auditEvent{}
-	// User.Extra is nil by default.
-
-	name, typ := extractTenantFromAuditEvent(event)
-
-	if name != "platform" {
-		t.Errorf("tenantName: got %q, want %q", name, "platform")
-	}
-	if typ != "platform" {
-		t.Errorf("tenantType: got %q, want %q", typ, "platform")
-	}
-}
-
-func TestExtractTenantFromAuditEvent_PartialUserExtra_TypeOnlyNoName(t *testing.T) {
-	// Only parent-type is set; parent-name is absent.
-	// Expect: tenantType reflects the extra field, tenantName falls back to "platform".
-	event := &auditEvent{}
-	event.User = &struct {
-		Extra map[string][]string `json:"extra,omitempty"`
-	}{
-		Extra: map[string][]string{
-			"iam.miloapis.com/parent-type": {"Project"},
+func TestExtractTenantFromAuditEvent_PartialAnnotations_TypeOnly(t *testing.T) {
+	// Only scope.type annotation is set; scope.name is absent.
+	// Expect: tenantType is extracted, tenantName falls back to "platform".
+	event := &auditEvent{
+		ResponseObject: map[string]any{
+			"metadata": map[string]any{
+				"annotations": map[string]any{
+					ScopeTypeAnnotationKey: "Project",
+				},
+			},
 		},
 	}
 
@@ -214,15 +217,13 @@ func TestExtractTenantFromAuditEvent_PartialUserExtra_TypeOnlyNoName(t *testing.
 	}
 }
 
-func TestExtractTenantFromAuditEvent_EmptySliceValues(t *testing.T) {
-	// Keys present but with empty slices should not override the defaults.
-	event := &auditEvent{}
-	event.User = &struct {
-		Extra map[string][]string `json:"extra,omitempty"`
-	}{
-		Extra: map[string][]string{
-			"iam.miloapis.com/parent-type": {},
-			"iam.miloapis.com/parent-name": {},
+func TestExtractTenantFromAuditEvent_NoAnnotations(t *testing.T) {
+	// ResponseObject present but no scope annotations — should fall back to platform/platform.
+	event := &auditEvent{
+		ResponseObject: map[string]any{
+			"metadata": map[string]any{
+				"name": "some-resource",
+			},
 		},
 	}
 

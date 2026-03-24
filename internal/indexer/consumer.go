@@ -34,30 +34,40 @@ type auditEvent struct {
 		UID        string `json:"uid"`
 	} `json:"objectRef"`
 	ResponseObject map[string]any `json:"responseObject"`
-	// User carries authenticated user information including tenant context in extra fields.
-	User *struct {
-		Extra map[string][]string `json:"extra,omitempty"`
-	} `json:"user,omitempty"`
 }
 
-// extractTenantFromAuditEvent extracts tenant identity from audit event user extra fields.
-// Mirrors processor.ExtractTenant() in the Activity repo.
-// Falls back to "platform"/"platform" when fields are absent.
+// extractTenantFromAuditEvent extracts tenant identity from the audit event.
+// It reads exclusively from ResponseObject metadata annotations:
+//   - ScopeTypeAnnotationKey ("platform.miloapis.com/scope.type") for the tenant type
+//   - ScopeNameAnnotationKey ("platform.miloapis.com/scope.name") for the tenant name
+//
+// Falls back to "platform"/"platform" when the ResponseObject is absent or the
+// annotations are not set.
 func extractTenantFromAuditEvent(event *auditEvent) (tenantName string, tenantType string) {
-	tenantName = "platform"
-	tenantType = "platform"
+	tenantName = tenantTypePlatform
+	tenantType = tenantTypePlatform
 
-	if event.User == nil || event.User.Extra == nil {
+	if event.ResponseObject == nil {
 		return
 	}
 
-	if values, ok := event.User.Extra["iam.miloapis.com/parent-type"]; ok && len(values) > 0 {
+	caser := cases.Title(language.Und)
+	obj := &unstructured.Unstructured{Object: event.ResponseObject}
+	annotations := obj.GetAnnotations()
+
+	if v, ok := annotations[ScopeTypeAnnotationKey]; ok && v != "" {
 		// Normalize to title-case to match Milo's scope annotation conventions
 		// (e.g. the annotation value "project" becomes "Project").
-		tenantType = cases.Title(language.Und).String(values[0])
+		// Exception: "platform" is a fallback default and stays lowercase.
+		if v != tenantTypePlatform {
+			tenantType = caser.String(v)
+		} else {
+			tenantType = v
+		}
 	}
-	if values, ok := event.User.Extra["iam.miloapis.com/parent-name"]; ok && len(values) > 0 {
-		tenantName = values[0]
+
+	if v, ok := annotations[ScopeNameAnnotationKey]; ok && v != "" {
+		tenantName = v
 	}
 
 	return
@@ -81,6 +91,11 @@ const (
 	// to avoid an import cycle: internal/tenant/project_watcher.go already
 	// imports internal/indexer, so internal/indexer cannot import internal/tenant.
 	tenantTypePlatform = "platform"
+
+	// Scope annotation keys from resource metadata. Tenant identity is derived
+	// exclusively from these annotations on the ResponseObject.
+	ScopeTypeAnnotationKey = "platform.miloapis.com/scope.type"
+	ScopeNameAnnotationKey = "platform.miloapis.com/scope.name"
 )
 
 // Start starts the indexer consumer loop.

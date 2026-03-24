@@ -94,11 +94,11 @@ spec:
               # Build event JSON with INDEX_NAME substituted.
               # SpecHash is intentionally omitted so the consumer skips the hash check.
               EVENT1=$(printf \
-                '{"id":"e2e-mt-project-resource-001","policyName":"e2e-multi-tenant-role-policy","indexName":"%s","tenant":"e2e-test-project","tenantType":"Project","resource":{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole","metadata":{"name":"e2e-project-role","uid":"e2e-project-uid-00000001","labels":{"e2e-multi-tenant":"true"},"annotations":{"e2e.search.test/service":"project-service-mt-rn1"}},"rules":[{"apiGroups":[""],"resources":["pods"],"verbs":["get"]}]}}' \
+                '{"id":"e2e-mt-project-resource-001","policyName":"e2e-multi-tenant-role-policy","indexName":"%s","tenant":"e2e-test-project","tenantType":"Project","resource":{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole","metadata":{"name":"e2e-project-role","uid":"e2e-project-uid-00000001","labels":{"e2e-multi-tenant":"true"},"annotations":{"e2e.search.test/service":"project-service-mt-rn1","platform.miloapis.com/scope.type":"Project","platform.miloapis.com/scope.name":"e2e-test-project"}},"rules":[{"apiGroups":[""],"resources":["pods"],"verbs":["get"]}]}}' \
                 "$INDEX_NAME")
 
               EVENT2=$(printf \
-                '{"id":"e2e-mt-platform-resource-001","policyName":"e2e-multi-tenant-role-policy","indexName":"%s","tenant":"platform","tenantType":"platform","resource":{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole","metadata":{"name":"e2e-platform-role","uid":"e2e-platform-uid-00000001","labels":{"e2e-multi-tenant":"true"},"annotations":{"e2e.search.test/service":"platform-service-mt-rn1"}},"rules":[{"apiGroups":[""],"resources":["pods"],"verbs":["get"]}]}}' \
+                '{"id":"e2e-mt-platform-resource-001","policyName":"e2e-multi-tenant-role-policy","indexName":"%s","tenant":"platform","tenantType":"platform","resource":{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole","metadata":{"name":"e2e-platform-role","uid":"e2e-platform-uid-00000001","labels":{"e2e-multi-tenant":"true"},"annotations":{"e2e.search.test/service":"platform-service-mt-rn1","platform.miloapis.com/scope.type":"platform","platform.miloapis.com/scope.name":"platform"}},"rules":[{"apiGroups":[""],"resources":["pods"],"verbs":["get"]}]}}' \
                 "$INDEX_NAME")
 
               # Store event payloads in a ConfigMap so they can be mounted into the
