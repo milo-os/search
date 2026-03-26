@@ -13,6 +13,14 @@ rules:
   - list
   - watch
 - apiGroups:
+  - resourcemanager.miloapis.com
+  resources:
+  - projects
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - search.miloapis.com
   resources:
   - resourceindexpolicies

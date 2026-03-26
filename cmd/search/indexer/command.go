@@ -46,6 +46,9 @@ type ResourceIndexerOptions struct {
 	BatchSize                 int
 	FlushInterval             time.Duration
 	BatchMaxConcurrentUploads int
+
+	// Multi-tenancy settings.
+	EnableMultiTenancy bool
 }
 
 // NewResourceIndexerOptions creates a new ResourceIndexerOptions with default values.
@@ -65,6 +68,7 @@ func NewResourceIndexerOptions() *ResourceIndexerOptions {
 		MeilisearchMaxRetries:      3,
 		MeilisearchRetryDelay:      500 * time.Millisecond,
 		BatchMaxConcurrentUploads:  100,
+		EnableMultiTenancy:         false,
 	}
 }
 
@@ -89,6 +93,9 @@ func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&o.MeilisearchMaxRetries, "meilisearch-max-retries", o.MeilisearchMaxRetries, "The maximum number of retries for transient Meilisearch errors.")
 	fs.DurationVar(&o.MeilisearchRetryDelay, "meilisearch-retry-delay", o.MeilisearchRetryDelay, "The base delay between Meilisearch retries.")
 	fs.IntVar(&o.BatchMaxConcurrentUploads, "batch-max-concurrent-uploads", o.BatchMaxConcurrentUploads, "The maximum number of concurrent uploads to Meilisearch.")
+
+	// Multi-tenancy
+	fs.BoolVar(&o.EnableMultiTenancy, "enable-multi-tenancy", o.EnableMultiTenancy, "Enable multi-tenant mode to index resources from all project control planes.")
 }
 
 // Validate checks if the resource indexer options are valid.
@@ -295,7 +302,7 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 	auditBatcher.Start(ctx)
 	reindexBatcher.Start(ctx)
 
-	auditIdx := indexer.NewIndexer(auditConsumer, indexPolicyCache, auditBatcher)
+	auditIdx := indexer.NewIndexer(auditConsumer, indexPolicyCache, auditBatcher, o.EnableMultiTenancy)
 	reindexIdx := indexer.NewReindexConsumer(reindexJSConsumer, reindexPolicyCache, reindexBatcher)
 
 	klog.Info("Starting audit indexer and re-index consumer...")

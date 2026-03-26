@@ -1,0 +1,23 @@
+apiVersion: search.miloapis.com/v1alpha1
+kind: ResourceIndexPolicy
+metadata:
+  name: dnszone-index-policy
+spec:
+  targetResource:
+    group: dns.networking.miloapis.com
+    version: v1alpha1
+    kind: DNSZone
+
+  conditions:
+    - name: has-name
+      expression: "metadata.name != ''"
+
+  fields:
+    - path: ".metadata.name"
+      searchable: true
+    - path: ".metadata.namespace"
+      searchable: true
+    - path: ".spec.domainName"
+      searchable: true
+    - path: ".spec.dnsZoneClassName"
+      searchable: true

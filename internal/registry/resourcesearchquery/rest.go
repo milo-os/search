@@ -272,9 +272,26 @@ func formatSearchResult(hit map[string]json.RawMessage) (searchv1alpha1.SearchRe
 		score = math.Round(score*10000) / 10000
 	}
 
+	// Extract tenant fields before deleting internal fields.
+	var tenantName, tenantType string
+	if t, found := hit["_tenant"]; found {
+		_ = json.Unmarshal(t, &tenantName)
+	}
+	if tt, found := hit["_tenant_type"]; found {
+		_ = json.Unmarshal(tt, &tenantType)
+	}
+	if tenantName == "" {
+		tenantName = "platform"
+	}
+	if tenantType == "" {
+		tenantType = "platform"
+	}
+
 	// Remove meilisearch internal fields
 	delete(hit, "_rankingScore")
 	delete(hit, "_federation")
+	delete(hit, "_tenant")
+	delete(hit, "_tenant_type")
 
 	b, err := json.Marshal(hit)
 	if err != nil {
@@ -289,5 +306,9 @@ func formatSearchResult(hit map[string]json.RawMessage) (searchv1alpha1.SearchRe
 	return searchv1alpha1.SearchResult{
 		Resource:       obj,
 		RelevanceScore: score,
+		Tenant: searchv1alpha1.TenantInfo{
+			Name: tenantName,
+			Type: tenantType,
+		},
 	}, nil
 }

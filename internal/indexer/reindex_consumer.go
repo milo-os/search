@@ -117,6 +117,14 @@ func (r *ReindexConsumer) processTargetedEvent(msg jetstream.Msg, event ReindexE
 		klog.V(4).Infof("ReindexConsumer: match policy=%s resource=%s/%s (id=%s)",
 			event.PolicyName, obj.GetNamespace(), obj.GetName(), event.ID)
 
+		// Propagate the tenant identity carried in the reindex event.
+		// If the event has no tenant set, EvalResult defaults to "platform"
+		// in Transform(), preserving single-tenant behaviour.
+		if event.Tenant != "" {
+			evalResult.Tenant = event.Tenant
+			evalResult.TenantType = event.TenantType
+		}
+
 		doc := evalResult.Transform()
 		ensureUID(doc, resourceUID)
 		r.batcher.QueueUpsert(event.IndexName, doc, &msg)

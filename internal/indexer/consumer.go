@@ -7,21 +7,28 @@ import (
 	"sync"
 
 	"github.com/nats-io/nats.go/jetstream"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/klog/v2"
 )
 
 // Indexer is the component responsible for indexing resources.
 type Indexer struct {
-	consumer    jetstream.Consumer
-	policyCache *PolicyCache
-	batcher     *Batcher
-	mu          sync.Mutex
+	consumer           jetstream.Consumer
+	policyCache        *PolicyCache
+	batcher            *Batcher
+	enableMultiTenancy bool
+	mu                 sync.Mutex
 }
 
 type auditEvent struct {
-	AuditID   string `json:"auditID"`
-	Verb      string `json:"verb"`
+	AuditID     string            `json:"auditID"`
+	Verb        string            `json:"verb"`
+	Annotations map[string]string `json:"annotations"`
+	User        struct {
+		Extra map[string][]string `json:"extra"`
+	} `json:"user"`
 	ObjectRef struct {
 		APIGroup   string `json:"apiGroup"`
 		APIVersion string `json:"apiVersion"`
@@ -33,18 +40,64 @@ type auditEvent struct {
 	ResponseObject map[string]any `json:"responseObject"`
 }
 
+// extractTenantFromAuditEvent extracts tenant identity from the audit event.
+// It reads exclusively from the top-level audit event annotations:
+//   - ScopeTypeAnnotationKey ("platform.miloapis.com/scope.type") for the tenant type
+//   - ScopeNameAnnotationKey ("platform.miloapis.com/scope.name") for the tenant name
+//
+// Falls back to "platform"/"platform" when the annotations are absent or not set.
+func extractTenantFromAuditEvent(event *auditEvent) (tenantName string, tenantType string) {
+	tenantName = tenantTypePlatform
+	tenantType = tenantTypePlatform
+
+	if event.Annotations == nil {
+		return
+	}
+
+	caser := cases.Title(language.Und)
+
+	if v, ok := event.Annotations[ScopeTypeAnnotationKey]; ok && v != "" {
+		// Normalize to title-case to match Milo's scope annotation conventions
+		// (e.g. the annotation value "project" becomes "Project").
+		// Exception: "platform" is a fallback default and stays lowercase.
+		if v != tenantTypePlatform {
+			tenantType = caser.String(v)
+		} else {
+			tenantType = v
+		}
+	}
+
+	if v, ok := event.Annotations[ScopeNameAnnotationKey]; ok && v != "" {
+		tenantName = v
+	}
+
+	return
+}
+
 // NewIndexer creates a new Indexer instance.
-func NewIndexer(consumer jetstream.Consumer, policyCache *PolicyCache, batcher *Batcher) *Indexer {
+func NewIndexer(consumer jetstream.Consumer, policyCache *PolicyCache, batcher *Batcher, multiTenant bool) *Indexer {
 	return &Indexer{
-		consumer:    consumer,
-		policyCache: policyCache,
-		batcher:     batcher,
+		consumer:           consumer,
+		policyCache:        policyCache,
+		batcher:            batcher,
+		enableMultiTenancy: multiTenant,
 	}
 }
 
 var upsertVerbs = map[string]bool{"create": true, "update": true, "patch": true}
 
-const deleteVerb = "delete"
+const (
+	deleteVerb = "delete"
+	// tenantTypePlatform mirrors tenant.TenantTypePlatform. A local copy is used
+	// to avoid an import cycle: internal/tenant/project_watcher.go already
+	// imports internal/indexer, so internal/indexer cannot import internal/tenant.
+	tenantTypePlatform = "platform"
+
+	// Scope annotation keys from resource metadata. Tenant identity is derived
+	// exclusively from these annotations on the ResponseObject.
+	ScopeTypeAnnotationKey = "platform.miloapis.com/scope.type"
+	ScopeNameAnnotationKey = "platform.miloapis.com/scope.name"
+)
 
 // Start starts the indexer consumer loop.
 // Note: the Batcher must be started separately by the caller (via batcher.Start)
@@ -101,6 +154,14 @@ func (i *Indexer) Start(ctx context.Context) error {
 			return
 		}
 
+		// In single-tenant mode, skip non-platform
+		// events entirely so that no policy can accidentally queue them.
+		tenantName, tenantType := extractTenantFromAuditEvent(&event)
+		if !i.enableMultiTenancy && tenantType != tenantTypePlatform {
+			msg.Ack()
+			return
+		}
+
 		queued := false
 
 		policies := i.policyCache.GetPolicies()
@@ -121,6 +182,10 @@ func (i *Indexer) Start(ctx context.Context) error {
 					klog.Warningf("Policy %s matched but has no IndexName in status, skipping index", cp.Policy.Name)
 					continue
 				}
+
+				// Attach the already-extracted tenant context to the eval result.
+				evalResult.Tenant = tenantName
+				evalResult.TenantType = tenantType
 
 				// Transform the matching resource into an indexable document
 				doc := evalResult.Transform()

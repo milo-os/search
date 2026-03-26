@@ -136,7 +136,7 @@ func TestIndexer_Start_ConsumeFlow(t *testing.T) {
 	mockSearch.On("WaitForTasks", mock.Anything).Return(nil, nil).Once()
 
 	// 4. Run Indexer
-	indexer := NewIndexer(mockConsumer, policyCache, batcher)
+	indexer := NewIndexer(mockConsumer, policyCache, batcher, false)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Run Start in a goroutine
@@ -155,6 +155,72 @@ func TestIndexer_Start_ConsumeFlow(t *testing.T) {
 
 	mockSearch.AssertExpectations(t)
 	msg.AssertExpectations(t)
+}
+
+func TestExtractTenantFromAuditEvent_NilResponseObject(t *testing.T) {
+	// No ResponseObject — should fall back to platform/platform.
+	event := &auditEvent{}
+
+	name, typ := extractTenantFromAuditEvent(event)
+
+	if name != "platform" {
+		t.Errorf("tenantName: got %q, want %q", name, "platform")
+	}
+	if typ != "platform" {
+		t.Errorf("tenantType: got %q, want %q", typ, "platform")
+	}
+}
+
+func TestExtractTenantFromAuditEvent_WithAnnotations(t *testing.T) {
+	// Both scope annotations present at the top level — should be extracted and type normalized to title-case.
+	event := &auditEvent{
+		Annotations: map[string]string{
+			ScopeTypeAnnotationKey: "project",
+			ScopeNameAnnotationKey: "my-project",
+		},
+	}
+
+	name, typ := extractTenantFromAuditEvent(event)
+
+	if name != "my-project" {
+		t.Errorf("tenantName: got %q, want %q", name, "my-project")
+	}
+	if typ != "Project" {
+		t.Errorf("tenantType: got %q, want %q", typ, "Project")
+	}
+}
+
+func TestExtractTenantFromAuditEvent_PartialAnnotations_TypeOnly(t *testing.T) {
+	// Only scope.type annotation is set at the top level; scope.name is absent.
+	// Expect: tenantType is extracted, tenantName falls back to "platform".
+	event := &auditEvent{
+		Annotations: map[string]string{
+			ScopeTypeAnnotationKey: "Project",
+		},
+	}
+
+	name, typ := extractTenantFromAuditEvent(event)
+
+	if name != "platform" {
+		t.Errorf("tenantName: got %q, want %q (expected fallback)", name, "platform")
+	}
+	if typ != "Project" {
+		t.Errorf("tenantType: got %q, want %q", typ, "Project")
+	}
+}
+
+func TestExtractTenantFromAuditEvent_NoAnnotations(t *testing.T) {
+	// No top-level annotations — should fall back to platform/platform.
+	event := &auditEvent{}
+
+	name, typ := extractTenantFromAuditEvent(event)
+
+	if name != "platform" {
+		t.Errorf("tenantName: got %q, want %q", name, "platform")
+	}
+	if typ != "platform" {
+		t.Errorf("tenantType: got %q, want %q", typ, "platform")
+	}
 }
 
 func TestIndexer_Consume_Delete(t *testing.T) {
@@ -208,7 +274,7 @@ func TestIndexer_Consume_Delete(t *testing.T) {
 	})).Return(nil, nil).Once()
 	mockSearch.On("WaitForTasks", mock.Anything).Return(nil, nil).Once()
 
-	indexer := NewIndexer(mockConsumer, policyCache, batcher)
+	indexer := NewIndexer(mockConsumer, policyCache, batcher, false)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go indexer.Start(ctx)

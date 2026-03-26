@@ -1,0 +1,256 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: search-flow-multi-tenant
+spec:
+  description: |
+    Validates that resources injected via NATS ReindexEvents with explicit tenant metadata
+    are correctly indexed with _tenant/_tenant_type fields and that search results expose
+    tenant.name and tenant.type. Since project control planes are not available in the
+    test environment, this test directly publishes crafted ReindexEvents to NATS to
+    simulate the multi-tenant bootstrap path.
+    Covers:
+      - T1: Project-tenant resource is searchable with tenant.name and tenant.type set.
+      - T2: Platform-tenant resource is searchable with tenant.name and tenant.type set.
+      - T3: Mixed search returns both results with correct per-result tenant metadata.
+      - _tenant/_tenant_type internal fields are not exposed on the resource object.
+
+  namespace: default
+
+  steps:
+    # =========================================================================
+    # Pre-cleanup
+    # =========================================================================
+    - name: pre-cleanup
+      description: "Removes leftover resources to ensure idempotent test execution"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl delete resourceindexpolicy e2e-multi-tenant-role-policy --ignore-not-found=true || true
+              kubectl delete job e2e-mt-nats-publisher --ignore-not-found=true || true
+              sleep 5
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 2: Create a ResourceIndexPolicy
+    # =========================================================================
+    - name: create-role-policy
+      description: "Creates ResourceIndexPolicy targeting Roles with e2e-multi-tenant label"
+      try:
+        - apply:
+            resource:
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: e2e-multi-tenant-role-policy
+              spec:
+                targetResource:
+                  group: "rbac.authorization.k8s.io"
+                  version: v1
+                  kind: ClusterRole
+                conditions:
+                  - name: is-e2e-multi-tenant
+                    expression: "'e2e-multi-tenant' in metadata.labels"
+                fields:
+                  - path: ".metadata.name"
+                    searchable: true
+                  - path: ".metadata.annotations['e2e.search.test/service']"
+                    searchable: true
+
+    # =========================================================================
+    # Step 3: Wait for policy Ready=True
+    # =========================================================================
+    - name: wait-for-role-policy-ready
+      description: "Waits for multi-tenant Role policy to reach Ready=True"
+      try:
+        - wait:
+            apiVersion: search.miloapis.com/v1alpha1
+            kind: ResourceIndexPolicy
+            name: e2e-multi-tenant-role-policy
+            timeout: 60s
+            for:
+              condition:
+                name: Ready
+                value: "True"
+
+    # =========================================================================
+    # Step 4: Publish two ReindexEvents via NATS
+    # =========================================================================
+    - name: publish-reindex-events
+      description: "Publishes two ReindexEvents to NATS — one project-tenant, one platform-tenant"
+      try:
+        - script:
+            timeout: 120s
+            content: |
+              INDEX_NAME=$(kubectl get resourceindexpolicy e2e-multi-tenant-role-policy -o jsonpath='{.status.indexName}')
+              if [ -z "$INDEX_NAME" ]; then
+                echo "ERROR: indexName is empty on policy status"
+                exit 1
+              fi
+              echo "Using indexName: $INDEX_NAME"
+
+              # Build event JSON with INDEX_NAME substituted.
+              # SpecHash is intentionally omitted so the consumer skips the hash check.
+              EVENT1=$(printf \
+                '{"id":"e2e-mt-project-resource-001","policyName":"e2e-multi-tenant-role-policy","indexName":"%s","tenant":"e2e-test-project","tenantType":"Project","resource":{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole","metadata":{"name":"e2e-project-role","uid":"e2e-project-uid-00000001","labels":{"e2e-multi-tenant":"true"},"annotations":{"e2e.search.test/service":"project-service-mt-rn1","platform.miloapis.com/scope.type":"Project","platform.miloapis.com/scope.name":"e2e-test-project"}},"rules":[{"apiGroups":[""],"resources":["pods"],"verbs":["get"]}]}}' \
+                "$INDEX_NAME")
+
+              EVENT2=$(printf \
+                '{"id":"e2e-mt-platform-resource-001","policyName":"e2e-multi-tenant-role-policy","indexName":"%s","tenant":"platform","tenantType":"platform","resource":{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole","metadata":{"name":"e2e-platform-role","uid":"e2e-platform-uid-00000001","labels":{"e2e-multi-tenant":"true"},"annotations":{"e2e.search.test/service":"platform-service-mt-rn1","platform.miloapis.com/scope.type":"platform","platform.miloapis.com/scope.name":"platform"}},"rules":[{"apiGroups":[""],"resources":["pods"],"verbs":["get"]}]}}' \
+                "$INDEX_NAME")
+
+              # Store event payloads in a ConfigMap so they can be mounted into the
+              # Job container without shell escaping issues.
+              kubectl delete configmap e2e-mt-nats-events --ignore-not-found=true || true
+              kubectl create configmap e2e-mt-nats-events \
+                --from-literal=event1="$EVENT1" \
+                --from-literal=event2="$EVENT2"
+
+              # Create the Job that reads event files from the ConfigMap volume and
+              # publishes them sequentially to the REINDEX_EVENTS stream.
+              cat <<'JOBEOF' | kubectl apply -f -
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: e2e-mt-nats-publisher
+                namespace: default
+              spec:
+                ttlSecondsAfterFinished: 120
+                template:
+                  spec:
+                    restartPolicy: Never
+                    volumes:
+                      - name: events
+                        configMap:
+                          name: e2e-mt-nats-events
+                    containers:
+                      - name: publisher
+                        image: natsio/nats-box:latest
+                        command:
+                          - /bin/sh
+                          - -c
+                          - |
+                            nats pub reindex.e2e.multitenant "$(cat /events/event1)" --server nats://nats.nats-system.svc.cluster.local:4222 &&
+                            nats pub reindex.e2e.multitenant "$(cat /events/event2)" --server nats://nats.nats-system.svc.cluster.local:4222
+                        volumeMounts:
+                          - name: events
+                            mountPath: /events
+              JOBEOF
+
+              kubectl wait job/e2e-mt-nats-publisher --for=condition=complete --timeout=60s
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 5: Wait for indexing to propagate
+    # =========================================================================
+    - name: wait-for-indexing
+      description: "Waits 30 seconds for ReindexEvents to be processed and indexed"
+      try:
+        - script:
+            timeout: 35s
+            content: sleep 30
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 6: Assert — project-tenant resource searchable with correct tenant info
+    # =========================================================================
+    - name: T1-project-tenant-searchable
+      description: "T1: Project-tenant resource must be searchable with tenant.name and tenant.type"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: t1-project-tenant
+              spec:
+                targetResources:
+                  - group: "rbac.authorization.k8s.io"
+                    version: v1
+                    kind: ClusterRole
+                query: "project-service-mt-rn1"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-project-role")] | length > 0' && \
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-project-role") | select(.tenant.name == "e2e-test-project") | select(.tenant.type == "Project")] | length > 0' && \
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-project-role") | select(.resource._tenant != null)] | length == 0'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 7: Assert — platform-tenant resource searchable with correct tenant info
+    # =========================================================================
+    - name: T2-platform-tenant-searchable
+      description: "T2: Platform-tenant resource must be searchable with tenant.name and tenant.type"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: t2-platform-tenant
+              spec:
+                targetResources:
+                  - group: "rbac.authorization.k8s.io"
+                    version: v1
+                    kind: ClusterRole
+                query: "platform-service-mt-rn1"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-platform-role")] | length > 0' && \
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-platform-role") | select(.tenant.name == "platform") | select(.tenant.type == "platform")] | length > 0'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 8: Assert — mixed search returns both results with distinct tenant types
+    # =========================================================================
+    - name: T3-mixed-tenant-search
+      description: "T3: Mixed search must return both resources with one project and one platform tenant"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: t3-mixed-tenant
+              spec:
+                targetResources:
+                  - group: "rbac.authorization.k8s.io"
+                    version: v1
+                    kind: ClusterRole
+                query: "mt-rn1"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.tenant.type == "Project")] | length >= 1' && \
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.tenant.type == "platform")] | length >= 1'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Cleanup
+    # =========================================================================
+    - name: cleanup
+      description: "Removes all resources created by this test suite"
+      try:
+        - script:
+            timeout: 60s
+            content: |
+              kubectl delete job e2e-mt-nats-publisher --ignore-not-found=true || true
+              kubectl delete configmap e2e-mt-nats-events --ignore-not-found=true || true
+              kubectl delete resourceindexpolicy e2e-multi-tenant-role-policy --ignore-not-found=true || true
+            check:
+              ($error): ~
