@@ -5,24 +5,24 @@ metadata:
 spec:
   description: |
     Validates that resources injected via NATS AUDIT_EVENTS with tenant metadata carried
-    in user.extra fields are correctly indexed with _tenant/_tenant_type fields and that
-    search results expose tenant.name and tenant.type. Since project control planes are
-    not available in the test environment, this test directly publishes crafted audit
-    events to NATS to simulate the multi-tenant audit event indexing path.
+    in top-level audit event annotations are correctly indexed with _tenant/_tenant_type
+    fields and that search results expose tenant.name and tenant.type. Since project
+    control planes are not available in the test environment, this test directly publishes
+    crafted audit events to NATS to simulate the multi-tenant audit event indexing path.
 
     This exercises the Indexer.Start() path (not ReindexConsumer), which:
       1. Consumes from the AUDIT_EVENTS stream on subject audit.k8s.activity.
       2. Iterates all active ResourceIndexPolicies and evaluates responseObject against
          each policy's CEL conditions.
-      3. Calls extractTenantFromAuditEvent() to read tenant identity from
-         user.extra["iam.miloapis.com/parent-type"] and
-         user.extra["iam.miloapis.com/parent-name"].
-      4. Falls back to "platform"/"platform" when user.extra is absent.
+      3. Calls extractTenantFromAuditEvent() to read tenant identity from the top-level
+         annotations["platform.miloapis.com/scope.type"] and
+         annotations["platform.miloapis.com/scope.name"] fields of the audit event.
+      4. Falls back to "platform"/"platform" when top-level annotations are absent.
 
     Covers:
       - A1: Project-tenant resource is searchable with tenant.name and tenant.type set.
-      - A2: Platform-tenant resource (no user.extra) is searchable with fallback
-            tenant.name="platform" and tenant.type="platform".
+      - A2: Platform-tenant resource (no top-level annotations) is searchable with
+            fallback tenant.name="platform" and tenant.type="platform".
       - A3: Mixed search returns both results with correct per-result tenant metadata.
       - _tenant/_tenant_type internal fields are not exposed on the resource object.
 
@@ -97,16 +97,16 @@ spec:
             timeout: 120s
             content: |
               # Event A: project-tenant resource.
-              # user.extra carries iam.miloapis.com/parent-type and parent-name so the
-              # indexer's extractTenantFromAuditEvent() will resolve the tenant as
-              # type="Project", name="e2e-audit-test-project".
-              EVENT_A='{"auditID":"e2e-audit-project-event-001","verb":"create","objectRef":{"apiGroup":"rbac.authorization.k8s.io","apiVersion":"v1","resource":"rolebindings","name":"e2e-audit-project-role","namespace":"default","uid":"e2e-audit-project-uid-00000001"},"responseObject":{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding","metadata":{"name":"e2e-audit-project-role","namespace":"default","uid":"e2e-audit-project-uid-00000001","labels":{"e2e-multi-tenant-audit":"true"},"annotations":{"e2e.search.test/service":"audit-project-service-mt-rn2","platform.miloapis.com/scope.type":"Project","platform.miloapis.com/scope.name":"e2e-audit-test-project"}},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"Role","name":"view"},"subjects":[]},"user":{"extra":{"iam.miloapis.com/parent-type":["project"],"iam.miloapis.com/parent-name":["e2e-audit-test-project"]}}}'
+              # Top-level annotations field carries platform.miloapis.com/scope.type and
+              # scope.name so the indexer's extractTenantFromAuditEvent() will resolve
+              # the tenant as type="Project", name="e2e-audit-test-project".
+              EVENT_A='{"auditID":"e2e-audit-project-event-001","verb":"create","annotations":{"platform.miloapis.com/scope.type":"Project","platform.miloapis.com/scope.name":"e2e-audit-test-project"},"objectRef":{"apiGroup":"rbac.authorization.k8s.io","apiVersion":"v1","resource":"rolebindings","name":"e2e-audit-project-role","namespace":"default","uid":"e2e-audit-project-uid-00000001"},"responseObject":{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding","metadata":{"name":"e2e-audit-project-role","namespace":"default","uid":"e2e-audit-project-uid-00000001","labels":{"e2e-multi-tenant-audit":"true"},"annotations":{"e2e.search.test/service":"audit-project-service-mt-rn2"}},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"Role","name":"view"},"subjects":[]},"user":{"extra":{"iam.miloapis.com/parent-type":["project"],"iam.miloapis.com/parent-name":["e2e-audit-test-project"]}}}'
 
               # Event B: platform-tenant resource.
-              # No "user" field at all — exercises the fallback path in
+              # No top-level annotations field — exercises the fallback path in
               # extractTenantFromAuditEvent() that returns "platform"/"platform"
-              # when user.extra is nil.
-              EVENT_B='{"auditID":"e2e-audit-platform-event-001","verb":"create","objectRef":{"apiGroup":"rbac.authorization.k8s.io","apiVersion":"v1","resource":"rolebindings","name":"e2e-audit-platform-role","namespace":"default","uid":"e2e-audit-platform-uid-00000001"},"responseObject":{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding","metadata":{"name":"e2e-audit-platform-role","namespace":"default","uid":"e2e-audit-platform-uid-00000001","labels":{"e2e-multi-tenant-audit":"true"},"annotations":{"e2e.search.test/service":"audit-platform-service-mt-rn2","platform.miloapis.com/scope.type":"platform","platform.miloapis.com/scope.name":"platform"}},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"Role","name":"view"},"subjects":[]}}'
+              # when top-level annotations are absent.
+              EVENT_B='{"auditID":"e2e-audit-platform-event-001","verb":"create","objectRef":{"apiGroup":"rbac.authorization.k8s.io","apiVersion":"v1","resource":"rolebindings","name":"e2e-audit-platform-role","namespace":"default","uid":"e2e-audit-platform-uid-00000001"},"responseObject":{"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding","metadata":{"name":"e2e-audit-platform-role","namespace":"default","uid":"e2e-audit-platform-uid-00000001","labels":{"e2e-multi-tenant-audit":"true"},"annotations":{"e2e.search.test/service":"audit-platform-service-mt-rn2"}},"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"Role","name":"view"},"subjects":[]}}'
 
               # Store event payloads in a ConfigMap so they can be mounted into the
               # Job container without shell escaping issues.

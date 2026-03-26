@@ -172,15 +172,11 @@ func TestExtractTenantFromAuditEvent_NilResponseObject(t *testing.T) {
 }
 
 func TestExtractTenantFromAuditEvent_WithAnnotations(t *testing.T) {
-	// Both scope annotations present — should be extracted and type normalized to title-case.
+	// Both scope annotations present at the top level — should be extracted and type normalized to title-case.
 	event := &auditEvent{
-		ResponseObject: map[string]any{
-			"metadata": map[string]any{
-				"annotations": map[string]any{
-					ScopeTypeAnnotationKey: "project",
-					ScopeNameAnnotationKey: "my-project",
-				},
-			},
+		Annotations: map[string]string{
+			ScopeTypeAnnotationKey: "project",
+			ScopeNameAnnotationKey: "my-project",
 		},
 	}
 
@@ -195,15 +191,11 @@ func TestExtractTenantFromAuditEvent_WithAnnotations(t *testing.T) {
 }
 
 func TestExtractTenantFromAuditEvent_PartialAnnotations_TypeOnly(t *testing.T) {
-	// Only scope.type annotation is set; scope.name is absent.
+	// Only scope.type annotation is set at the top level; scope.name is absent.
 	// Expect: tenantType is extracted, tenantName falls back to "platform".
 	event := &auditEvent{
-		ResponseObject: map[string]any{
-			"metadata": map[string]any{
-				"annotations": map[string]any{
-					ScopeTypeAnnotationKey: "Project",
-				},
-			},
+		Annotations: map[string]string{
+			ScopeTypeAnnotationKey: "Project",
 		},
 	}
 
@@ -218,14 +210,8 @@ func TestExtractTenantFromAuditEvent_PartialAnnotations_TypeOnly(t *testing.T) {
 }
 
 func TestExtractTenantFromAuditEvent_NoAnnotations(t *testing.T) {
-	// ResponseObject present but no scope annotations — should fall back to platform/platform.
-	event := &auditEvent{
-		ResponseObject: map[string]any{
-			"metadata": map[string]any{
-				"name": "some-resource",
-			},
-		},
-	}
+	// No top-level annotations — should fall back to platform/platform.
+	event := &auditEvent{}
 
 	name, typ := extractTenantFromAuditEvent(event)
 

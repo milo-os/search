@@ -23,8 +23,12 @@ type Indexer struct {
 }
 
 type auditEvent struct {
-	AuditID   string `json:"auditID"`
-	Verb      string `json:"verb"`
+	AuditID     string            `json:"auditID"`
+	Verb        string            `json:"verb"`
+	Annotations map[string]string `json:"annotations"`
+	User        struct {
+		Extra map[string][]string `json:"extra"`
+	} `json:"user"`
 	ObjectRef struct {
 		APIGroup   string `json:"apiGroup"`
 		APIVersion string `json:"apiVersion"`
@@ -37,25 +41,22 @@ type auditEvent struct {
 }
 
 // extractTenantFromAuditEvent extracts tenant identity from the audit event.
-// It reads exclusively from ResponseObject metadata annotations:
+// It reads exclusively from the top-level audit event annotations:
 //   - ScopeTypeAnnotationKey ("platform.miloapis.com/scope.type") for the tenant type
 //   - ScopeNameAnnotationKey ("platform.miloapis.com/scope.name") for the tenant name
 //
-// Falls back to "platform"/"platform" when the ResponseObject is absent or the
-// annotations are not set.
+// Falls back to "platform"/"platform" when the annotations are absent or not set.
 func extractTenantFromAuditEvent(event *auditEvent) (tenantName string, tenantType string) {
 	tenantName = tenantTypePlatform
 	tenantType = tenantTypePlatform
 
-	if event.ResponseObject == nil {
+	if event.Annotations == nil {
 		return
 	}
 
 	caser := cases.Title(language.Und)
-	obj := &unstructured.Unstructured{Object: event.ResponseObject}
-	annotations := obj.GetAnnotations()
 
-	if v, ok := annotations[ScopeTypeAnnotationKey]; ok && v != "" {
+	if v, ok := event.Annotations[ScopeTypeAnnotationKey]; ok && v != "" {
 		// Normalize to title-case to match Milo's scope annotation conventions
 		// (e.g. the annotation value "project" becomes "Project").
 		// Exception: "platform" is a fallback default and stays lowercase.
@@ -66,7 +67,7 @@ func extractTenantFromAuditEvent(event *auditEvent) (tenantName string, tenantTy
 		}
 	}
 
-	if v, ok := annotations[ScopeNameAnnotationKey]; ok && v != "" {
+	if v, ok := event.Annotations[ScopeNameAnnotationKey]; ok && v != "" {
 		tenantName = v
 	}
 
