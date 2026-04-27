@@ -266,7 +266,7 @@ func schema_pkg_apis_search_v1alpha1_ResourceIndexPolicySpec(ref common.Referenc
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "Conditions filter which resources are indexed using CEL expressions. Multiple conditions can be specified and are evaluated with OR semantics - a resource is indexed if it satisfies ANY condition. Use && within a single expression to require multiple criteria together.\n\nEach condition has: - name: A unique identifier for the condition, used in status reporting\n  and debugging to identify which condition(s) matched a resource.\n- expression: A CEL expression that must evaluate to a boolean. The\n  resource is available as the root object in the expression context.\n\nAvailable CEL operations: - Field access: spec.replicas, metadata.name, status.phase - Map access: metadata.labels[\"app\"], metadata.annotations[\"key\"] - Comparisons: ==, !=, <, <=, >, >= - Logical operators: &&, ||, ! - String functions: contains(), startsWith(), endsWith(), matches() - List functions: exists(), all(), size(), map(), filter() - Membership: \"value\" in list, \"key\" in map - Ternary: condition ? trueValue : falseValue",
+							Description: "Conditions filter which resources are indexed using CEL expressions. When no conditions are specified, all resources of the target type are indexed. Multiple conditions can be specified and are evaluated with OR semantics - a resource is indexed if it satisfies ANY condition. Use && within a single expression to require multiple criteria together.\n\nEach condition has: - name: A unique identifier for the condition, used in status reporting\n  and debugging to identify which condition(s) matched a resource.\n- expression: A CEL expression that must evaluate to a boolean. The\n  resource is available as the root object in the expression context.\n\nAvailable CEL operations: - Field access: spec.replicas, metadata.name, status.phase - Map access: metadata.labels[\"app\"], metadata.annotations[\"key\"] - Comparisons: ==, !=, <, <=, >, >= - Logical operators: &&, ||, ! - String functions: contains(), startsWith(), endsWith(), matches() - List functions: exists(), all(), size(), map(), filter() - Membership: \"value\" in list, \"key\" in map - Ternary: condition ? trueValue : falseValue",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
@@ -301,7 +301,7 @@ func schema_pkg_apis_search_v1alpha1_ResourceIndexPolicySpec(ref common.Referenc
 						},
 					},
 				},
-				Required: []string{"targetResource", "conditions", "fields"},
+				Required: []string{"targetResource", "fields"},
 			},
 		},
 		Dependencies: []string{
