@@ -29,6 +29,7 @@ type ResourceIndexPolicySpec struct {
 	TargetResource TargetResource `json:"targetResource"`
 
 	// Conditions filter which resources are indexed using CEL expressions.
+	// When no conditions are specified, all resources of the target type are indexed.
 	// Multiple conditions can be specified and are evaluated with OR semantics - a
 	// resource is indexed if it satisfies ANY condition. Use && within a
 	// single expression to require multiple criteria together.
@@ -48,11 +49,10 @@ type ResourceIndexPolicySpec struct {
 	// - List functions: exists(), all(), size(), map(), filter()
 	// - Membership: "value" in list, "key" in map
 	// - Ternary: condition ? trueValue : falseValue
-	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=10
 	// +listType=map
 	// +listMapKey=name
-	Conditions []PolicyCondition `json:"conditions"`
+	Conditions []PolicyCondition `json:"conditions,omitempty"`
 
 	// Fields defines which fields from the resource are indexed.
 	// +kubebuilder:validation:MinItems=1

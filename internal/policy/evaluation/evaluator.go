@@ -72,7 +72,11 @@ func (cp *CachedPolicy) Evaluate(u *unstructured.Unstructured) (*EvalResult, err
 		activation["status"] = val
 	}
 
-	// 3. Evaluate conditions (OR semantics)
+	// 3. Evaluate conditions (OR semantics). If no conditions are configured,
+	// the resource matches unconditionally.
+	if len(cp.Conditions) == 0 {
+		result.Matched = true
+	}
 	for name, prg := range cp.Conditions {
 		out, _, err := prg.Eval(activation)
 		if err != nil {
@@ -89,7 +93,6 @@ func (cp *CachedPolicy) Evaluate(u *unstructured.Unstructured) (*EvalResult, err
 		return result, nil
 	}
 
-	// 4. Extract fields from the matched resource using the path segments
 	// 4. Extract fields from the matched resource using the path segments
 	for _, field := range cp.Policy.Spec.Fields {
 		segments := ParsePath(field.Path)
