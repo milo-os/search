@@ -1,0 +1,9 @@
+apiVersion: discovery.miloapis.com/v1alpha1
+kind: DiscoveryContextPolicy
+metadata:
+  name: search-service
+spec:
+  rules:
+    - group: search.miloapis.com
+      resources: ["*"]
+      contexts: ["Platform"]
