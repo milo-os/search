@@ -28,6 +28,7 @@ jobs:
       attestations: write
     uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.11.0
     with:
+      registry-organization: milo-os
       image-name: search
     secrets: inherit
 
