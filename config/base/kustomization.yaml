@@ -7,5 +7,5 @@ resources:
 - controller-manager
 
 images:
-- name: ghcr.io/datum-cloud/search
+- name: ghcr.io/milo-os/search
   newTag: latest

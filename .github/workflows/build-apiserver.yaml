@@ -1,4 +1,4 @@
-# TEMPLATE NOTE: This workflow is specific to datum-cloud organization.
+# TEMPLATE NOTE: This workflow is specific to milo-os organization.
 # Update or replace this workflow based on your CI/CD needs.
 # Key things to change:
 # - image-name: Update to your service name
@@ -28,6 +28,7 @@ jobs:
       attestations: write
     uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.11.0
     with:
+      registry-organization: milo-os
       image-name: search
     secrets: inherit
 
@@ -44,8 +45,8 @@ jobs:
       packages: write
     uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@v1.11.0
     with:
-      bundle-name: ghcr.io/datum-cloud/search-kustomize
+      bundle-name: ghcr.io/milo-os/search-kustomize
       bundle-path: config
       image-overlays: config/overlays/core-control-plane
-      image-name: ghcr.io/datum-cloud/search
+      image-name: ghcr.io/milo-os/search
     secrets: inherit
