@@ -30,7 +30,7 @@ spec:
       terminationGracePeriodSeconds: 10
       containers:
       - name: manager
-        image: ghcr.io/datum-cloud/search:latest
+        image: ghcr.io/milo-os/search:latest
         imagePullPolicy: IfNotPresent
         command:
         - /search

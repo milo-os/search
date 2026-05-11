@@ -6,5 +6,5 @@ resources:
   - ../controller-manager/core-control-plane
 
 images:
-  - name: ghcr.io/datum-cloud/search
+  - name: ghcr.io/milo-os/search
     newTag: latest

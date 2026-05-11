@@ -23,7 +23,7 @@ labels:
 
 # Images (will be replaced by overlays for different environments)
 images:
-  - name: ghcr.io/datum-cloud/search
+  - name: ghcr.io/milo-os/search
     newTag: latest
 
 # JSON patches to ensure rbac-auth-reader stays in kube-system

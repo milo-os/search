@@ -71,7 +71,7 @@ Components are optional features that can be enabled in overlays. See [component
 ### Milo IAM Integration
 
 - **milo/iam**: Integrates with Milo for advanced IAM capabilities
-  - See <https://github.com/datum-cloud/milo>
+  - See <https://github.com/milo-os/milo>
 
 ## Customization
 
@@ -98,7 +98,7 @@ components:
   - ../../components/observability
 
 images:
-  - name: ghcr.io/datum-cloud/search
+  - name: ghcr.io/milo-os/search
     newTag: v1.0.0
 
 # Production-specific patches
@@ -206,7 +206,7 @@ kubectl logs -n search-system -l app=search-apiserver --previous
 kubectl get events -n search-system --sort-by='.lastTimestamp'
 
 # Verify image exists
-docker pull ghcr.io/datum-cloud/search:dev
+docker pull ghcr.io/milo-os/search:dev
 ```
 
 ## Production Checklist
@@ -230,4 +230,4 @@ Before deploying to production:
 - [Kustomize Documentation](https://kustomize.io/)
 - [cert-manager](https://cert-manager.io/)
 - [Prometheus Operator](https://prometheus-operator.dev/)
-- [Milo IAM](https://github.com/datum-cloud/milo)
+- [Milo IAM](https://github.com/milo-os/milo)

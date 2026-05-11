@@ -23,7 +23,7 @@ components:
 
 # Override image tag for dev builds
 images:
-  - name: ghcr.io/datum-cloud/search
+  - name: ghcr.io/milo-os/search
     newTag: dev
 
 patches:

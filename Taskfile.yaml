@@ -20,7 +20,7 @@ vars:
   WAIT_TIMEOUT: "10m"
   TOOL_DIR: "{{.USER_WORKING_DIR}}/bin"
   # Container image configuration
-  IMAGE_NAME: "ghcr.io/datum-cloud/search"
+  IMAGE_NAME: "ghcr.io/milo-os/search"
   IMAGE_TAG: "dev"
   TEST_INFRA_CLUSTER_NAME: "test-infra"
   # Test infra repository configuration - can be overridden with environment variable

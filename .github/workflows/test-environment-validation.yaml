@@ -18,7 +18,7 @@ env:
   TASK_X_REMOTE_TASKFILES: 1
   # Test infrastructure configuration
   TEST_INFRA_CLUSTER_NAME: test-infra
-  SEARCH_IMAGE_NAME: ghcr.io/datum-cloud/search
+  SEARCH_IMAGE_NAME: ghcr.io/milo-os/search
   SEARCH_IMAGE_TAG: dev
 
 jobs:
