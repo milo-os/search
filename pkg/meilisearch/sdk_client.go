@@ -473,18 +473,29 @@ func (s *SDKClient) GetSettingsUpdateTask(indexUID string) (*meilisearch.Task, e
 }
 
 // MultiSearch performs a search query across multiple indices.
-func (s *SDKClient) MultiSearch(indexUIDs []string, query string, limit int64, offset int64) (*meilisearch.MultiSearchResponse, error) {
+// If filter is non-empty, it's applied identically to every per-index query
+// as a Meilisearch filter expression. Pass "" to skip filtering.
+func (s *SDKClient) MultiSearch(
+	indexUIDs []string,
+	query string,
+	limit, offset int64,
+	filter string,
+) (*meilisearch.MultiSearchResponse, error) {
 	if len(indexUIDs) == 0 {
 		return nil, fmt.Errorf("no index UIDs provided")
 	}
 
-	var queries []*meilisearch.SearchRequest
+	queries := make([]*meilisearch.SearchRequest, 0, len(indexUIDs))
 	for _, uid := range indexUIDs {
-		queries = append(queries, &meilisearch.SearchRequest{
+		req := &meilisearch.SearchRequest{
 			IndexUID:         uid,
 			Query:            query,
 			ShowRankingScore: true,
-		})
+		}
+		if filter != "" {
+			req.Filter = filter
+		}
+		queries = append(queries, req)
 	}
 
 	req := &meilisearch.MultiSearchRequest{
@@ -495,12 +506,12 @@ func (s *SDKClient) MultiSearch(indexUIDs []string, query string, limit int64, o
 		},
 	}
 
-	klog.V(4).Infof("MultiSearch across indices %v with query %q, limit %d, offset %d", indexUIDs, query, limit, offset)
+	klog.V(6).Infof("MultiSearch across indices %v with query %q, limit %d, offset %d, filter %q",
+		indexUIDs, query, limit, offset, filter)
 	resp, err := s.client.MultiSearch(req)
 	if err != nil {
-		klog.Errorf("MultiSearch failed across indices %v: %v", indexUIDs, err)
+		klog.Errorf("MultiSearch failed across indices %v with filter %q: %v", indexUIDs, filter, err)
 		return nil, fmt.Errorf("multi-search failed: %w", err)
 	}
-
 	return resp, nil
 }

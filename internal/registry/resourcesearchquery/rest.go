@@ -102,7 +102,7 @@ func (r *REST) Create(ctx context.Context, obj runtime.Object, createValidation 
 	}
 
 	// Perform the multi search
-	resp, err := r.meiliClient.MultiSearch(indexUIDs, query.Spec.Query, limit, offset)
+	resp, err := r.meiliClient.MultiSearch(indexUIDs, query.Spec.Query, limit, offset, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to search: %w", err)
 	}
