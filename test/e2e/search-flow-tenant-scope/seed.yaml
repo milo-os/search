@@ -1,0 +1,18 @@
+---
+# ResourceIndexPolicy targeting Projects so the REST handler's resolveIndexUIDs
+# can map targetResources[group=resourcemanager.miloapis.com, kind=Project] to
+# its Meilisearch index. No CEL conditions — all resources match (index-all path).
+apiVersion: search.miloapis.com/v1alpha1
+kind: ResourceIndexPolicy
+metadata:
+  name: e2e-tenant-scope-project-policy
+spec:
+  targetResource:
+    group: "resourcemanager.miloapis.com"
+    version: v1alpha1
+    kind: Project
+  fields:
+    - path: ".metadata.name"
+      searchable: true
+    - path: ".metadata.annotations['e2e.search.test/marker']"
+      searchable: true

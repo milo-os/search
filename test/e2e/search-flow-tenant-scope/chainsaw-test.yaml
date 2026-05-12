@@ -1,0 +1,392 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: search-flow-tenant-scope
+spec:
+  description: |
+    Exercises the tenant-scoped search feature end-to-end against the live cluster.
+    Six documents are seeded into Meilisearch via NATS ReindexEvents — two each
+    under tenants p-one (project), p-two (project), and acme (organization).
+
+    Three behavioral paths are validated:
+      - T1: Unscoped query (no impersonation) — all 6 docs returned (staff-portal
+            behavior preserved; no filter applied to Meilisearch).
+      - T2: Scoped query (--as=alice --as-extra=parent-type=Project
+            --as-extra=parent-name=p-one) — only the two p-one docs returned;
+            p-two and acme docs are filtered out by Meilisearch.
+      - T3: Scoped query targeting a kind alice has no list rights on (Domain) —
+            the SAR returns denied; the handler returns 403 before ever calling
+            Meilisearch.
+
+  namespace: default
+
+  steps:
+    # =========================================================================
+    # Pre-cleanup: idempotent teardown of any leftover resources
+    # =========================================================================
+    - name: pre-cleanup
+      description: "Removes leftover resources to ensure idempotent test execution"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl delete resourceindexpolicy e2e-tenant-scope-project-policy --ignore-not-found=true || true
+              kubectl delete job e2e-ts-nats-publisher --ignore-not-found=true || true
+              kubectl delete job e2e-ts-t2-impersonator -n search-system --ignore-not-found=true || true
+              kubectl delete job e2e-ts-t3-denial -n search-system --ignore-not-found=true || true
+              kubectl delete configmap e2e-ts-nats-events --ignore-not-found=true || true
+              kubectl delete clusterrolebinding search-tenant-scope-impersonator search-tenant-scope-reader-alice --ignore-not-found=true || true
+              kubectl delete clusterrole search-tenant-scope-impersonator search-tenant-scope-reader --ignore-not-found=true || true
+              kubectl delete serviceaccount search-tenant-scope-tester -n search-system --ignore-not-found=true || true
+              sleep 5
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 1: Apply RBAC — impersonation rights + alice's Project list grant
+    # =========================================================================
+    - name: setup-rbac
+      description: "Creates ServiceAccount, impersonation ClusterRole/Binding, and alice's reader role"
+      try:
+        - apply:
+            file: rbac.yaml
+
+    # =========================================================================
+    # Step 2: Apply seed policy (ResourceIndexPolicy for Projects)
+    # =========================================================================
+    - name: apply-seed-policy
+      description: "Creates the ResourceIndexPolicy targeting resourcemanager.miloapis.com/Project"
+      try:
+        - apply:
+            file: seed.yaml
+
+    # =========================================================================
+    # Step 3: Wait for the seed policy to reach Ready=True
+    # =========================================================================
+    - name: wait-for-seed-policy-ready
+      description: "Waits for the Project policy to reach Ready=True before seeding documents"
+      try:
+        - wait:
+            apiVersion: search.miloapis.com/v1alpha1
+            kind: ResourceIndexPolicy
+            name: e2e-tenant-scope-project-policy
+            timeout: 60s
+            for:
+              condition:
+                name: Ready
+                value: "True"
+
+    # =========================================================================
+    # Step 4: Publish 6 ReindexEvents via NATS — two docs per tenant
+    #
+    # Tenant layout:
+    #   _tenant=p-one,   _tenant_type=project      → t1-a, t1-b
+    #   _tenant=p-two,   _tenant_type=project      → t2-a, t2-b
+    #   _tenant=acme,    _tenant_type=organization → t3-a, t3-b
+    #
+    # The index name is computed by GetSearchIndex:
+    #   resourcemanager-miloapis-com_v1alpha1_Project
+    #
+    # SpecHash is intentionally omitted so the consumer skips the hash check.
+    # =========================================================================
+    - name: publish-reindex-events
+      description: "Publishes 6 ReindexEvents to NATS covering three tenant/type combinations"
+      try:
+        - script:
+            timeout: 120s
+            content: |
+              INDEX_NAME=$(kubectl get resourceindexpolicy e2e-tenant-scope-project-policy -o jsonpath='{.status.indexName}')
+              if [ -z "$INDEX_NAME" ]; then
+                echo "ERROR: indexName is empty on policy status"
+                exit 1
+              fi
+              echo "Using indexName: $INDEX_NAME"
+
+              # Build 6 event payloads with INDEX_NAME substituted.
+              # Each event carries tenant/tenantType so the reindex consumer stores
+              # _tenant and _tenant_type on the indexed document.
+              DOC1=$(printf \
+                '{"id":"e2e-ts-t1-a-uid","policyName":"e2e-tenant-scope-project-policy","indexName":"%s","tenant":"p-one","tenantType":"project","resource":{"apiVersion":"resourcemanager.miloapis.com/v1alpha1","kind":"Project","metadata":{"name":"t1-a","uid":"e2e-ts-t1-a-uid","annotations":{"e2e.search.test/marker":"tenant-scope-e2e-rn1"}}}}' \
+                "$INDEX_NAME")
+
+              DOC2=$(printf \
+                '{"id":"e2e-ts-t1-b-uid","policyName":"e2e-tenant-scope-project-policy","indexName":"%s","tenant":"p-one","tenantType":"project","resource":{"apiVersion":"resourcemanager.miloapis.com/v1alpha1","kind":"Project","metadata":{"name":"t1-b","uid":"e2e-ts-t1-b-uid","annotations":{"e2e.search.test/marker":"tenant-scope-e2e-rn1"}}}}' \
+                "$INDEX_NAME")
+
+              DOC3=$(printf \
+                '{"id":"e2e-ts-t2-a-uid","policyName":"e2e-tenant-scope-project-policy","indexName":"%s","tenant":"p-two","tenantType":"project","resource":{"apiVersion":"resourcemanager.miloapis.com/v1alpha1","kind":"Project","metadata":{"name":"t2-a","uid":"e2e-ts-t2-a-uid","annotations":{"e2e.search.test/marker":"tenant-scope-e2e-rn1"}}}}' \
+                "$INDEX_NAME")
+
+              DOC4=$(printf \
+                '{"id":"e2e-ts-t2-b-uid","policyName":"e2e-tenant-scope-project-policy","indexName":"%s","tenant":"p-two","tenantType":"project","resource":{"apiVersion":"resourcemanager.miloapis.com/v1alpha1","kind":"Project","metadata":{"name":"t2-b","uid":"e2e-ts-t2-b-uid","annotations":{"e2e.search.test/marker":"tenant-scope-e2e-rn1"}}}}' \
+                "$INDEX_NAME")
+
+              DOC5=$(printf \
+                '{"id":"e2e-ts-t3-a-uid","policyName":"e2e-tenant-scope-project-policy","indexName":"%s","tenant":"acme","tenantType":"organization","resource":{"apiVersion":"resourcemanager.miloapis.com/v1alpha1","kind":"Project","metadata":{"name":"t3-a","uid":"e2e-ts-t3-a-uid","annotations":{"e2e.search.test/marker":"tenant-scope-e2e-rn1"}}}}' \
+                "$INDEX_NAME")
+
+              DOC6=$(printf \
+                '{"id":"e2e-ts-t3-b-uid","policyName":"e2e-tenant-scope-project-policy","indexName":"%s","tenant":"acme","tenantType":"organization","resource":{"apiVersion":"resourcemanager.miloapis.com/v1alpha1","kind":"Project","metadata":{"name":"t3-b","uid":"e2e-ts-t3-b-uid","annotations":{"e2e.search.test/marker":"tenant-scope-e2e-rn1"}}}}' \
+                "$INDEX_NAME")
+
+              # Store payloads in a ConfigMap so they can be mounted into the Job
+              # container without shell escaping issues.
+              kubectl delete configmap e2e-ts-nats-events --ignore-not-found=true || true
+              kubectl create configmap e2e-ts-nats-events \
+                --from-literal=doc1="$DOC1" \
+                --from-literal=doc2="$DOC2" \
+                --from-literal=doc3="$DOC3" \
+                --from-literal=doc4="$DOC4" \
+                --from-literal=doc5="$DOC5" \
+                --from-literal=doc6="$DOC6"
+
+              # Job reads each file from the ConfigMap volume and publishes sequentially.
+              # <<'JOBEOF' (quoted heredoc) prevents the outer shell from expanding
+              # $(cat /events/doc1) — the $() is evaluated inside the container.
+              cat <<'JOBEOF' | kubectl apply -f -
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: e2e-ts-nats-publisher
+                namespace: default
+              spec:
+                ttlSecondsAfterFinished: 120
+                template:
+                  spec:
+                    restartPolicy: Never
+                    volumes:
+                      - name: events
+                        configMap:
+                          name: e2e-ts-nats-events
+                    containers:
+                      - name: publisher
+                        image: natsio/nats-box:latest
+                        command:
+                          - /bin/sh
+                          - -c
+                          - |
+                            nats pub reindex.e2e.tenant-scope "$(cat /events/doc1)" --server nats://nats.nats-system.svc.cluster.local:4222 &&
+                            nats pub reindex.e2e.tenant-scope "$(cat /events/doc2)" --server nats://nats.nats-system.svc.cluster.local:4222 &&
+                            nats pub reindex.e2e.tenant-scope "$(cat /events/doc3)" --server nats://nats.nats-system.svc.cluster.local:4222 &&
+                            nats pub reindex.e2e.tenant-scope "$(cat /events/doc4)" --server nats://nats.nats-system.svc.cluster.local:4222 &&
+                            nats pub reindex.e2e.tenant-scope "$(cat /events/doc5)" --server nats://nats.nats-system.svc.cluster.local:4222 &&
+                            nats pub reindex.e2e.tenant-scope "$(cat /events/doc6)" --server nats://nats.nats-system.svc.cluster.local:4222
+                        volumeMounts:
+                          - name: events
+                            mountPath: /events
+              JOBEOF
+
+              kubectl wait job/e2e-ts-nats-publisher --for=condition=complete --timeout=60s
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Step 5: Wait for indexing to propagate
+    # =========================================================================
+    - name: wait-for-indexing
+      description: "Waits 30 seconds for ReindexEvents to be processed and indexed by Meilisearch"
+      try:
+        - script:
+            timeout: 35s
+            content: sleep 30
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # T1: Unscoped query — all 6 docs returned (staff-portal behavior preserved)
+    #
+    # No --as impersonation. user.Info.Extra has no parent-* keys.
+    # buildScopedFilter returns "" → no filter sent to Meilisearch → all docs
+    # across all tenants are visible.
+    # =========================================================================
+    - name: T1-unscoped-query-returns-all-docs
+      description: "T1: Without impersonation, all 6 seeded docs must be returned"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: t1-unscoped
+              spec:
+                targetResources:
+                  - group: "resourcemanager.miloapis.com"
+                    version: v1alpha1
+                    kind: Project
+                query: "tenant-scope-e2e-rn1"
+                limit: 50
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "t1-a")] | length > 0' && \
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "t1-b")] | length > 0' && \
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "t2-a")] | length > 0' && \
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "t2-b")] | length > 0' && \
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "t3-a")] | length > 0' && \
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "t3-b")] | length > 0'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # T2: Scoped query — only the two p-one docs returned
+    #
+    # Impersonate alice with parent-type=Project + parent-name=p-one.
+    # buildScopedFilter produces: (_tenant_type = "project" AND _tenant = "p-one")
+    # Meilisearch applies that filter; only t1-a and t1-b match.
+    #
+    # kubectl 1.33 does not expose impersonation extras via a CLI flag, so we
+    # run the request from inside the cluster as a Job. The Pod uses the
+    # search-tenant-scope-tester ServiceAccount (which has impersonate RBAC on
+    # users/userextras) and curls the apiserver directly with Impersonate-User
+    # plus Impersonate-Extra-* headers (the latter URL-encode the slash in the
+    # extra key: iam.miloapis.com%2Fparent-type).
+    # =========================================================================
+    - name: T2-scoped-query-returns-only-tenant-docs
+      description: "T2: With parent-type=Project + parent-name=p-one, only the two p-one docs must be returned"
+      try:
+        - script:
+            timeout: 120s
+            content: |
+              kubectl delete job e2e-ts-t2-impersonator -n search-system --ignore-not-found=true || true
+              cat <<'JOBEOF' | kubectl apply -f -
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: e2e-ts-t2-impersonator
+                namespace: search-system
+              spec:
+                backoffLimit: 0
+                ttlSecondsAfterFinished: 120
+                template:
+                  spec:
+                    restartPolicy: Never
+                    serviceAccountName: search-tenant-scope-tester
+                    containers:
+                      - name: tester
+                        image: curlimages/curl:latest
+                        command:
+                          - /bin/sh
+                          - -c
+                          - |
+                            set -e
+                            TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+                            CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                            BODY='{"apiVersion":"search.miloapis.com/v1alpha1","kind":"ResourceSearchQuery","metadata":{"name":"t2-scoped-p-one"},"spec":{"targetResources":[{"group":"resourcemanager.miloapis.com","version":"v1alpha1","kind":"Project"}],"query":"tenant-scope-e2e-rn1","limit":50}}'
+                            RESP=$(curl -sX POST https://kubernetes.default.svc/apis/search.miloapis.com/v1alpha1/resourcesearchqueries \
+                              --cacert "$CACERT" \
+                              -H "Authorization: Bearer $TOKEN" \
+                              -H "Content-Type: application/json" \
+                              -H "Accept: application/json" \
+                              -H "Impersonate-User: alice" \
+                              -H "Impersonate-Extra-iam.miloapis.com%2Fparent-type: Project" \
+                              -H "Impersonate-Extra-iam.miloapis.com%2Fparent-name: p-one" \
+                              -d "$BODY")
+                            echo "RESP: $RESP"
+                            echo "$RESP" | grep -q '"name": *"t1-a"' || { echo "FAIL: missing t1-a"; exit 1; }
+                            echo "$RESP" | grep -q '"name": *"t1-b"' || { echo "FAIL: missing t1-b"; exit 1; }
+                            if echo "$RESP" | grep -q '"name": *"t2-a"'; then echo "FAIL: t2-a should be filtered"; exit 1; fi
+                            if echo "$RESP" | grep -q '"name": *"t2-b"'; then echo "FAIL: t2-b should be filtered"; exit 1; fi
+                            if echo "$RESP" | grep -q '"name": *"t3-a"'; then echo "FAIL: t3-a should be filtered"; exit 1; fi
+                            if echo "$RESP" | grep -q '"name": *"t3-b"'; then echo "FAIL: t3-b should be filtered"; exit 1; fi
+                            echo "PASS"
+              JOBEOF
+              if ! kubectl wait job/e2e-ts-t2-impersonator -n search-system --for=condition=complete --timeout=90s 2>&1; then
+                echo "--- Job did not complete; dumping diagnostics ---"
+                kubectl get job e2e-ts-t2-impersonator -n search-system -o yaml || true
+                kubectl logs -n search-system job/e2e-ts-t2-impersonator --all-containers=true --tail=200 || true
+                exit 1
+              fi
+              kubectl logs -n search-system job/e2e-ts-t2-impersonator --all-containers=true --tail=200
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # T3: Unauthorized target → 403, no Meilisearch call
+    #
+    # alice has no list rights on networking.miloapis.com/Domain.
+    # authorizeTargets() issues a SAR which the k8s RBAC layer denies.
+    # The handler wraps the denial as apierrors.NewForbidden and returns it
+    # before resolveIndexUIDs or MultiSearch is ever called.
+    #
+    # Same Job+curl pattern as T2. We inspect the HTTP status code from curl
+    # (-w '%{http_code}') and assert it is exactly 403.
+    # =========================================================================
+    - name: T3-unauthorized-target-returns-403
+      description: "T3: Querying a kind alice cannot list must be rejected with 403 Forbidden"
+      try:
+        - script:
+            timeout: 120s
+            content: |
+              kubectl delete job e2e-ts-t3-denial -n search-system --ignore-not-found=true || true
+              cat <<'JOBEOF' | kubectl apply -f -
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: e2e-ts-t3-denial
+                namespace: search-system
+              spec:
+                backoffLimit: 0
+                ttlSecondsAfterFinished: 120
+                template:
+                  spec:
+                    restartPolicy: Never
+                    serviceAccountName: search-tenant-scope-tester
+                    containers:
+                      - name: tester
+                        image: curlimages/curl:latest
+                        command:
+                          - /bin/sh
+                          - -c
+                          - |
+                            set -e
+                            TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+                            CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                            BODY='{"apiVersion":"search.miloapis.com/v1alpha1","kind":"ResourceSearchQuery","metadata":{"generateName":"t3-denied-"},"spec":{"targetResources":[{"group":"networking.miloapis.com","version":"v1alpha1","kind":"Domain"}],"query":"","limit":10}}'
+                            HTTP_CODE=$(curl -sX POST https://kubernetes.default.svc/apis/search.miloapis.com/v1alpha1/resourcesearchqueries \
+                              --cacert "$CACERT" \
+                              -H "Authorization: Bearer $TOKEN" \
+                              -H "Content-Type: application/json" \
+                              -H "Accept: application/json" \
+                              -H "Impersonate-User: alice" \
+                              -H "Impersonate-Extra-iam.miloapis.com%2Fparent-type: Project" \
+                              -H "Impersonate-Extra-iam.miloapis.com%2Fparent-name: p-one" \
+                              -d "$BODY" \
+                              -o /tmp/resp.json \
+                              -w "%{http_code}")
+                            echo "HTTP $HTTP_CODE"
+                            echo "BODY:"
+                            cat /tmp/resp.json
+                            if [ "$HTTP_CODE" != "403" ]; then echo "FAIL: expected 403, got $HTTP_CODE"; exit 1; fi
+                            grep -qi "forbidden" /tmp/resp.json || { echo "FAIL: response body did not mention forbidden"; exit 1; }
+                            echo "PASS"
+              JOBEOF
+              if ! kubectl wait job/e2e-ts-t3-denial -n search-system --for=condition=complete --timeout=90s 2>&1; then
+                echo "--- Job did not complete; dumping diagnostics ---"
+                kubectl get job e2e-ts-t3-denial -n search-system -o yaml || true
+                kubectl logs -n search-system job/e2e-ts-t3-denial --all-containers=true --tail=200 || true
+                exit 1
+              fi
+              kubectl logs -n search-system job/e2e-ts-t3-denial --all-containers=true --tail=200
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # Cleanup
+    # =========================================================================
+    - name: cleanup
+      description: "Removes all resources created by this test suite"
+      try:
+        - script:
+            timeout: 60s
+            content: |
+              kubectl delete job e2e-ts-nats-publisher --ignore-not-found=true || true
+              kubectl delete job e2e-ts-t2-impersonator -n search-system --ignore-not-found=true || true
+              kubectl delete job e2e-ts-t3-denial -n search-system --ignore-not-found=true || true
+              kubectl delete configmap e2e-ts-nats-events --ignore-not-found=true || true
+              kubectl delete resourceindexpolicy e2e-tenant-scope-project-policy --ignore-not-found=true || true
+              kubectl delete clusterrolebinding search-tenant-scope-impersonator search-tenant-scope-reader-alice --ignore-not-found=true || true
+              kubectl delete clusterrole search-tenant-scope-impersonator search-tenant-scope-reader --ignore-not-found=true || true
+              kubectl delete serviceaccount search-tenant-scope-tester -n search-system --ignore-not-found=true || true
+            check:
+              ($error): ~

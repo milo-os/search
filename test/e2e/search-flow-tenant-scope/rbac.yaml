@@ -1,0 +1,69 @@
+---
+# ServiceAccount that the test pod/script runs as. Must be created before the
+# impersonator binding below so that the binding subject resolves correctly.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: search-tenant-scope-tester
+  namespace: search-system
+---
+# ClusterRole that grants impersonation of user "alice" and the
+# iam.miloapis.com/parent-* extra keys, plus create on ResourceSearchQuery.
+# Bound to the search-system ServiceAccount that chainsaw runs as.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: search-tenant-scope-impersonator
+rules:
+- apiGroups: [""]
+  resources: ["users", "groups", "serviceaccounts"]
+  verbs: ["impersonate"]
+- apiGroups: ["authentication.k8s.io"]
+  resources:
+    - "userextras/iam.miloapis.com/parent-type"
+    - "userextras/iam.miloapis.com/parent-name"
+  verbs: ["impersonate"]
+- apiGroups: ["search.miloapis.com"]
+  resources: ["resourcesearchqueries"]
+  verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: search-tenant-scope-impersonator
+subjects:
+- kind: ServiceAccount
+  name: search-tenant-scope-tester
+  namespace: search-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: search-tenant-scope-impersonator
+---
+# Grant "alice" list rights on Projects only.
+# Domain / networking.miloapis.com is intentionally NOT granted here so that
+# the SAR-denial scenario (T3) hits a real 403.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: search-tenant-scope-reader
+rules:
+- apiGroups: ["resourcemanager.miloapis.com"]
+  resources: ["projects"]
+  verbs: ["list"]
+- apiGroups: ["search.miloapis.com"]
+  resources: ["resourcesearchqueries"]
+  verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: search-tenant-scope-reader-alice
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: User
+  name: alice
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: search-tenant-scope-reader
