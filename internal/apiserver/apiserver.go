@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apiserver/pkg/registry/rest"
 	genericapiserver "k8s.io/apiserver/pkg/server"
+	typedauthzv1 "k8s.io/client-go/kubernetes/typed/authorization/v1"
 	"k8s.io/klog/v2"
 
 	"go.miloapis.net/search/internal/indexer"
@@ -58,6 +59,7 @@ func init() {
 type ExtraConfig struct {
 	MeiliClient        *meilisearch.SDKClient
 	PolicyCache        *indexer.PolicyCache
+	SARClient          typedauthzv1.SubjectAccessReviewInterface
 	MaxSearchLimit     int
 	DefaultSearchLimit int
 	PagingSecret       []byte
@@ -124,6 +126,7 @@ func (c completedConfig) New() (*SearchServer, error) {
 	resourcesearchqueryStorage := resourcesearchquery.NewREST(
 		c.ExtraConfig.MeiliClient,
 		c.ExtraConfig.PolicyCache,
+		c.ExtraConfig.SARClient,
 		c.ExtraConfig.MaxSearchLimit,
 		c.ExtraConfig.DefaultSearchLimit,
 		c.ExtraConfig.PagingSecret,

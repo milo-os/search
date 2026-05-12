@@ -9,24 +9,42 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	meiliapi "github.com/meilisearch/meilisearch-go"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
+	typedauthzv1 "k8s.io/client-go/kubernetes/typed/authorization/v1"
 	"k8s.io/klog/v2"
 
-	"go.miloapis.net/search/internal/indexer"
+	policyevaluation "go.miloapis.net/search/internal/policy/evaluation"
 	searchv1alpha1 "go.miloapis.net/search/pkg/apis/search/v1alpha1"
 	"go.miloapis.net/search/pkg/meilisearch"
 )
 
+// multiSearcher is the subset of meilisearch.SDKClient that the REST handler
+// uses. Declaring it here lets tests substitute a fake without touching the
+// SDK client itself.
+type multiSearcher interface {
+	MultiSearch(indexUIDs []string, query string, limit, offset int64, filter string) (*meiliapi.MultiSearchResponse, error)
+}
+
+// policyLister is the subset of indexer.PolicyCache that the REST handler
+// uses. Declaring it here lets tests substitute a fake without a real
+// controller-runtime cache.
+type policyLister interface {
+	GetPolicies() []*policyevaluation.CachedPolicy
+}
+
 // REST implements a RESTStorage for ResourceSearchQuery API.
 type REST struct {
-	meiliClient        *meilisearch.SDKClient
-	policyCache        *indexer.PolicyCache
+	meiliClient        multiSearcher
+	policyCache        policyLister
+	sarClient          typedauthzv1.SubjectAccessReviewInterface
 	maxSearchLimit     int
 	defaultSearchLimit int
 	secretKey          []byte
@@ -40,10 +58,19 @@ var _ rest.Scoper = &REST{}
 var _ rest.SingularNameProvider = &REST{}
 
 // NewREST returns a RESTStorage object that will work against ResourceSearchQuery.
-func NewREST(meiliClient *meilisearch.SDKClient, policyCache *indexer.PolicyCache, maxSearchLimit int, defaultSearchLimit int, pagingSecret []byte, pagingTimeout time.Duration) *REST {
+func NewREST(
+	meiliClient *meilisearch.SDKClient,
+	policyCache policyLister,
+	sarClient typedauthzv1.SubjectAccessReviewInterface,
+	maxSearchLimit int,
+	defaultSearchLimit int,
+	pagingSecret []byte,
+	pagingTimeout time.Duration,
+) *REST {
 	return &REST{
 		meiliClient:        meiliClient,
 		policyCache:        policyCache,
+		sarClient:          sarClient,
 		maxSearchLimit:     maxSearchLimit,
 		defaultSearchLimit: defaultSearchLimit,
 		secretKey:          pagingSecret,
@@ -87,44 +114,75 @@ func (r *REST) Create(ctx context.Context, obj runtime.Object, createValidation 
 		return nil, err
 	}
 
+	// Identity
+	userInfo, _ := request.UserFrom(ctx)
+	if userInfo == nil {
+		return nil, apierrors.NewUnauthorized("missing user in request context")
+	}
+
+	// Authorization
+	if err := authorizeTargets(ctx, r.sarClient, userInfo, query.Spec.TargetResources); err != nil {
+		return nil, err
+	}
+
 	indexUIDs, err := r.resolveIndexUIDs(query)
 	if err != nil {
 		return nil, err
 	}
-
 	if len(indexUIDs) == 0 {
-		// No ready policies or matching indices exist yet
-		created := query.DeepCopy()
-		created.Status = searchv1alpha1.ResourceSearchQueryStatus{
-			Results: []searchv1alpha1.SearchResult{},
-		}
-		return created, nil
+		return emptyQueryResult(query), nil
 	}
 
-	// Perform the multi search
-	resp, err := r.meiliClient.MultiSearch(indexUIDs, query.Spec.Query, limit, offset, "")
+	// Filter
+	parent := extractParentContext(userInfo)
+	filter := buildScopedFilter(parent)
+	if filter != "" {
+		klog.V(2).Infof("ResourceSearchQuery applying tenant scope filter type=%q name=%q across %d indices",
+			parent.Type, parent.Name, len(indexUIDs))
+	}
+
+	// Dispatch
+	resp, err := r.meiliClient.MultiSearch(indexUIDs, query.Spec.Query, limit, offset, filter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search: %w", err)
 	}
 
-	// Process search results
 	var results []searchv1alpha1.SearchResult
-
-	// Handle search results
 	for _, hit := range resp.Hits {
-		if res, err := formatSearchResult(hit); err == nil {
-			results = append(results, res)
+		res, err := formatSearchResult(hit)
+		if err != nil {
+			klog.Warningf("dropping Meilisearch hit due to format error: %v (hit keys: %v)", err, hitKeys(hit))
+			continue
 		}
+		results = append(results, res)
 	}
 
-	// Populate response status
 	created := query.DeepCopy()
 	created.Status = searchv1alpha1.ResourceSearchQueryStatus{
 		Results:  results,
 		Continue: r.calculateNextContinueToken(offset, limit, len(resp.Hits), query),
 	}
-
 	return created, nil
+}
+
+// emptyQueryResult returns a query result with an empty results list. Used
+// when no ready indices match the requested target resources.
+func emptyQueryResult(query *searchv1alpha1.ResourceSearchQuery) *searchv1alpha1.ResourceSearchQuery {
+	created := query.DeepCopy()
+	created.Status = searchv1alpha1.ResourceSearchQueryStatus{
+		Results: []searchv1alpha1.SearchResult{},
+	}
+	return created
+}
+
+// hitKeys returns the keys present in a Meilisearch hit for use in log
+// messages. Cheap — does not copy values.
+func hitKeys(hit map[string]json.RawMessage) []string {
+	keys := make([]string, 0, len(hit))
+	for k := range hit {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 type PagingClaims struct {

@@ -36,6 +36,8 @@ import (
 	"go.miloapis.net/search/cmd/search/manager"
 	internalindexer "go.miloapis.net/search/internal/indexer"
 	"go.miloapis.net/search/pkg/meilisearch"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 
 	// Register JSON logging format
 	_ "k8s.io/component-base/logs/json/register"
@@ -276,11 +278,25 @@ func (o *SearchServerOptions) Config() (*searchapiserver.Config, error) {
 		pagingSecret = []byte(uuid.New().String())
 	}
 
+	// The SubjectAccessReview API is served by the kube-apiserver, not by us
+	// (we only serve search.miloapis.com). Use the in-cluster config (mounted
+	// service account token) to reach the kube-apiserver. Loopback would point
+	// the SAR client back at this apiserver and return 404.
+	kubeConfig, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build in-cluster config for SAR client: %w", err)
+	}
+	clientset, err := kubernetes.NewForConfig(kubeConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create kubernetes clientset: %w", err)
+	}
+
 	serverConfig := &searchapiserver.Config{
 		GenericConfig: genericConfig,
 		ExtraConfig: searchapiserver.ExtraConfig{
 			MeiliClient:        meiliClient,
 			PolicyCache:        indexPolicyCache,
+			SARClient:          clientset.AuthorizationV1().SubjectAccessReviews(),
 			MaxSearchLimit:     o.MaxSearchLimit,
 			DefaultSearchLimit: o.DefaultSearchLimit,
 			PagingSecret:       pagingSecret,
