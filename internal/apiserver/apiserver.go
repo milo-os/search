@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apiserver/pkg/registry/rest"
 	genericapiserver "k8s.io/apiserver/pkg/server"
+	typedauthzv1 "k8s.io/client-go/kubernetes/typed/authorization/v1"
 	"k8s.io/klog/v2"
 
 	"go.miloapis.net/search/internal/indexer"
@@ -56,8 +57,17 @@ func init() {
 
 // ExtraConfig extends the generic apiserver configuration with search-specific settings.
 type ExtraConfig struct {
-	MeiliClient        *meilisearch.SDKClient
-	PolicyCache        *indexer.PolicyCache
+	MeiliClient *meilisearch.SDKClient
+	PolicyCache *indexer.PolicyCache
+	// CRDCache is the raw controller-runtime cache for CustomResourceDefinitions.
+	// It is used only for lifecycle management (RegisterHandlers, Start,
+	// WaitForCacheSync) in the post-start hook. Query routing uses PluralLookup.
+	CRDCache *indexer.CRDPluralCache
+	// PluralLookup resolves (group, kind) to plural resource names for SAR
+	// authorization. Backed by FallbackPluralLookup which tries the CRD cache
+	// first and falls back to the REST mapper for aggregated API server types.
+	PluralLookup       *indexer.FallbackPluralLookup
+	SARClient          typedauthzv1.SubjectAccessReviewInterface
 	MaxSearchLimit     int
 	DefaultSearchLimit int
 	PagingSecret       []byte
@@ -124,6 +134,8 @@ func (c completedConfig) New() (*SearchServer, error) {
 	resourcesearchqueryStorage := resourcesearchquery.NewREST(
 		c.ExtraConfig.MeiliClient,
 		c.ExtraConfig.PolicyCache,
+		c.ExtraConfig.PluralLookup,
+		c.ExtraConfig.SARClient,
 		c.ExtraConfig.MaxSearchLimit,
 		c.ExtraConfig.DefaultSearchLimit,
 		c.ExtraConfig.PagingSecret,
@@ -152,6 +164,29 @@ func (c completedConfig) New() (*SearchServer, error) {
 
 		if !c.ExtraConfig.PolicyCache.WaitForCacheSync(ctx.Context) {
 			return fmt.Errorf("failed to wait for policy cache sync")
+		}
+		return nil
+	})
+
+	// Start the CRD plural cache. This is a SEPARATE controller-runtime cache
+	// from the policy cache — CRDs live on the kube-apiserver (not on this
+	// apiserver's loopback), so the CRD cache uses in-cluster config rather
+	// than LoopbackClientConfig. The two caches have independent lifecycles
+	// and are started/synced concurrently by their respective post-start hooks.
+	s.GenericAPIServer.AddPostStartHookOrDie("search-crd-plural-cache", func(ctx genericapiserver.PostStartHookContext) error {
+		if err := c.ExtraConfig.CRDCache.RegisterHandlers(ctx.Context); err != nil {
+			return fmt.Errorf("failed to register CRD plural cache handlers: %w", err)
+		}
+
+		go func() {
+			klog.Info("Starting Search CRD plural cache...")
+			if err := c.ExtraConfig.CRDCache.Start(ctx.Context); err != nil {
+				klog.Errorf("CRD plural cache stopped with error: %v", err)
+			}
+		}()
+
+		if !c.ExtraConfig.CRDCache.WaitForCacheSync(ctx.Context) {
+			return fmt.Errorf("failed to wait for CRD plural cache sync")
 		}
 		return nil
 	})
