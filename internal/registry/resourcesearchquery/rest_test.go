@@ -113,6 +113,12 @@ func newPolicyListerWithIndex(group, version, kind, indexName string) *fakePolic
 // Shared test REST constructor
 // ---------------------------------------------------------------------------
 
+// testPlurals is the default plural map for REST handler tests. It covers the
+// Project kind used by newTestProjectQuery / testQuery helpers.
+var testPlurals = fakePlurals{
+	{Group: "resourcemanager.miloapis.com", Kind: "Project"}: "projects",
+}
+
 // newTestREST builds a *REST suitable for unit tests using the supplied fakes.
 func newTestREST(
 	t *testing.T,
@@ -124,12 +130,19 @@ func newTestREST(
 	return &REST{
 		meiliClient:        meili,
 		policyCache:        policies,
+		pluralCache:        testPlurals,
 		sarClient:          sarCs.AuthorizationV1().SubjectAccessReviews(),
 		maxSearchLimit:     100,
 		defaultSearchLimit: 10,
 		secretKey:          []byte("test-secret"),
 		pagingTimeout:      24 * time.Hour,
 	}
+}
+
+// newTestProjectQuery builds a minimal ResourceSearchQuery targeting the Project
+// kind, used by tests that need a non-empty TargetResources list.
+func newTestProjectQuery() *searchv1alpha1.ResourceSearchQuery {
+	return testQuery("resourcemanager.miloapis.com", "v1alpha1", "Project")
 }
 
 // testQuery builds a minimal ResourceSearchQuery with a single TargetResource
@@ -370,4 +383,39 @@ func TestCreate_PaginationValidation(t *testing.T) {
 			t.Fatalf("expected BadRequest, got %v", err)
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// TestCreate_UnknownKind_Returns403WithoutMeili
+// ---------------------------------------------------------------------------
+
+// When the requested Kind is not in the plural cache, authorizeTargets cannot
+// construct a SAR ResourceAttributes and must return Forbidden. Meilisearch
+// must never be contacted.
+func TestCreate_UnknownKind_Returns403WithoutMeili(t *testing.T) {
+	sars := newSARFake(t, true) // allow-all; must not be reached
+	meili := newFakeMeili()
+	// Empty plurals map — Project kind is unknown to authz.
+	r := &REST{
+		meiliClient:        meili,
+		policyCache:        newPolicyListerWithIndex("resourcemanager.miloapis.com", "v1alpha1", "Project", "projects-idx"),
+		pluralCache:        fakePlurals{},
+		sarClient:          sars.AuthorizationV1().SubjectAccessReviews(),
+		maxSearchLimit:     100,
+		defaultSearchLimit: 10,
+		secretKey:          []byte("test-secret"),
+		pagingTimeout:      0,
+	}
+
+	u := &user.DefaultInfo{Name: "alice"}
+	_, err := r.Create(ctxWithUser(u), newTestProjectQuery(), nil, nil)
+	if err == nil {
+		t.Fatal("expected error for unknown kind")
+	}
+	if !apierrors.IsForbidden(err) {
+		t.Fatalf("expected Forbidden, got %v", err)
+	}
+	if meili.calls != 0 {
+		t.Fatalf("Meilisearch should not be called on unknown-kind 403; calls=%d", meili.calls)
+	}
 }

@@ -15,6 +15,7 @@ import (
 	"go.miloapis.net/search/internal/version"
 	searchv1alpha1 "go.miloapis.net/search/pkg/apis/search/v1alpha1"
 	"go.miloapis.net/search/pkg/generated/openapi"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	apiopenapi "k8s.io/apiserver/pkg/endpoints/openapi"
@@ -30,6 +31,7 @@ import (
 	openapiutil "k8s.io/kube-openapi/pkg/util"
 	"k8s.io/kube-openapi/pkg/validation/spec"
 	runtimecache "sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"go.miloapis.net/search/cmd/search/indexer"
@@ -272,6 +274,42 @@ func (o *SearchServerOptions) Config() (*searchapiserver.Config, error) {
 		return nil, fmt.Errorf("failed to create policy cache: %w", err)
 	}
 
+	// Build a separate cache for CustomResourceDefinitions. CRDs live on the
+	// kube-apiserver (not on the search apiserver's loopback), so this cache
+	// uses the in-cluster config — same approach as the SAR client below.
+	inClusterCfg, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build in-cluster config for CRD cache: %w", err)
+	}
+
+	crdScheme := runtime.NewScheme()
+	if err := apiextensionsv1.AddToScheme(crdScheme); err != nil {
+		return nil, fmt.Errorf("failed to register apiextensions/v1 in CRD scheme: %w", err)
+	}
+	crdHTTPClient, err := rest.HTTPClientFor(inClusterCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP client for CRD cache: %w", err)
+	}
+	crdCache, err := runtimecache.New(inClusterCfg, runtimecache.Options{
+		Scheme:     crdScheme,
+		HTTPClient: crdHTTPClient,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create CRD cache: %w", err)
+	}
+	crdPluralCache := internalindexer.NewCRDPluralCache(crdCache)
+
+	// Build a REST mapper backed by the kube-apiserver for resolving plural
+	// names of aggregated API server types (e.g. resourcemanager.miloapis.com/
+	// Project) that are not CRDs and therefore absent from the CRD informer.
+	// The mapper is lazy — it only calls discovery when a kind is first
+	// requested — so construction here is cheap.
+	crdMapper, err := apiutil.NewDynamicRESTMapper(inClusterCfg, crdHTTPClient)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create REST mapper for plural lookup: %w", err)
+	}
+	pluralLookup := internalindexer.NewFallbackPluralLookup(crdPluralCache, crdMapper)
+
 	pagingSecret := []byte(os.Getenv("SEARCH_PAGING_SECRET"))
 	if len(pagingSecret) == 0 {
 		klog.Info("SEARCH_PAGING_SECRET not set, generating a random one")
@@ -296,6 +334,8 @@ func (o *SearchServerOptions) Config() (*searchapiserver.Config, error) {
 		ExtraConfig: searchapiserver.ExtraConfig{
 			MeiliClient:        meiliClient,
 			PolicyCache:        indexPolicyCache,
+			CRDCache:           crdPluralCache,
+			PluralLookup:       pluralLookup,
 			SARClient:          clientset.AuthorizationV1().SubjectAccessReviews(),
 			MaxSearchLimit:     o.MaxSearchLimit,
 			DefaultSearchLimit: o.DefaultSearchLimit,

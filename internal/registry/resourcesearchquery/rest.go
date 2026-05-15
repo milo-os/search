@@ -21,6 +21,7 @@ import (
 	typedauthzv1 "k8s.io/client-go/kubernetes/typed/authorization/v1"
 	"k8s.io/klog/v2"
 
+	"go.miloapis.net/search/internal/indexer"
 	policyevaluation "go.miloapis.net/search/internal/policy/evaluation"
 	searchv1alpha1 "go.miloapis.net/search/pkg/apis/search/v1alpha1"
 	"go.miloapis.net/search/pkg/meilisearch"
@@ -44,6 +45,7 @@ type policyLister interface {
 type REST struct {
 	meiliClient        multiSearcher
 	policyCache        policyLister
+	pluralCache        pluralLookup
 	sarClient          typedauthzv1.SubjectAccessReviewInterface
 	maxSearchLimit     int
 	defaultSearchLimit int
@@ -60,7 +62,8 @@ var _ rest.SingularNameProvider = &REST{}
 // NewREST returns a RESTStorage object that will work against ResourceSearchQuery.
 func NewREST(
 	meiliClient *meilisearch.SDKClient,
-	policyCache policyLister,
+	policyCache *indexer.PolicyCache,
+	pluralCache *indexer.FallbackPluralLookup,
 	sarClient typedauthzv1.SubjectAccessReviewInterface,
 	maxSearchLimit int,
 	defaultSearchLimit int,
@@ -70,6 +73,7 @@ func NewREST(
 	return &REST{
 		meiliClient:        meiliClient,
 		policyCache:        policyCache,
+		pluralCache:        pluralCache,
 		sarClient:          sarClient,
 		maxSearchLimit:     maxSearchLimit,
 		defaultSearchLimit: defaultSearchLimit,
@@ -121,7 +125,7 @@ func (r *REST) Create(ctx context.Context, obj runtime.Object, createValidation 
 	}
 
 	// Authorization
-	if err := authorizeTargets(ctx, r.sarClient, userInfo, query.Spec.TargetResources); err != nil {
+	if err := authorizeTargets(ctx, r.sarClient, r.pluralCache, userInfo, query.Spec.TargetResources); err != nil {
 		return nil, err
 	}
 
