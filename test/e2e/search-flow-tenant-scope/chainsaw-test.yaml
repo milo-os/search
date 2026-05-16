@@ -14,9 +14,9 @@ spec:
       - T2: Scoped query (--as=alice --as-extra=parent-type=Project
             --as-extra=parent-name=p-one) — only the two p-one docs returned;
             p-two and acme docs are filtered out by Meilisearch.
-      - T3: Scoped query targeting a kind alice has no list rights on (Domain) —
-            the SAR returns denied; the handler returns 403 before ever calling
-            Meilisearch.
+      - T3: Mixed targets — Project (has a policy) and Domain (no policy) —
+            the handler returns 200 with Project results in status.results and
+            Domain in status.deniedTargetResources (soft-degrade).
 
   namespace: default
 
@@ -34,6 +34,7 @@ spec:
               kubectl delete job e2e-ts-nats-publisher --ignore-not-found=true || true
               kubectl delete job e2e-ts-t2-impersonator -n search-system --ignore-not-found=true || true
               kubectl delete job e2e-ts-t3-denial -n search-system --ignore-not-found=true || true
+              kubectl delete job e2e-ts-t4-all-denied -n search-system --ignore-not-found=true || true
               kubectl delete configmap e2e-ts-nats-events --ignore-not-found=true || true
               kubectl delete clusterrolebinding search-tenant-scope-impersonator search-tenant-scope-reader-alice --ignore-not-found=true || true
               kubectl delete clusterrole search-tenant-scope-impersonator search-tenant-scope-reader --ignore-not-found=true || true
@@ -302,18 +303,19 @@ spec:
               ($error): ~
 
     # =========================================================================
-    # T3: Unauthorized target → 403, no Meilisearch call
+    # T3: Mixed targets — one with policy, one without — soft-degrade (200 OK)
     #
-    # alice has no list rights on networking.miloapis.com/Domain.
-    # authorizeTargets() issues a SAR which the k8s RBAC layer denies.
-    # The handler wraps the denial as apierrors.NewForbidden and returns it
-    # before resolveIndexUIDs or MultiSearch is ever called.
+    # alice queries for both Project (has a policy from Step 2) and Domain
+    # (no ResourceIndexPolicy registered in this test). The new behavior:
+    # - HTTP 200 (not 403)
+    # - status.results contains Project hits (from the indexed documents)
+    # - status.deniedTargetResources contains the Domain target
     #
-    # Same Job+curl pattern as T2. We inspect the HTTP status code from curl
-    # (-w '%{http_code}') and assert it is exactly 403.
+    # Uses the same Job+curl pattern as T2 with impersonation headers so that
+    # the parent-type/parent-name extras are present (tenant-scoped request).
     # =========================================================================
-    - name: T3-unauthorized-target-returns-403
-      description: "T3: Querying a kind alice cannot list must be rejected with 403 Forbidden"
+    - name: T3-missing-policy-target-returns-200-with-denied-list
+      description: "T3: A target with no ResourceIndexPolicy lands in deniedTargetResources; request still succeeds 200"
       try:
         - script:
             timeout: 120s
@@ -342,7 +344,7 @@ spec:
                             set -e
                             TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
                             CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
-                            HTTP_CODE=$(curl -sX POST https://kubernetes.default.svc/apis/search.miloapis.com/v1alpha1/resourcesearchqueries \
+                            curl -sX POST https://kubernetes.default.svc/apis/search.miloapis.com/v1alpha1/resourcesearchqueries \
                               --cacert "$CACERT" \
                               -H "Authorization: Bearer $TOKEN" \
                               -H "Content-Type: application/json" \
@@ -350,12 +352,8 @@ spec:
                               -H "Impersonate-User: alice" \
                               -H "Impersonate-Extra-iam.miloapis.com%2Fparent-type: Project" \
                               -H "Impersonate-Extra-iam.miloapis.com%2Fparent-name: p-one" \
-                              -d '{"apiVersion":"search.miloapis.com/v1alpha1","kind":"ResourceSearchQuery","metadata":{"generateName":"t3-denied-"},"spec":{"targetResources":[{"group":"networking.miloapis.com","version":"v1alpha1","kind":"Domain"}],"query":"","limit":10}}' \
-                              -o /tmp/resp.json \
-                              -w "%{http_code}")
-                            echo "HTTP $HTTP_CODE"
-                            echo "BODY:"
-                            cat /tmp/resp.json
+                              -d '{"apiVersion":"search.miloapis.com/v1alpha1","kind":"ResourceSearchQuery","metadata":{"generateName":"t3-mixed-"},"spec":{"targetResources":[{"group":"resourcemanager.miloapis.com","version":"v1alpha1","kind":"Project"},{"group":"networking.miloapis.com","version":"v1alpha1","kind":"Domain"}],"query":"tenant-scope-e2e-rn1","limit":50}}' \
+                              -w "\nHTTP_CODE:%{http_code}"
               JOBEOF
               if ! kubectl wait job/e2e-ts-t3-denial -n search-system --for=condition=complete --timeout=90s 2>&1; then
                 echo "--- Job did not complete; dumping diagnostics ---"
@@ -365,19 +363,79 @@ spec:
               fi
               LOG=$(kubectl logs -n search-system job/e2e-ts-t3-denial --all-containers=true --tail=-1)
               echo "$LOG"
-              HTTP_CODE=$(echo "$LOG" | awk '/^HTTP / {print $2; exit}')
-              BODY=$(echo "$LOG" | awk 'f{print} /^BODY:/{f=1}')
-              test "$HTTP_CODE" = "403"
-              echo "$BODY" | jq -e '.reason == "Forbidden"'
-              echo "$BODY" | jq -e '.code == 403'
-              # K8s Status `.details.kind` surfaces the Resource field of the
-              # schema.GroupResource that NewForbidden was called with. Per
-              # milo-os convention (and Jose's review comment #3), we pass the
-              # lowercase plural here — "domains", not the singular Kind.
-              echo "$BODY" | jq -e '.details.kind == "domains"'
-              # And the human-readable message still cites the original Kind
-              # in its trailing "is not authorized to search .../Domain" phrase.
-              echo "$BODY" | jq -e '.message | test("Domain")'
+              BODY=$(echo "$LOG" | awk '/^HTTP_CODE:/{exit} {print}')
+              HTTP_CODE=$(echo "$LOG" | grep -o 'HTTP_CODE:[0-9]*' | cut -d: -f2)
+              echo "HTTP status: $HTTP_CODE"
+              test "$HTTP_CODE" = "200"
+              echo "$BODY" | jq -e '.status.deniedTargetResources[]? | select(.kind == "Domain")' > /dev/null
+              echo "$BODY" | jq -e '(.status.results | length) > 0' > /dev/null
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # T4: All targets unregistered — 200 OK with empty results and full denied list
+    #
+    # Request targets only unregistered kinds (Domain, Widget — no policies).
+    # Expected: HTTP 200, status.results is empty, all targets appear in
+    # status.deniedTargetResources.
+    # =========================================================================
+    - name: T4-all-denied-returns-200-empty-results
+      description: "T4: All-denied request returns 200 with empty results and all targets in deniedTargetResources"
+      try:
+        - script:
+            timeout: 120s
+            content: |
+              kubectl delete job e2e-ts-t4-all-denied -n search-system --ignore-not-found=true || true
+              cat <<'JOBEOF' | kubectl apply -f -
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: e2e-ts-t4-all-denied
+                namespace: search-system
+              spec:
+                backoffLimit: 0
+                ttlSecondsAfterFinished: 120
+                template:
+                  spec:
+                    restartPolicy: Never
+                    serviceAccountName: search-tenant-scope-tester
+                    containers:
+                      - name: tester
+                        image: curlimages/curl:latest
+                        command:
+                          - /bin/sh
+                          - -c
+                          - |
+                            set -e
+                            TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+                            CACERT=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                            curl -sX POST https://kubernetes.default.svc/apis/search.miloapis.com/v1alpha1/resourcesearchqueries \
+                              --cacert "$CACERT" \
+                              -H "Authorization: Bearer $TOKEN" \
+                              -H "Content-Type: application/json" \
+                              -H "Accept: application/json" \
+                              -H "Impersonate-User: alice" \
+                              -H "Impersonate-Extra-iam.miloapis.com%2Fparent-type: Project" \
+                              -H "Impersonate-Extra-iam.miloapis.com%2Fparent-name: p-one" \
+                              -d '{"apiVersion":"search.miloapis.com/v1alpha1","kind":"ResourceSearchQuery","metadata":{"generateName":"t4-all-denied-"},"spec":{"targetResources":[{"group":"networking.miloapis.com","version":"v1alpha1","kind":"Domain"},{"group":"example.com","version":"v1","kind":"Widget"}],"query":"","limit":10}}' \
+                              -w "\nHTTP_CODE:%{http_code}"
+              JOBEOF
+              if ! kubectl wait job/e2e-ts-t4-all-denied -n search-system --for=condition=complete --timeout=90s 2>&1; then
+                echo "--- Job did not complete; dumping diagnostics ---"
+                kubectl get job e2e-ts-t4-all-denied -n search-system -o yaml || true
+                kubectl logs -n search-system job/e2e-ts-t4-all-denied --all-containers=true --tail=200 || true
+                exit 1
+              fi
+              LOG=$(kubectl logs -n search-system job/e2e-ts-t4-all-denied --all-containers=true --tail=-1)
+              echo "$LOG"
+              BODY=$(echo "$LOG" | awk '/^HTTP_CODE:/{exit} {print}')
+              HTTP_CODE=$(echo "$LOG" | grep -o 'HTTP_CODE:[0-9]*' | cut -d: -f2)
+              echo "HTTP status: $HTTP_CODE"
+              test "$HTTP_CODE" = "200"
+              echo "$BODY" | jq -e '(.status.results | length) == 0' > /dev/null
+              echo "$BODY" | jq -e '(.status.deniedTargetResources | length) == 2' > /dev/null
+              echo "$BODY" | jq -e '.status.deniedTargetResources[]? | select(.kind == "Domain")' > /dev/null
+              echo "$BODY" | jq -e '.status.deniedTargetResources[]? | select(.kind == "Widget")' > /dev/null
             check:
               ($error): ~
 
@@ -393,6 +451,7 @@ spec:
               kubectl delete job e2e-ts-nats-publisher --ignore-not-found=true || true
               kubectl delete job e2e-ts-t2-impersonator -n search-system --ignore-not-found=true || true
               kubectl delete job e2e-ts-t3-denial -n search-system --ignore-not-found=true || true
+              kubectl delete job e2e-ts-t4-all-denied -n search-system --ignore-not-found=true || true
               kubectl delete configmap e2e-ts-nats-events --ignore-not-found=true || true
               kubectl delete resourceindexpolicy e2e-tenant-scope-project-policy --ignore-not-found=true || true
               kubectl delete clusterrolebinding search-tenant-scope-impersonator search-tenant-scope-reader-alice --ignore-not-found=true || true
