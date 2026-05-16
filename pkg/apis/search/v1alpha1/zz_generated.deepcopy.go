@@ -245,6 +245,11 @@ func (in *ResourceSearchQueryStatus) DeepCopyInto(out *ResourceSearchQueryStatus
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.DeniedTargetResources != nil {
+		in, out := &in.DeniedTargetResources, &out.DeniedTargetResources
+		*out = make([]TargetResource, len(*in))
+		copy(*out, *in)
+	}
 	return
 }
 
