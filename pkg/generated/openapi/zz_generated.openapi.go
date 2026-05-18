@@ -288,7 +288,7 @@ func schema_pkg_apis_search_v1alpha1_ResourceIndexPolicySpec(ref common.Referenc
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "Fields defines which fields from the resource are indexed.",
+							Description: "Fields defines which fields from the resource are searchable.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{

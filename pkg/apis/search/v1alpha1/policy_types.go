@@ -54,7 +54,7 @@ type ResourceIndexPolicySpec struct {
 	// +listMapKey=name
 	Conditions []PolicyCondition `json:"conditions,omitempty"`
 
-	// Fields defines which fields from the resource are indexed.
+	// Fields defines which fields from the resource are searchable.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=10
 	// +listType=map

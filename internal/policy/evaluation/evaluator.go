@@ -1,12 +1,12 @@
 package evaluation
 
 import (
-	"strconv"
 	"strings"
 
 	"github.com/google/cel-go/cel"
 	"go.miloapis.net/search/pkg/apis/search/v1alpha1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
 )
 
@@ -14,8 +14,10 @@ import (
 type EvalResult struct {
 	// Matched is true if the resource satisfied any condition.
 	Matched bool
-	// Fields contains the extracted field values from the resource, keyed by path.
-	Fields map[string]any
+	// Object is the full source object from the matched resource (u.Object). It
+	// is populated only when Matched is true. Shared reference; Transform()
+	// deep-copies before any mutation.
+	Object map[string]any
 	// Group is the API group of the matching policy.
 	Group string
 	// Version is the API version of the matching policy.
@@ -42,11 +44,10 @@ type CachedPolicy struct {
 	Conditions map[string]cel.Program
 }
 
-// Evaluate checks if the resource matches the policy's target GVK, conditions,
-// and extracts the configured fields from matching resources.
+// Evaluate checks if the resource matches the policy's target GVK and conditions.
+// When matched, the full source object is stored on the result for use by Transform().
 func (cp *CachedPolicy) Evaluate(u *unstructured.Unstructured) (*EvalResult, error) {
 	result := &EvalResult{
-		Fields:  map[string]any{},
 		Group:   cp.Policy.Spec.TargetResource.Group,
 		Version: cp.Policy.Spec.TargetResource.Version,
 		Kind:    cp.Policy.Spec.TargetResource.Kind,
@@ -93,90 +94,46 @@ func (cp *CachedPolicy) Evaluate(u *unstructured.Unstructured) (*EvalResult, err
 		return result, nil
 	}
 
-	// 4. Extract fields from the matched resource using the path segments
-	for _, field := range cp.Policy.Spec.Fields {
-		segments := ParsePath(field.Path)
-		if len(segments) == 0 {
-			continue
-		}
-
-		var current any = u.Object
-		found := true
-		for _, key := range segments {
-			if m, ok := current.(map[string]any); ok {
-				if val, exists := m[key]; exists {
-					current = val
-					continue
-				}
-			}
-			// Handle array index access (e.g. "0" for [0])
-			if list, ok := current.([]any); ok {
-				if idx, err := strconv.Atoi(key); err == nil {
-					if idx >= 0 && idx < len(list) {
-						current = list[idx]
-						continue
-					}
-				}
-			}
-
-			found = false
-			break
-		}
-
-		if found {
-			result.Fields[field.Path] = current
-		}
-	}
+	// 4. Store the full source object so Transform() can build the complete document.
+	result.Object = u.Object
 
 	return result, nil
 }
 
 // Transform converts the evaluation result into a document for indexing.
-// It reconstructs the nested structure based on the field paths.
-// For example, ".metadata.name" -> {"metadata": {"name": "value"}}.
+// It deep-copies the full source object, strips managedFields, and overlays
+// policy-derived metadata (apiVersion, kind, _tenant, _tenant_type).
 func (r *EvalResult) Transform() map[string]any {
-	doc := make(map[string]any)
-
-	for path, value := range r.Fields {
-		segments := ParsePath(path)
-		if len(segments) == 0 {
-			continue
-		}
-
-		// Traverse and build structure
-		current := doc
-		for i := 0; i < len(segments)-1; i++ {
-			seg := segments[i]
-
-			// Check if key exists
-			v, exists := current[seg]
-			if !exists {
-				// Create new map
-				m := make(map[string]any)
-				current[seg] = m
-				current = m
-				continue
-			}
-
-			// If exists, checks if it is a map
-			if m, ok := v.(map[string]any); ok {
-				current = m
-			} else {
-				// Conflict: existing value is not a map (e.g. was a scalar).
-				// We overwrite it with a map to support the deeper path.
-				// This implies the deeper path takes precedence structurally.
-				m := make(map[string]any)
-				current[seg] = m
-				current = m
-			}
-		}
-
-		// Set leaf value
-		leaf := segments[len(segments)-1]
-		current[leaf] = value
+	// Deep-copy so we never mutate the shared source object.
+	doc := runtime.DeepCopyJSON(r.Object)
+	if doc == nil {
+		doc = make(map[string]any)
 	}
 
-	// Add policy GVK metadata to the document
+	// Strip metadata noise in a single type assertion.
+	if meta, ok := doc["metadata"].(map[string]any); ok {
+		// managedFields is verbose tracking data that is not useful for search.
+		delete(meta, "managedFields")
+
+		// Strip the last-applied-configuration annotation universally. This annotation
+		// can mirror unredacted Secret payloads when objects are managed via kubectl apply,
+		// making it the largest single field on most objects and a potential data-leak vector.
+		if annotations, ok := meta["annotations"].(map[string]any); ok {
+			delete(annotations, "kubectl.kubernetes.io/last-applied-configuration")
+			if len(annotations) == 0 {
+				delete(meta, "annotations")
+			}
+		}
+	}
+
+	// Strip Secret fields that contain sensitive data
+	if r.Group == "" && r.Version == "v1" && r.Kind == "Secret" {
+		delete(doc, "data")
+		delete(doc, "stringData")
+	}
+
+	// Overlay policy GVK metadata — these unconditionally win over any values
+	// the source object may have carried for the same keys.
 	if r.Group != "" {
 		doc["apiVersion"] = r.Group + "/" + r.Version
 	} else {
