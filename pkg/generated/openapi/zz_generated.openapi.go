@@ -90,7 +90,7 @@ func schema_pkg_apis_search_v1alpha1_FieldPolicy(ref common.ReferenceCallback) c
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "FieldPolicy defines how a resource field should be indexed and how they behave in search operations.",
+				Description: "FieldPolicy defines how a resource field behaves in search operations.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"path": {
