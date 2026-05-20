@@ -70,6 +70,14 @@ type ResourceSearchQueryStatus struct {
 	// +listType=atomic
 	Results []SearchResult `json:"results,omitempty"`
 
+	// DeniedTargetResources lists target resources that were requested but
+	// could not be searched because no ResourceIndexPolicy is registered for
+	// them in this cluster. The query succeeded for the remaining targets;
+	// callers can render a partial-permission notice when this list is non-empty.
+	// +optional
+	// +listType=atomic
+	DeniedTargetResources []TargetResource `json:"deniedTargetResources,omitempty"`
+
 	// Continue is the pagination cursor.
 	// Non-empty means more results are available - copy this to spec.continue for the next page.
 	// Empty means you have all results.

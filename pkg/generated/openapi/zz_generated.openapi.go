@@ -540,6 +540,25 @@ func schema_pkg_apis_search_v1alpha1_ResourceSearchQueryStatus(ref common.Refere
 							},
 						},
 					},
+					"deniedTargetResources": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "DeniedTargetResources lists target resources that were requested but could not be searched because no ResourceIndexPolicy is registered for them in this cluster. The query succeeded for the remaining targets; callers can render a partial-permission notice when this list is non-empty.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("go.miloapis.net/search/pkg/apis/search/v1alpha1.TargetResource"),
+									},
+								},
+							},
+						},
+					},
 					"continue": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Continue is the pagination cursor. Non-empty means more results are available - copy this to spec.continue for the next page. Empty means you have all results.",
@@ -551,7 +570,7 @@ func schema_pkg_apis_search_v1alpha1_ResourceSearchQueryStatus(ref common.Refere
 			},
 		},
 		Dependencies: []string{
-			"go.miloapis.net/search/pkg/apis/search/v1alpha1.SearchResult"},
+			"go.miloapis.net/search/pkg/apis/search/v1alpha1.SearchResult", "go.miloapis.net/search/pkg/apis/search/v1alpha1.TargetResource"},
 	}
 }
 

@@ -65,3 +65,5 @@ observability/jsonnetfile.lock.json
 
 .temp
 .tmp
+# Personal workflow artifacts (specs/plans/runbooks from superpowers skill)
+docs/superpowers/

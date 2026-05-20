@@ -418,11 +418,13 @@ spec:
               ($error): ~
 
     # =========================================================================
-    # Step 6: Query after policy deletion — must return an error
-    # The index no longer exists, so the API must reject the query.
+    # Step 6: Query after policy deletion — must soft-degrade
+    # The index no longer exists, so the API returns 200 OK with the requested
+    # kind in status.deniedTargetResources (per the activity-style scoping
+    # pattern in PR #95 / search authz refactor).
     # =========================================================================
-    - name: F1-search-after-deletion-returns-error
-      description: "F1: Querying ResourceQuotas after policy deletion must return an error"
+    - name: F1-search-after-deletion-soft-degrades
+      description: "F1: Querying ResourceQuotas after policy deletion must soft-degrade (200 OK, kind in deniedTargetResources)"
       try:
         - script:
             timeout: 30s
@@ -443,18 +445,23 @@ spec:
               )
               echo "Response: $OUTPUT"
 
-              # API returns Invalid (422) with NotFound field errors when no policy exists
-              if echo "$OUTPUT" | grep -qi "Invalid\|NotFound\|not found\|error"; then
-                echo "PASS: API rejected query after policy deletion"
-                exit 0
+              # New soft-degrade semantics: API returns 200 OK with the
+              # deleted kind in status.deniedTargetResources.
+              if ! echo "$OUTPUT" | jq -e '.status.deniedTargetResources[]? | select(.kind == "ResourceQuota")' > /dev/null; then
+                echo "FAIL: ResourceQuota not present in status.deniedTargetResources"
+                exit 1
               fi
-              echo "FAIL: API did not reject query after policy deletion"
-              exit 1
+              if [ "$(echo "$OUTPUT" | jq -r '(.status.results // []) | length')" != "0" ]; then
+                echo "FAIL: status.results should be empty after policy deletion"
+                exit 1
+              fi
+              echo "PASS: API soft-degraded after policy deletion"
+              exit 0
             check:
               ($error): ~
 
-    - name: F2-search-different-term-after-deletion-also-errors
-      description: "F2: Any query for the deleted resource type must fail, not just specific terms"
+    - name: F2-search-different-term-after-deletion-also-soft-degrades
+      description: "F2: Any query for the deleted resource type must soft-degrade, not just specific terms"
       try:
         - script:
             timeout: 30s
@@ -475,12 +482,18 @@ spec:
               )
               echo "Response: $OUTPUT"
 
-              if echo "$OUTPUT" | grep -qi "Invalid\|NotFound\|not found\|error"; then
-                echo "PASS: API rejected query after policy deletion"
-                exit 0
+              # New soft-degrade semantics: API returns 200 OK with the
+              # deleted kind in status.deniedTargetResources.
+              if ! echo "$OUTPUT" | jq -e '.status.deniedTargetResources[]? | select(.kind == "ResourceQuota")' > /dev/null; then
+                echo "FAIL: ResourceQuota not present in status.deniedTargetResources"
+                exit 1
               fi
-              echo "FAIL: API did not reject query after policy deletion"
-              exit 1
+              if [ "$(echo "$OUTPUT" | jq -r '(.status.results // []) | length')" != "0" ]; then
+                echo "FAIL: status.results should be empty after policy deletion"
+                exit 1
+              fi
+              echo "PASS: API soft-degraded after policy deletion"
+              exit 0
             check:
               ($error): ~
 

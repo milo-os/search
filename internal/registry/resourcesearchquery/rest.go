@@ -14,11 +14,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
-	typedauthzv1 "k8s.io/client-go/kubernetes/typed/authorization/v1"
 	"k8s.io/klog/v2"
 
 	"go.miloapis.net/search/internal/indexer"
@@ -45,8 +42,6 @@ type policyLister interface {
 type REST struct {
 	meiliClient        multiSearcher
 	policyCache        policyLister
-	pluralCache        pluralLookup
-	sarClient          typedauthzv1.SubjectAccessReviewInterface
 	maxSearchLimit     int
 	defaultSearchLimit int
 	secretKey          []byte
@@ -63,8 +58,6 @@ var _ rest.SingularNameProvider = &REST{}
 func NewREST(
 	meiliClient *meilisearch.SDKClient,
 	policyCache *indexer.PolicyCache,
-	pluralCache *indexer.FallbackPluralLookup,
-	sarClient typedauthzv1.SubjectAccessReviewInterface,
 	maxSearchLimit int,
 	defaultSearchLimit int,
 	pagingSecret []byte,
@@ -73,8 +66,6 @@ func NewREST(
 	return &REST{
 		meiliClient:        meiliClient,
 		policyCache:        policyCache,
-		pluralCache:        pluralCache,
-		sarClient:          sarClient,
 		maxSearchLimit:     maxSearchLimit,
 		defaultSearchLimit: defaultSearchLimit,
 		secretKey:          pagingSecret,
@@ -124,20 +115,18 @@ func (r *REST) Create(ctx context.Context, obj runtime.Object, createValidation 
 		return nil, apierrors.NewUnauthorized("missing user in request context")
 	}
 
-	// Authorization
-	if err := authorizeTargets(ctx, r.sarClient, r.pluralCache, userInfo, query.Spec.TargetResources); err != nil {
-		return nil, err
-	}
+	// Classify targets against registered policies (no SAR — activity pattern).
+	policies := r.policyCache.GetPolicies()
+	allowed, denied := classifyTargets(query.Spec.TargetResources, policies)
+	indexUIDs := indexUIDsFor(allowed, policies)
 
-	indexUIDs, err := r.resolveIndexUIDs(query)
-	if err != nil {
-		return nil, err
-	}
+	// Short-circuit: nothing to search. Return 200 with empty results and the
+	// full denied list so callers can render a partial-permission notice.
 	if len(indexUIDs) == 0 {
-		return emptyQueryResult(query), nil
+		return resultWithDenied(query, nil, denied, ""), nil
 	}
 
-	// Filter
+	// Tenant scope filter (unchanged — extractParentContext + buildScopedFilter).
 	parent := extractParentContext(userInfo)
 	filter := buildScopedFilter(parent)
 	if filter != "" {
@@ -145,7 +134,7 @@ func (r *REST) Create(ctx context.Context, obj runtime.Object, createValidation 
 			parent.Type, parent.Name, len(indexUIDs))
 	}
 
-	// Dispatch
+	// Dispatch to Meilisearch.
 	resp, err := r.meiliClient.MultiSearch(indexUIDs, query.Spec.Query, limit, offset, filter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search: %w", err)
@@ -161,22 +150,25 @@ func (r *REST) Create(ctx context.Context, obj runtime.Object, createValidation 
 		results = append(results, res)
 	}
 
-	created := query.DeepCopy()
-	created.Status = searchv1alpha1.ResourceSearchQueryStatus{
-		Results:  results,
-		Continue: r.calculateNextContinueToken(offset, limit, len(resp.Hits), query),
-	}
-	return created, nil
+	continueToken := r.calculateNextContinueToken(offset, limit, len(resp.Hits), query)
+	return resultWithDenied(query, results, denied, continueToken), nil
 }
 
-// emptyQueryResult returns a query result with an empty results list. Used
-// when no ready indices match the requested target resources.
-func emptyQueryResult(query *searchv1alpha1.ResourceSearchQuery) *searchv1alpha1.ResourceSearchQuery {
-	created := query.DeepCopy()
-	created.Status = searchv1alpha1.ResourceSearchQueryStatus{
-		Results: []searchv1alpha1.SearchResult{},
+// resultWithDenied constructs the response object, populating status.results,
+// status.deniedTargetResources, and status.continue in one place.
+func resultWithDenied(
+	query *searchv1alpha1.ResourceSearchQuery,
+	results []searchv1alpha1.SearchResult,
+	denied []searchv1alpha1.TargetResource,
+	continueToken string,
+) *searchv1alpha1.ResourceSearchQuery {
+	out := query.DeepCopy()
+	out.Status = searchv1alpha1.ResourceSearchQueryStatus{
+		Results:               results,
+		DeniedTargetResources: denied,
+		Continue:              continueToken,
 	}
-	return created
+	return out
 }
 
 // hitKeys returns the keys present in a Meilisearch hit for use in log
@@ -249,54 +241,6 @@ func (r *REST) validateAndGetPagination(query *searchv1alpha1.ResourceSearchQuer
 	return limit, offset, nil
 }
 
-// resolveIndexUIDs retrieves the Meilisearch index UIDs for the targeted resources
-// in the query. If no target resources are specified, it returns all indices from
-// all ready policies.
-func (r *REST) resolveIndexUIDs(query *searchv1alpha1.ResourceSearchQuery) ([]string, error) {
-	var indexUIDs []string
-	policies := r.policyCache.GetPolicies()
-
-	if len(query.Spec.TargetResources) > 0 {
-		var errs field.ErrorList
-		targetResourcesPath := field.NewPath("spec", "targetResources")
-
-		for i, tr := range query.Spec.TargetResources {
-			found := false
-			for _, cp := range policies {
-				p := cp.Policy
-				if p.Spec.TargetResource.Group == tr.Group &&
-					p.Spec.TargetResource.Version == tr.Version &&
-					p.Spec.TargetResource.Kind == tr.Kind {
-					if p.Status.IndexName != "" {
-						indexUIDs = append(indexUIDs, p.Status.IndexName)
-						found = true
-					}
-				}
-			}
-			if !found {
-				errs = append(errs, field.NotFound(
-					targetResourcesPath.Index(i),
-					fmt.Sprintf("%s/%s %s", tr.Group, tr.Version, tr.Kind),
-				))
-			}
-		}
-
-		if len(errs) > 0 {
-			return nil, apierrors.NewInvalid(
-				schema.GroupKind{Group: searchv1alpha1.SchemeGroupVersion.Group, Kind: "ResourceSearchQuery"},
-				query.Name,
-				errs,
-			)
-		}
-	} else {
-		for _, cp := range policies {
-			if cp.Policy.Status.IndexName != "" {
-				indexUIDs = append(indexUIDs, cp.Policy.Status.IndexName)
-			}
-		}
-	}
-	return indexUIDs, nil
-}
 
 // calculateNextContinueToken determines the next continue token for pagination.
 // If the number of hits on the current page is equal to or greater than the limit,
