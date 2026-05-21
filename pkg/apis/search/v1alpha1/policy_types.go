@@ -54,7 +54,7 @@ type ResourceIndexPolicySpec struct {
 	// +listMapKey=name
 	Conditions []PolicyCondition `json:"conditions,omitempty"`
 
-	// Fields defines which fields from the resource are indexed.
+	// Fields defines which fields from the resource are searchable.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=10
 	// +listType=map
@@ -95,7 +95,7 @@ type PolicyCondition struct {
 	Expression string `json:"expression"`
 }
 
-// FieldPolicy defines how a resource field should be indexed and how they behave in search operations.
+// FieldPolicy defines how a resource field behaves in search operations.
 type FieldPolicy struct {
 	// Path is the JSONPath to the field value.
 	// Supports nested paths and map key access using bracket notation.

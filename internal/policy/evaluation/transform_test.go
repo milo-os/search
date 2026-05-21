@@ -1,27 +1,90 @@
 package evaluation
 
 import (
-	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestEvalResult_Transform(t *testing.T) {
 	tests := []struct {
 		name     string
-		fields   map[string]any
-		group    string
-		version  string
-		kind     string
+		result   *EvalResult
 		expected map[string]any
 	}{
 		{
-			name:    "empty fields",
-			fields:  map[string]any{},
-			group:   "search.miloapis.com",
-			version: "v1alpha1",
-			kind:    "ResourceIndexPolicy",
+			name: "full object is included in output",
+			result: &EvalResult{
+				Matched: true,
+				Object: map[string]any{
+					"apiVersion": "v1",
+					"kind":       "ConfigMap",
+					"metadata": map[string]any{
+						"name":      "my-config",
+						"namespace": "default",
+					},
+					// data is a non-policy field — must still appear in the doc
+					"data": map[string]any{
+						"key": "value",
+					},
+				},
+				Group:   "",
+				Version: "v1",
+				Kind:    "ConfigMap",
+			},
+			expected: map[string]any{
+				"apiVersion": "v1",
+				"kind":       "ConfigMap",
+				"metadata": map[string]any{
+					"name":      "my-config",
+					"namespace": "default",
+				},
+				"data":         map[string]any{"key": "value"},
+				"_tenant":      "platform",
+				"_tenant_type": "platform",
+			},
+		},
+		{
+			name: "managedFields is stripped from metadata",
+			result: &EvalResult{
+				Matched: true,
+				Object: map[string]any{
+					"apiVersion": "apps/v1",
+					"kind":       "Deployment",
+					"metadata": map[string]any{
+						"name": "my-deploy",
+						"managedFields": []any{
+							map[string]any{"manager": "kubectl", "operation": "Apply"},
+						},
+					},
+					"spec": map[string]any{"replicas": int64(1)},
+				},
+				Group:   "apps",
+				Version: "v1",
+				Kind:    "Deployment",
+			},
+			expected: map[string]any{
+				"apiVersion": "apps/v1",
+				"kind":       "Deployment",
+				"metadata":   map[string]any{"name": "my-deploy"},
+				"spec":       map[string]any{"replicas": int64(1)},
+				"_tenant":      "platform",
+				"_tenant_type": "platform",
+			},
+		},
+		{
+			name: "apiVersion overlay: group + version",
+			result: &EvalResult{
+				Matched: true,
+				Object: map[string]any{
+					"apiVersion": "old/v0", // will be overwritten
+					"kind":       "OldKind",
+				},
+				Group:   "search.miloapis.com",
+				Version: "v1alpha1",
+				Kind:    "ResourceIndexPolicy",
+			},
 			expected: map[string]any{
 				"apiVersion":   "search.miloapis.com/v1alpha1",
 				"kind":         "ResourceIndexPolicy",
@@ -30,294 +93,263 @@ func TestEvalResult_Transform(t *testing.T) {
 			},
 		},
 		{
-			name:    "single field",
-			fields:  map[string]any{".metadata.name": "test-cm"},
-			group:   "",
-			version: "v1",
-			kind:    "ConfigMap",
+			name: "apiVersion overlay: core group (empty group)",
+			result: &EvalResult{
+				Matched: true,
+				Object: map[string]any{
+					"apiVersion": "old/v0",
+					"kind":       "OldKind",
+				},
+				Group:   "",
+				Version: "v1",
+				Kind:    "Pod",
+			},
+			expected: map[string]any{
+				"apiVersion":   "v1",
+				"kind":         "Pod",
+				"_tenant":      "platform",
+				"_tenant_type": "platform",
+			},
+		},
+		{
+			name: "tenant and tenant_type defaults to platform when empty",
+			result: &EvalResult{
+				Matched: true,
+				Object:  map[string]any{"apiVersion": "v1", "kind": "Service"},
+				Group:   "",
+				Version: "v1",
+				Kind:    "Service",
+				// Tenant and TenantType intentionally empty
+			},
+			expected: map[string]any{
+				"apiVersion":   "v1",
+				"kind":         "Service",
+				"_tenant":      "platform",
+				"_tenant_type": "platform",
+			},
+		},
+		{
+			name: "tenant and tenant_type are set when provided",
+			result: &EvalResult{
+				Matched:    true,
+				Object:     map[string]any{"apiVersion": "v1", "kind": "ConfigMap"},
+				Group:      "",
+				Version:    "v1",
+				Kind:       "ConfigMap",
+				Tenant:     "my-project",
+				TenantType: "Project",
+			},
 			expected: map[string]any{
 				"apiVersion":   "v1",
 				"kind":         "ConfigMap",
-				"metadata":     map[string]any{"name": "test-cm"},
-				"_tenant":      "platform",
-				"_tenant_type": "platform",
+				"_tenant":      "my-project",
+				"_tenant_type": "Project",
 			},
 		},
 		{
-			name: "multiple fields",
-			fields: map[string]any{
-				".metadata.name":                 "test-cm",
-				".spec.replicas":                 int64(3),
-				".spec.selector.matchLabels.app": "foo",
-			},
-			group:   "apps",
-			version: "v1",
-			kind:    "Deployment",
-			expected: map[string]any{
-				"apiVersion": "apps/v1",
-				"kind":       "Deployment",
-				"metadata":   map[string]any{"name": "test-cm"},
-				"spec": map[string]any{
-					"replicas": int64(3),
-					"selector": map[string]any{
-						"matchLabels": map[string]any{"app": "foo"},
+			name: "non-policy fields are present alongside policy-covered fields",
+			result: &EvalResult{
+				Matched: true,
+				// The policy only defines Fields for .metadata.name, but the full
+				// object is stored — all keys must appear in the output.
+				Object: map[string]any{
+					"apiVersion": "v1",
+					"kind":       "ConfigMap",
+					"metadata": map[string]any{
+						"name":      "cfg",
+						"namespace": "ns",
+						"labels":    map[string]any{"app": "search"},
+					},
+					"data": map[string]any{
+						"extra-key": "extra-value",
 					},
 				},
-				"_tenant":      "platform",
-				"_tenant_type": "platform",
+				Group:   "",
+				Version: "v1",
+				Kind:    "ConfigMap",
 			},
-		},
-		{
-			name:    "nested brackets",
-			fields:  map[string]any{".data['config.yaml']": "content"},
-			group:   "",
-			version: "v1",
-			kind:    "ConfigMap",
-			expected: map[string]any{
-				"apiVersion":   "v1",
-				"kind":         "ConfigMap",
-				"data":         map[string]any{"config.yaml": "content"},
-				"_tenant":      "platform",
-				"_tenant_type": "platform",
-			},
-		},
-		{
-			name: "mixed paths sharing prefix (merging)",
-			fields: map[string]any{
-				".metadata.name":      "test",
-				".metadata.namespace": "default",
-			},
-			group:   "",
-			version: "v1",
-			kind:    "Pod",
-			expected: map[string]any{
-				"apiVersion": "v1",
-				"kind":       "Pod",
-				"metadata": map[string]any{
-					"name":      "test",
-					"namespace": "default",
-				},
-				"_tenant":      "platform",
-				"_tenant_type": "platform",
-			},
-		},
-		{
-			name: "mixed dot and bracket notation merging",
-			fields: map[string]any{
-				".spec.selector['app']":    "backend",
-				".spec.selector.component": "core",
-			},
-			group:   "apps",
-			version: "v1",
-			kind:    "Deployment",
-			expected: map[string]any{
-				"apiVersion": "apps/v1",
-				"kind":       "Deployment",
-				"spec": map[string]any{
-					"selector": map[string]any{
-						"app":       "backend",
-						"component": "core",
-					},
-				},
-				"_tenant":      "platform",
-				"_tenant_type": "platform",
-			},
-		},
-		{
-			name: "array indices as map keys (multiple items)",
-			fields: map[string]any{
-				".spec.ports[0].port":       int64(80),
-				".spec.ports[0].targetPort": int64(8080),
-				".spec.ports[0].name":       "http",
-				".spec.ports[1].port":       int64(443),
-				".spec.ports[1].targetPort": int64(8443),
-				".spec.ports[1].name":       "https",
-			},
-			group:   "apps",
-			version: "v1",
-			kind:    "StatefulSet",
-			expected: map[string]any{
-				"apiVersion": "apps/v1",
-				"kind":       "StatefulSet",
-				"spec": map[string]any{
-					"ports": map[string]any{
-						"0": map[string]any{
-							"port":       int64(80),
-							"targetPort": int64(8080),
-							"name":       "http",
-						},
-						"1": map[string]any{
-							"port":       int64(443),
-							"targetPort": int64(8443),
-							"name":       "https",
-						},
-					},
-				},
-				"_tenant":      "platform",
-				"_tenant_type": "platform",
-			},
-		},
-		{
-			name: "deeply nested mix",
-			fields: map[string]any{
-				".status.conditions[0].type":        "Ready",
-				".status.conditions[0].status":      "True",
-				".status.containerStatuses[0].name": "main",
-				".status.hostIP":                    "10.0.0.1",
-			},
-			group:   "",
-			version: "v1",
-			kind:    "Pod",
-			expected: map[string]any{
-				"apiVersion": "v1",
-				"kind":       "Pod",
-				"status": map[string]any{
-					"conditions": map[string]any{
-						"0": map[string]any{
-							"type":   "Ready",
-							"status": "True",
-						},
-					},
-					"containerStatuses": map[string]any{
-						"0": map[string]any{
-							"name": "main",
-						},
-					},
-					"hostIP": "10.0.0.1",
-				},
-				"_tenant":      "platform",
-				"_tenant_type": "platform",
-			},
-		},
-		{
-			name: "deep nesting level 5",
-			fields: map[string]any{
-				".a.b.c.d.e": "deep",
-				".a.b.c.f":   "shallow",
-			},
-			group:   "example.com",
-			version: "v1",
-			kind:    "CustomResource",
-			expected: map[string]any{
-				"apiVersion": "example.com/v1",
-				"kind":       "CustomResource",
-				"a": map[string]any{
-					"b": map[string]any{
-						"c": map[string]any{
-							"d": map[string]any{
-								"e": "deep",
-							},
-							"f": "shallow",
-						},
-					},
-				},
-				"_tenant":      "platform",
-				"_tenant_type": "platform",
-			},
-		},
-		{
-			name: "special characters in keys",
-			fields: map[string]any{
-				".metadata.annotations['example.com/managed-by']": "controller",
-				".metadata.labels['app.kubernetes.io/name']":      "myapp",
-				".data['config.json']":                            "{}",
-			},
-			group:   "",
-			version: "v1",
-			kind:    "ConfigMap",
 			expected: map[string]any{
 				"apiVersion": "v1",
 				"kind":       "ConfigMap",
 				"metadata": map[string]any{
+					"name":      "cfg",
+					"namespace": "ns",
+					"labels":    map[string]any{"app": "search"},
+				},
+				"data":         map[string]any{"extra-key": "extra-value"},
+				"_tenant":      "platform",
+				"_tenant_type": "platform",
+			},
+		},
+		{
+			name: "nil Object produces minimal document with overlays only",
+			result: &EvalResult{
+				Matched: true,
+				Object:  nil,
+				Group:   "apps",
+				Version: "v1",
+				Kind:    "Deployment",
+			},
+			expected: map[string]any{
+				"apiVersion":   "apps/v1",
+				"kind":         "Deployment",
+				"_tenant":      "platform",
+				"_tenant_type": "platform",
+			},
+		},
+		{
+			name: "Secret data and stringData are stripped; other fields preserved",
+			result: &EvalResult{
+				Matched: true,
+				Object: map[string]any{
+					"apiVersion": "v1",
+					"kind":       "Secret",
+					"metadata": map[string]any{
+						"name":   "my-secret",
+						"labels": map[string]any{"app": "auth"},
+					},
+					"type": "kubernetes.io/tls",
+					"data": map[string]any{
+						"tls.crt": "REDACTED",
+						"tls.key": "REDACTED",
+					},
+					"stringData": map[string]any{
+						"password": "hunter2",
+					},
+				},
+				Group:   "",
+				Version: "v1",
+				Kind:    "Secret",
+			},
+			expected: map[string]any{
+				"apiVersion": "v1",
+				"kind":       "Secret",
+				"metadata": map[string]any{
+					"name":   "my-secret",
+					"labels": map[string]any{"app": "auth"},
+				},
+				"type":         "kubernetes.io/tls",
+				"_tenant":      "platform",
+				"_tenant_type": "platform",
+			},
+		},
+		{
+			name: "last-applied-configuration annotation is stripped; other annotations preserved",
+			result: &EvalResult{
+				Matched: true,
+				Object: map[string]any{
+					"apiVersion": "apps/v1",
+					"kind":       "Deployment",
+					"metadata": map[string]any{
+						"name": "my-deploy",
+						"annotations": map[string]any{
+							"kubectl.kubernetes.io/last-applied-configuration": `{"apiVersion":"apps/v1","kind":"Deployment"}`,
+							"custom.io/owner": "team-a",
+						},
+					},
+				},
+				Group:   "apps",
+				Version: "v1",
+				Kind:    "Deployment",
+			},
+			expected: map[string]any{
+				"apiVersion": "apps/v1",
+				"kind":       "Deployment",
+				"metadata": map[string]any{
+					"name": "my-deploy",
 					"annotations": map[string]any{
-						"example.com/managed-by": "controller",
-					},
-					"labels": map[string]any{
-						"app.kubernetes.io/name": "myapp",
-					},
-				},
-				"data": map[string]any{
-					"config.json": "{}",
-				},
-				"_tenant":      "platform",
-				"_tenant_type": "platform",
-			},
-		},
-		{
-			name: "root level keys without dot",
-			fields: map[string]any{
-				"kind":       "Service",
-				"apiVersion": "v1",
-			},
-			group:   "",
-			version: "v2", // Policy version should overwrite the one from fields
-			kind:    "ServiceOverride",
-			expected: map[string]any{
-				"kind":         "ServiceOverride",
-				"apiVersion":   "v2",
-				"_tenant":      "platform",
-				"_tenant_type": "platform",
-			},
-		},
-		{
-			name: "multiple bracket segments",
-			fields: map[string]any{
-				".spec['selector']['app']": "foo",
-				".data['key']['subkey']":   "bar",
-			},
-			group:   "",
-			version: "v1",
-			kind:    "ConfigMap",
-			expected: map[string]any{
-				"apiVersion": "v1",
-				"kind":       "ConfigMap",
-				"spec": map[string]any{
-					"selector": map[string]any{
-						"app": "foo",
-					},
-				},
-				"data": map[string]any{
-					"key": map[string]any{
-						"subkey": "bar",
+						"custom.io/owner": "team-a",
 					},
 				},
 				"_tenant":      "platform",
 				"_tenant_type": "platform",
 			},
-		},
-		{
-			name: "conflict: scalar vs map (last write wins structurally)",
-			fields: map[string]any{
-				".a":   "scalar-value", // This sets "a" = "scalar-value"
-				".a.b": "nested-value", // This requires "a" to be a map. Logic should overwrite "a" with map {"b": "nested-value"}
-			},
-			group:    "x",
-			version:  "v1",
-			kind:     "Y",
-			expected: nil, // skip
 		},
 	}
 
 	for _, tt := range tests {
-		if tt.expected == nil {
-			continue
-		}
 		t.Run(tt.name, func(t *testing.T) {
-			r := &EvalResult{
-				Matched: true,
-				Fields:  tt.fields,
-				Group:   tt.group,
-				Version: tt.version,
-				Kind:    tt.kind,
-			}
-			doc := r.Transform()
-
-			// Use assert.Equal which compares map structure values deeply
+			doc := tt.result.Transform()
 			assert.Equal(t, tt.expected, doc)
-
-			// Debug output for visual verification
-			b, _ := json.MarshalIndent(doc, "", "  ")
-			t.Logf("Result: %s", string(b))
 		})
 	}
+}
+
+// TestEvalResult_Transform_SourceNotMutated verifies that calling Transform()
+// does not modify the caller's original u.Object map.
+func TestEvalResult_Transform_SourceNotMutated(t *testing.T) {
+	sourceObject := map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Pod",
+		"metadata": map[string]any{
+			"name": "my-pod",
+			"managedFields": []any{
+				map[string]any{"manager": "kubectl"},
+			},
+		},
+		"spec": map[string]any{"nodeName": "node-1"},
+	}
+
+	// Snapshot what we expect the source to look like (unchanged) after Transform.
+	snapshotMeta := map[string]any{
+		"name": "my-pod",
+		"managedFields": []any{
+			map[string]any{"manager": "kubectl"},
+		},
+	}
+
+	r := &EvalResult{
+		Matched: true,
+		Object:  sourceObject,
+		Group:   "",
+		Version: "v1",
+		Kind:    "Pod",
+	}
+
+	doc := r.Transform()
+
+	// The doc must NOT have managedFields.
+	require.IsType(t, map[string]any{}, doc["metadata"])
+	docMeta := doc["metadata"].(map[string]any)
+	assert.NotContains(t, docMeta, "managedFields", "doc should have managedFields stripped")
+
+	// The source object's metadata must still have managedFields intact.
+	sourceMeta, ok := sourceObject["metadata"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, snapshotMeta, sourceMeta, "source metadata must be unchanged after Transform()")
+}
+
+// TestEvalResult_Transform_SecretSourceNotMutated verifies that calling Transform()
+// on a Secret does not remove data/stringData from the caller's original object.
+func TestEvalResult_Transform_SecretSourceNotMutated(t *testing.T) {
+	secretData := map[string]any{"password": "s3cr3t"}
+	secretStringData := map[string]any{"token": "abc123"}
+	sourceObject := map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Secret",
+		"metadata": map[string]any{
+			"name": "my-secret",
+		},
+		"type":       "Opaque",
+		"data":       secretData,
+		"stringData": secretStringData,
+	}
+
+	r := &EvalResult{
+		Matched: true,
+		Object:  sourceObject,
+		Group:   "",
+		Version: "v1",
+		Kind:    "Secret",
+	}
+
+	doc := r.Transform()
+
+	// The doc must NOT contain data or stringData.
+	assert.NotContains(t, doc, "data", "doc should have Secret data stripped")
+	assert.NotContains(t, doc, "stringData", "doc should have Secret stringData stripped")
+
+	// The source object must still have data and stringData intact.
+	assert.Equal(t, secretData, sourceObject["data"], "source Secret data must be unchanged after Transform()")
+	assert.Equal(t, secretStringData, sourceObject["stringData"], "source Secret stringData must be unchanged after Transform()")
 }

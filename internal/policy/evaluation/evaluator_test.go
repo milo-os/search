@@ -130,11 +130,13 @@ func TestEvaluate(t *testing.T) {
 	require.NoError(t, err)
 
 	type testCase struct {
-		name           string
-		policy         *v1alpha1.ResourceIndexPolicy
-		resource       *unstructured.Unstructured
-		expectedMatch  bool
-		expectedFields map[string]any
+		name          string
+		policy        *v1alpha1.ResourceIndexPolicy
+		resource      *unstructured.Unstructured
+		expectedMatch bool
+		// expectedObject is only checked when expectedMatch is true. nil means
+		// "don't check the object contents" (e.g. conditions-only tests).
+		expectedObject map[string]any
 	}
 
 	// Helper to compile conditions
@@ -175,8 +177,7 @@ func TestEvaluate(t *testing.T) {
 					"kind":       "Service",
 				},
 			},
-			expectedMatch:  false,
-			expectedFields: map[string]any{},
+			expectedMatch: false,
 		},
 		{
 			name: "Match with simple condition",
@@ -206,8 +207,13 @@ func TestEvaluate(t *testing.T) {
 				},
 			},
 			expectedMatch: true,
-			expectedFields: map[string]any{
-				".metadata.name": "my-config",
+			expectedObject: map[string]any{
+				"apiVersion": "v1",
+				"kind":       "ConfigMap",
+				"metadata": map[string]any{
+					"name":   "my-config",
+					"labels": map[string]any{"env": "prod"},
+				},
 			},
 		},
 		{
@@ -234,8 +240,7 @@ func TestEvaluate(t *testing.T) {
 					},
 				},
 			},
-			expectedMatch:  false,
-			expectedFields: map[string]any{},
+			expectedMatch: false,
 		},
 		{
 			name: "Match with multiple conditions (OR semantics) - first matches",
@@ -261,8 +266,7 @@ func TestEvaluate(t *testing.T) {
 					},
 				},
 			},
-			expectedMatch:  true,
-			expectedFields: map[string]any{},
+			expectedMatch: true,
 		},
 		{
 			name: "Match with multiple conditions (OR semantics) - second matches",
@@ -288,11 +292,10 @@ func TestEvaluate(t *testing.T) {
 					},
 				},
 			},
-			expectedMatch:  true,
-			expectedFields: map[string]any{},
+			expectedMatch: true,
 		},
 		{
-			name: "Field extraction with nested and missing fields",
+			name: "Full object stored on match (including non-policy fields)",
 			policy: &v1alpha1.ResourceIndexPolicy{
 				Spec: v1alpha1.ResourceIndexPolicySpec{
 					TargetResource: v1alpha1.TargetResource{
@@ -303,25 +306,19 @@ func TestEvaluate(t *testing.T) {
 					Conditions: []v1alpha1.PolicyCondition{
 						{Name: "all", Expression: "true"},
 					},
-					Fields: []v1alpha1.FieldPolicy{
-						{Path: ".spec.replicas"},
-						{Path: ".spec.template.spec.containers[0].image"},
-						{Path: ".status.availableReplicas"}, // Missing in resource
-					},
 				},
 			},
 			resource: &unstructured.Unstructured{
 				Object: map[string]any{
 					"apiVersion": "apps/v1",
 					"kind":       "Deployment",
+					"metadata": map[string]any{"name": "my-deploy", "namespace": "default"},
 					"spec": map[string]any{
 						"replicas": int64(3),
 						"template": map[string]any{
 							"spec": map[string]any{
 								"containers": []any{
-									map[string]any{
-										"image": "nginx:latest",
-									},
+									map[string]any{"image": "nginx:latest"},
 								},
 							},
 						},
@@ -329,9 +326,21 @@ func TestEvaluate(t *testing.T) {
 				},
 			},
 			expectedMatch: true,
-			expectedFields: map[string]any{
-				".spec.replicas": int64(3),
-				".spec.template.spec.containers[0].image": "nginx:latest",
+			// No Fields declared; full source object is stored regardless of declared field surface.
+			expectedObject: map[string]any{
+				"apiVersion": "apps/v1",
+				"kind":       "Deployment",
+				"metadata":   map[string]any{"name": "my-deploy", "namespace": "default"},
+				"spec": map[string]any{
+					"replicas": int64(3),
+					"template": map[string]any{
+						"spec": map[string]any{
+							"containers": []any{
+								map[string]any{"image": "nginx:latest"},
+							},
+						},
+					},
+				},
 			},
 		},
 		{
@@ -362,8 +371,7 @@ func TestEvaluate(t *testing.T) {
 			// If spec is missing, activation won't have "spec".
 			// Expr "spec.restartPolicy" refers to variable "spec".
 			// Since "spec" is missing from activation, Eval will return error: "undeclared reference to 'spec'".
-			expectedMatch:  false,
-			expectedFields: map[string]any{},
+			expectedMatch: false,
 		},
 		{
 			name: "Multiple conditions (OR), none match",
@@ -383,60 +391,14 @@ func TestEvaluate(t *testing.T) {
 					"metadata":   map[string]any{"name": "my-pod"},
 				},
 			},
-			expectedMatch:  false,
-			expectedFields: map[string]any{},
+			expectedMatch: false,
 		},
 		{
-			name: "Complex nested array and map extraction",
+			name: "No conditions — unconditional match stores full object",
 			policy: &v1alpha1.ResourceIndexPolicy{
 				Spec: v1alpha1.ResourceIndexPolicySpec{
 					TargetResource: v1alpha1.TargetResource{Group: "", Version: "v1", Kind: "Pod"},
-					Conditions: []v1alpha1.PolicyCondition{
-						{Name: "all", Expression: "true"},
-					},
-					Fields: []v1alpha1.FieldPolicy{
-						{Path: ".spec.containers[1].ports[0].containerPort"},
-						{Path: ".spec.volumes[0].name"},
-					},
-				},
-			},
-			resource: &unstructured.Unstructured{
-				Object: map[string]any{
-					"apiVersion": "v1",
-					"kind":       "Pod",
-					"spec": map[string]any{
-						"containers": []any{
-							map[string]any{"name": "c1"}, // index 0
-							map[string]any{ // index 1
-								"name": "c2",
-								"ports": []any{
-									map[string]any{"containerPort": int64(8080)},
-								},
-							},
-						},
-						"volumes": []any{
-							map[string]any{"name": "vol1"},
-						},
-					},
-				},
-			},
-			expectedMatch: true,
-			expectedFields: map[string]any{
-				".spec.containers[1].ports[0].containerPort": int64(8080),
-				".spec.volumes[0].name":                      "vol1",
-			},
-		},
-		{
-			name: "Field extraction edge cases: index out of bounds, type mismatch",
-			policy: &v1alpha1.ResourceIndexPolicy{
-				Spec: v1alpha1.ResourceIndexPolicySpec{
-					TargetResource: v1alpha1.TargetResource{Group: "", Version: "v1", Kind: "Pod"},
-					Conditions:     []v1alpha1.PolicyCondition{{Name: "all", Expression: "true"}},
-					Fields: []v1alpha1.FieldPolicy{
-						{Path: ".spec.containers[99].name"}, // Index out of bounds
-						{Path: ".spec.containers.name"},     // Treating array as map
-						{Path: ".metadata.name[0]"},         // Treating string as array
-					},
+					// No Conditions
 				},
 			},
 			resource: &unstructured.Unstructured{
@@ -444,15 +406,16 @@ func TestEvaluate(t *testing.T) {
 					"apiVersion": "v1",
 					"kind":       "Pod",
 					"metadata":   map[string]any{"name": "my-pod"},
-					"spec": map[string]any{
-						"containers": []any{
-							map[string]any{"name": "c1"},
-						},
-					},
+					"spec":       map[string]any{"nodeName": "node-1"},
 				},
 			},
-			expectedMatch:  true,
-			expectedFields: map[string]any{}, // None should be extracted
+			expectedMatch: true,
+			expectedObject: map[string]any{
+				"apiVersion": "v1",
+				"kind":       "Pod",
+				"metadata":   map[string]any{"name": "my-pod"},
+				"spec":       map[string]any{"nodeName": "node-1"},
+			},
 		},
 	}
 
@@ -463,8 +426,18 @@ func TestEvaluate(t *testing.T) {
 			require.NoError(t, err) // Evaluate currently returns nil error always
 
 			assert.Equal(t, tt.expectedMatch, result.Matched, "Matched status mismatch")
-			if tt.expectedMatch {
-				assert.Equal(t, tt.expectedFields, result.Fields, "Fields mismatch")
+
+			if !tt.expectedMatch {
+				assert.Nil(t, result.Object, "Object should be nil when not matched")
+				return
+			}
+
+			// When matched: Object must be set
+			assert.NotNil(t, result.Object, "Object must be set when matched")
+
+			// When the test provides an expected object shape, verify it exactly
+			if tt.expectedObject != nil {
+				assert.Equal(t, tt.expectedObject, result.Object, "Object mismatch")
 			}
 		})
 	}

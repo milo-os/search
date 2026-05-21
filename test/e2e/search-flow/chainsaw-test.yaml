@@ -4,11 +4,13 @@ metadata:
   name: search-flow
 spec:
   description: |
-    End-to-end tests for the full search flow using the Kubernetes aggregated API
-    (ResourceSearchQuery). Targets Secrets to avoid ResourceIndexPolicy conflicts
-    with parallel test suites. Covers happy paths (H1: search by name, H2: search
-    by annotation, H3: CEL condition matching) and negative paths (N1: empty results,
-    N2: CEL condition exclusion, N3: duplicate field path rejection).
+    End-to-end tests for the full search flow using the Kubernetes aggregated
+    API (ResourceSearchQuery). Targets Secrets to avoid ResourceIndexPolicy
+    conflicts with parallel test suites. Covers happy paths (H1: search by
+    name, H2: search by annotation, H3: CEL condition matching), full index
+    state (F1: non-policy field present in returned hit, F2: full-doc indexing
+    must not widen the searchable surface) negative paths (N1: empty results,
+    N2: CEL condition exclusion , N3: duplicate field path rejection).
 
   namespace: default
 
@@ -87,7 +89,7 @@ spec:
                 value: "True"
 
     # =========================================================================
-    # Step 3: Create the primary indexed Secret (for H1, H2, H3)
+    # Step 3: Create the primary indexed Secret (for H1, H2, H3, F1, F2)
     # =========================================================================
     - name: create-indexed-secret
       description: "Creates Secret in default namespace that matches the policy condition"
@@ -101,6 +103,8 @@ spec:
               kubectl annotate -f - --local -o yaml \
                 e2e.search.test/description=unique-e2e-search-description-alpha7 \
                 e2e.search.test/app-label=e2e-app-value | \
+              kubectl label -f - --local -o yaml \
+                e2e-invisible-label=notindexed-unique-xq7 | \
               kubectl apply -f -
             check:
               ($error): ~
@@ -213,6 +217,52 @@ spec:
               EOF
               )
               echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-search-target-secret")] | length > 0'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # F1: Full-document indexing — non-policy field present in returned hit
+    # =========================================================================
+    - name: F1-full-doc-hit-contains-non-policy-fields
+      description: "F1: Hit document must contain fields not declared in the policy (full-doc indexing)"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: f1-full-doc-check
+              spec:
+                targetResources:
+                  - group: ""
+                    version: v1
+                    kind: Secret
+                query: "e2e-search-target-secret"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-search-target-secret") | select(.resource.metadata.namespace == "default")] | length > 0' && \
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-search-target-secret") | select(.resource.metadata.labels["e2e-invisible-label"] == "notindexed-unique-xq7")] | length > 0'
+            check:
+              ($error): ~
+
+    # =========================================================================
+    # F2: full-doc indexing must not widen the searchable surface
+    # =========================================================================
+    - name: F2-index-searchable-attributes-match-policy
+      description: "F2: full-doc indexing must not widen the searchable surface"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl exec -n meilisearch-system meilisearch-0 -- \
+                curl -sf \
+                  -H "Authorization: Bearer search-master-key" \
+                  http://localhost:7700/indexes/_v1_Secret/settings/searchable-attributes \
+              | jq -e --argjson exp '["metadata.annotations.e2e.search.test/app-label","metadata.annotations.e2e.search.test/description","metadata.name"]' \
+                  'sort == ($exp | sort)'
             check:
               ($error): ~
 
