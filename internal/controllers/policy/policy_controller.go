@@ -265,12 +265,19 @@ func (r *ResourceIndexPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		desiredAttributes := []string{}
 		for _, f := range policy.Spec.Fields {
 			if f.Searchable {
-				// ParsePath handles bracket notation (e.g. ".metadata.annotations['key']")
-				// and returns segments that are joined with dots to produce the
-				// Meilisearch-compatible attribute name (e.g. "metadata.annotations.key").
-				segments := evaluation.ParsePath(f.Path)
-				if len(segments) > 0 {
-					desiredAttributes = append(desiredAttributes, strings.Join(segments, "."))
+				// Drop "*" segments: Meilisearch traverses arrays automatically for dotted paths.
+				raw := evaluation.ParsePath(f.Path)
+				if len(raw) == 0 {
+					continue
+				}
+				filtered := make([]string, 0, len(raw))
+				for _, seg := range raw {
+					if seg != "*" {
+						filtered = append(filtered, seg)
+					}
+				}
+				if len(filtered) > 0 {
+					desiredAttributes = append(desiredAttributes, strings.Join(filtered, "."))
 				}
 			}
 		}

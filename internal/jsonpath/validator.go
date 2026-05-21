@@ -10,7 +10,8 @@ import (
 // - .fieldName (identifier starting with letter or underscore)
 // - ["key"] or ['key'] (bracket notation for map keys)
 // - [0] (array index)
-var segmentRegex = regexp.MustCompile(`^(\.[a-zA-Z_][a-zA-Z0-9_]*|\[["'][^"']+["']\]|\[[0-9]+\])`)
+// - [*] (array traversal; every element)
+var segmentRegex = regexp.MustCompile(`^(\.[a-zA-Z_][a-zA-Z0-9_]*|\[["'][^"']+["']\]|\[[0-9]+\]|\[\*\])`)
 
 // Validator provides JSONPath validation functionality.
 type Validator struct{}
@@ -26,6 +27,7 @@ func NewValidator() *Validator {
 //   - .metadata.labels["app"]
 //   - .spec.containers[0].name
 //   - .metadata.annotations["kubernetes.io/name"]
+//   - .spec.ports[*].name
 //
 // Returns an error message if invalid, empty string if valid.
 func (v *Validator) Validate(path string) string {
