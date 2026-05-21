@@ -95,7 +95,7 @@ func schema_pkg_apis_search_v1alpha1_FieldPolicy(ref common.ReferenceCallback) c
 				Properties: map[string]spec.Schema{
 					"path": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Path is the JSONPath to the field value. Supports nested paths and map key access using bracket notation.",
+							Description: "Path is the JSONPath to the field value. Supports nested paths and map key access using bracket notation. Supported syntax:\n  - .fieldName           — dot-notation field access\n  - [\"key\"] or ['key']   — bracket notation for map keys (including keys with special characters)\n  - [0]                  — numeric array index\n  - [*]                  — array traversal (every element)",
 							Default:     "",
 							Type:        []string{"string"},
 							Format:      "",

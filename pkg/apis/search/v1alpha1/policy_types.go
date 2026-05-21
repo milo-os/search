@@ -99,6 +99,11 @@ type PolicyCondition struct {
 type FieldPolicy struct {
 	// Path is the JSONPath to the field value.
 	// Supports nested paths and map key access using bracket notation.
+	// Supported syntax:
+	//   - .fieldName           — dot-notation field access
+	//   - ["key"] or ['key']   — bracket notation for map keys (including keys with special characters)
+	//   - [0]                  — numeric array index
+	//   - [*]                  — array traversal (every element)
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256

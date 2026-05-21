@@ -68,6 +68,27 @@ func TestParsePath(t *testing.T) {
 			input:    ".metadata.labels['app.kubernetes.io/name']",
 			expected: []string{"metadata", "labels", "app.kubernetes.io/name"},
 		},
+		// Wildcard tests
+		{
+			name:     "wildcard single level",
+			input:    ".spec.ports[*].name",
+			expected: []string{"spec", "ports", "*", "name"},
+		},
+		{
+			name:     "wildcard nested double",
+			input:    ".spec.containers[*].ports[*].name",
+			expected: []string{"spec", "containers", "*", "ports", "*", "name"},
+		},
+		{
+			name:     "wildcard at end of path",
+			input:    ".spec.items[*]",
+			expected: []string{"spec", "items", "*"},
+		},
+		{
+			name:     "mixed wildcard and numeric index",
+			input:    ".spec.ports[*].name",
+			expected: []string{"spec", "ports", "*", "name"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -113,12 +134,71 @@ func TestMeilisearchAttributeName(t *testing.T) {
 			path:     ".data['config.yaml']",
 			expected: "data.config.yaml",
 		},
+		// Wildcard attribute names — callers filter "*" before Join.
+		{
+			name:     "wildcard single level — raw segments include star",
+			path:     ".spec.ports[*].name",
+			expected: "spec.ports.*.name", // raw join; controller filters "*" before this
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			segments := ParsePath(tt.path)
 			result := strings.Join(segments, ".")
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestWildcardMeilisearchAttribute mirrors the controller's path-to-attribute translation.
+func TestWildcardMeilisearchAttribute(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		expected string
+	}{
+		{
+			name:     "single wildcard",
+			path:     ".spec.ports[*].name",
+			expected: "spec.ports.name",
+		},
+		{
+			name:     "double nested wildcard",
+			path:     ".spec.containers[*].ports[*].name",
+			expected: "spec.containers.ports.name",
+		},
+		{
+			name:     "wildcard mixed with bracket label",
+			path:     ".spec.ports[*]['name']",
+			expected: "spec.ports.name",
+		},
+		{
+			name:     "numeric index translation unchanged",
+			path:     ".spec.ports[0].port",
+			expected: "spec.ports.0.port",
+		},
+		{
+			name:     "no wildcards unchanged",
+			path:     ".metadata.name",
+			expected: "metadata.name",
+		},
+	}
+
+	filterAndJoin := func(path string) string {
+		raw := ParsePath(path)
+		filtered := make([]string, 0, len(raw))
+		for _, seg := range raw {
+			if seg != "*" {
+				filtered = append(filtered, seg)
+			}
+		}
+		return strings.Join(filtered, ".")
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := filterAndJoin(tt.path)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
