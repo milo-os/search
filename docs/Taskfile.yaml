@@ -3,6 +3,8 @@ version: '3'
 vars:
   DIAGRAMS_DIR: "{{.ROOT_DIR}}/docs/diagrams"
   OUTPUT_FORMAT: "png"
+  # renovate: datasource=docker depName=plantuml/plantuml
+  PLANTUML_IMAGE: plantuml/plantuml:1.2026.4
 
 tasks:
   generate:
@@ -34,7 +36,7 @@ tasks:
         # Render using Docker (no local installation required)
         docker run --rm \
           -v "{{.DIAGRAMS_DIR}}":/data \
-          plantuml/plantuml:latest \
+          {{.PLANTUML_IMAGE}} \
           -t{{.OUTPUT_FORMAT}} \
           /data/*.puml
 
@@ -61,7 +63,7 @@ tasks:
         echo "Validating PlantUML diagrams..."
         docker run --rm \
           -v "{{.DIAGRAMS_DIR}}":/data \
-          plantuml/plantuml:latest \
+          {{.PLANTUML_IMAGE}} \
           -syntax \
           /data/*.puml
         echo "✅ All diagrams are valid"
