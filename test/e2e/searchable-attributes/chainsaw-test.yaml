@@ -8,7 +8,8 @@ spec:
     (e.g. .metadata.annotations['key'], .spec.selector['app']) are correctly
     translated to dot-notation Meilisearch searchable attributes, and that
     resources indexed via those paths can be found by search queries.
-    Also verifies spec and status field indexing.
+    Also verifies spec and status field indexing, and that [*] array-traversal
+    in field paths indexes every element (not just index 0).
 
   namespace: default
 
@@ -64,6 +65,7 @@ spec:
 
     # =========================================================================
     # Step 2: Create a Service with spec fields (bracket notation labels/selector)
+    # Two named ports allow wildcard [*] assertions to be meaningful.
     # =========================================================================
     - name: create-service-with-labels
       description: "Creates a Service whose spec and status fields will be indexed"
@@ -83,9 +85,14 @@ spec:
                 selector:
                   app: frontend
                 ports:
-                  - port: 80
+                  - name: http-frontend
+                    port: 80
                     targetPort: 8080
-                    name: http
+                    protocol: TCP
+                  - name: grpc-backend
+                    port: 9090
+                    targetPort: 9090
+                    protocol: TCP
 
     # =========================================================================
     # Step 3: Create ResourceIndexPolicy for ConfigMaps
@@ -122,10 +129,11 @@ spec:
 
     # =========================================================================
     # Step 4: Create ResourceIndexPolicy for Services
-    # Indexes spec fields (bracket notation selector/labels) and status field.
+    # Indexes spec fields (bracket notation selector/labels), status field,
+    # and .spec.ports[*].name for [*] array-traversal coverage.
     # =========================================================================
     - name: create-service-policy
-      description: "Creates policy with bracket notation spec fields and status field"
+      description: "Creates policy with bracket notation spec fields, status field, and wildcard port name path"
       try:
         - apply:
             resource:
@@ -153,6 +161,8 @@ spec:
                   - path: ".spec.selector['app']"
                     searchable: true
                   - path: ".status.loadBalancer"
+                    searchable: true
+                  - path: ".spec.ports[*].name"
                     searchable: true
 
     # =========================================================================
@@ -214,7 +224,7 @@ spec:
               (contains($stdout, 'data.config-key')): true
 
     - name: verify-service-searchable-attributes
-      description: "Confirms spec/status paths are stored as dot-notation in Meilisearch"
+      description: "Confirms spec/status paths are stored as dot-notation in Meilisearch, including [*] wildcard path"
       try:
         - script:
             timeout: 30s
@@ -226,6 +236,7 @@ spec:
               (contains($stdout, 'spec.type')): true
               (contains($stdout, 'spec.selector.app')): true
               (contains($stdout, 'status.loadBalancer')): true
+              (contains($stdout, 'spec.ports.name')): true
 
     # =========================================================================
     # Step 8: Search ConfigMaps by annotation values (bracket notation fix)
@@ -275,6 +286,7 @@ spec:
 
     # =========================================================================
     # Step 10: Search Services by spec fields
+    # Includes [*] wildcard port name searches (anti-regression for array traversal).
     # =========================================================================
     - name: search-service-by-spec-type
       description: "Finds Service by spec.type (standard dot-notation spec field)"
@@ -303,6 +315,26 @@ spec:
             timeout: 30s
             content: |
               kubectl run curl-search-sel-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "frontend"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_Service/search
+            check:
+              (contains($stdout, 'e2e-svc-frontend')): true
+
+    - name: search-service-by-port-wildcard-second
+      description: "Finds Service by second port name via .spec.ports[*].name (anti-regression for [*] wildcard)"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl run curl-search-port2-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "grpc-backend"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_Service/search
+            check:
+              (contains($stdout, 'e2e-svc-frontend')): true
+
+    - name: search-service-by-port-wildcard-first
+      description: "Finds Service by first port name via .spec.ports[*].name"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              kubectl run curl-search-port1-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "http-frontend"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_Service/search
             check:
               (contains($stdout, 'e2e-svc-frontend')): true
 
