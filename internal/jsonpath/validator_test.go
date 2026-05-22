@@ -21,6 +21,13 @@ func TestValidatePath(t *testing.T) {
 		{name: "underscore in field name", path: ".spec.my_field", wantErr: false},
 		{name: "mixed bracket and dot", path: `.spec.template.metadata.labels["app.kubernetes.io/name"]`, wantErr: false},
 
+		// Wildcard paths
+		{name: "wildcard single level", path: ".spec.ports[*].name", wantErr: false},
+		{name: "wildcard nested double", path: ".spec.containers[*].ports[*].name", wantErr: false},
+		{name: "wildcard mixed with index", path: ".spec.ports[*].name", wantErr: false},
+		{name: "wildcard at end", path: ".spec.items[*]", wantErr: false},
+		{name: "bracket label with wildcard", path: ".metadata.labels['app']", wantErr: false},
+
 		// Invalid paths
 		{name: "empty path", path: "", wantErr: true},
 		{name: "missing leading dot", path: "spec.name", wantErr: true},

@@ -172,7 +172,13 @@ func ParsePath(path string) []string {
 			if end == -1 {
 				return nil
 			}
-			key := strings.Trim(path[1:end], "\"'")
+			inner := path[1:end]
+			var key string
+			if inner == "*" {
+				key = "*"
+			} else {
+				key = strings.Trim(inner, "\"'")
+			}
 			segments = append(segments, key)
 			path = strings.TrimPrefix(path[end+1:], ".")
 		} else {
