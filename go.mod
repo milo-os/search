@@ -7,7 +7,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/cel-go v0.27.0
 	github.com/google/uuid v1.6.0
-	github.com/meilisearch/meilisearch-go v0.36.1
+	github.com/meilisearch/meilisearch-go v0.36.3
 	github.com/nats-io/nats.go v1.49.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
