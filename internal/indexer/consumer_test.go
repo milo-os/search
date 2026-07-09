@@ -283,3 +283,152 @@ func TestIndexer_Consume_Delete(t *testing.T) {
 
 	mockSearch.AssertExpectations(t)
 }
+
+func TestIndexer_Consume_TerminatingResource_QueuesDelete(t *testing.T) {
+	// Update/patch events on a terminating resource (deletionTimestamp set)
+	// must queue a delete instead of an upsert. The finalizer-removal update is
+	// the terminal audit event for the resource, so an upsert would resurrect
+	// the document the earlier delete event removed.
+	for _, verb := range []string{"update", "patch"} {
+		t.Run(verb, func(t *testing.T) {
+			policy := &v1alpha1.ResourceIndexPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "pod-policy"},
+				Spec: v1alpha1.ResourceIndexPolicySpec{
+					TargetResource: v1alpha1.TargetResource{Kind: "Pod", Version: "v1"},
+					Conditions: []v1alpha1.PolicyCondition{
+						{Name: "all", Expression: "true"},
+					},
+				},
+				Status: v1alpha1.ResourceIndexPolicyStatus{
+					IndexName:  "pod-index",
+					Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}},
+				},
+			}
+
+			env, _ := internalcel.NewEnv()
+			policyCache := &PolicyCache{
+				policies: make(map[string]*policyevaluation.CachedPolicy),
+				celEnv:   env,
+			}
+			policyCache.upsertPolicy(policy)
+
+			mockSearch := new(MockSearchClient)
+			batcher := NewBatcher(mockSearch, BatchConfig{BatchSize: 1, FlushInterval: 1 * time.Minute})
+
+			mockConsumer := new(MockConsumer)
+			mockContext := new(MockConsumeContext)
+			mockContext.On("Stop").Return()
+
+			// The policy would match this resource, but deletionTimestamp is set.
+			event := map[string]interface{}{
+				"verb":    verb,
+				"auditID": "789",
+				"objectRef": map[string]string{
+					"resource": "pods",
+					"name":     "mypod",
+				},
+				"responseObject": map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "Pod",
+					"metadata": map[string]interface{}{
+						"name":              "mypod",
+						"uid":               "pod-uid-terminating",
+						"deletionTimestamp": "2026-07-08T00:00:00Z",
+					},
+				},
+			}
+			eventBytes, _ := json.Marshal(event)
+
+			msg := &MockJetStreamMsg{seq: 102}
+			msg.On("Data").Return(eventBytes)
+			msg.On("Ack").Return(nil)
+
+			mockConsumer.On("Consume", mock.Anything).Return(mockContext, []jetstream.Msg{msg}, nil)
+
+			// Expect Delete on Search Client, and no upsert.
+			mockSearch.On("DeleteDocumentsAsync", "pod-index", mock.MatchedBy(func(ids []string) bool {
+				return len(ids) == 1 && ids[0] == "pod-uid-terminating"
+			})).Return(nil, nil).Once()
+			mockSearch.On("WaitForTasks", mock.Anything).Return(nil, nil).Once()
+
+			indexer := NewIndexer(mockConsumer, policyCache, batcher, false)
+			ctx, cancel := context.WithCancel(context.Background())
+
+			go indexer.Start(ctx)
+			time.Sleep(100 * time.Millisecond)
+			cancel()
+
+			mockSearch.AssertExpectations(t)
+			mockSearch.AssertNotCalled(t, "AddDocumentsAsync", mock.Anything, mock.Anything)
+		})
+	}
+}
+
+func TestIndexer_Consume_UpdateWithoutDeletionTimestamp_Upserts(t *testing.T) {
+	// An update event without deletionTimestamp must still upsert as before.
+	policy := &v1alpha1.ResourceIndexPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-policy"},
+		Spec: v1alpha1.ResourceIndexPolicySpec{
+			TargetResource: v1alpha1.TargetResource{Kind: "Pod", Version: "v1"},
+			Conditions: []v1alpha1.PolicyCondition{
+				{Name: "all", Expression: "true"},
+			},
+		},
+		Status: v1alpha1.ResourceIndexPolicyStatus{
+			IndexName:  "pod-index",
+			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}},
+		},
+	}
+
+	env, _ := internalcel.NewEnv()
+	policyCache := &PolicyCache{
+		policies: make(map[string]*policyevaluation.CachedPolicy),
+		celEnv:   env,
+	}
+	policyCache.upsertPolicy(policy)
+
+	mockSearch := new(MockSearchClient)
+	batcher := NewBatcher(mockSearch, BatchConfig{BatchSize: 1, FlushInterval: 1 * time.Minute})
+
+	mockConsumer := new(MockConsumer)
+	mockContext := new(MockConsumeContext)
+	mockContext.On("Stop").Return()
+
+	event := map[string]interface{}{
+		"verb":    "update",
+		"auditID": "790",
+		"objectRef": map[string]string{
+			"resource": "pods",
+			"name":     "mypod",
+		},
+		"responseObject": map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]interface{}{
+				"name": "mypod",
+				"uid":  "pod-uid-live",
+			},
+		},
+	}
+	eventBytes, _ := json.Marshal(event)
+
+	msg := &MockJetStreamMsg{seq: 103}
+	msg.On("Data").Return(eventBytes)
+	msg.On("Ack").Return(nil)
+
+	mockConsumer.On("Consume", mock.Anything).Return(mockContext, []jetstream.Msg{msg}, nil)
+
+	// Expect Upsert on Search Client, and no delete.
+	mockSearch.On("AddDocumentsAsync", "pod-index", mock.Anything).Return(nil, nil).Once()
+	mockSearch.On("WaitForTasks", mock.Anything).Return(nil, nil).Once()
+
+	indexer := NewIndexer(mockConsumer, policyCache, batcher, false)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go indexer.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	mockSearch.AssertExpectations(t)
+	mockSearch.AssertNotCalled(t, "DeleteDocumentsAsync", mock.Anything, mock.Anything)
+}
