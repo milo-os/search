@@ -6,6 +6,8 @@ import (
 )
 
 // +k8s:openapi-gen=true
+// +genclient
+// +genclient:nonNamespaced
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
