@@ -83,6 +83,17 @@ func (r *ReindexConsumer) processTargetedEvent(msg jetstream.Msg, event ReindexE
 		return
 	}
 
+	// A terminating resource (deletionTimestamp set) must not be searchable:
+	// the audit path treats its terminal finalizer-removal update as a delete,
+	// so a re-index must not resurrect the document. Deleting needs no policy
+	// evaluation, so this is checked before the cache lookup.
+	if obj.GetDeletionTimestamp() != nil {
+		klog.V(4).Infof("ReindexConsumer: resource %s/%s is terminating, deleting from index %s (id=%s)",
+			obj.GetNamespace(), obj.GetName(), event.IndexName, event.ID)
+		r.batcher.QueueDelete(event.IndexName, resourceUID, &msg)
+		return
+	}
+
 	cp := r.policyCache.GetPolicy(event.PolicyName)
 	if cp == nil {
 		// Policy not in cache yet — NAK so the message is redelivered
