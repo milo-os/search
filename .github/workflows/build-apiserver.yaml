@@ -14,7 +14,7 @@ on:
 
 jobs:
   validate-kustomize:
-    uses: datum-cloud/actions/.github/workflows/validate-kustomize.yaml@v1.11.0
+    uses: datum-cloud/actions/.github/workflows/validate-kustomize.yaml@v1.14.0
 
   publish-container-image:
     # No point in trying to build the container image if the deployment
