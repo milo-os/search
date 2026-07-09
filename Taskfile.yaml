@@ -68,6 +68,27 @@ tasks:
         echo "✅ Binary built: {{.TOOL_DIR}}/search"
     silent: true
 
+  build:plugin:
+    desc: Build the milo-search datumctl plugin binary
+    cmds:
+      - |
+        set -e
+        echo "Building milo-search plugin..."
+        mkdir -p {{.TOOL_DIR}}
+
+        # Derive a dev plugin version; goreleaser injects the release tag at
+        # release time via the same -X main.pluginVersion ldflag.
+        GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+        PLUGIN_VERSION="0.0.0-dev+${GIT_COMMIT:0:7}"
+
+        echo "Plugin version: ${PLUGIN_VERSION}"
+
+        go build \
+          -ldflags="-s -w -X 'main.pluginVersion=${PLUGIN_VERSION}'" \
+          -o {{.TOOL_DIR}}/milo-search ./cmd/milo-search
+        echo "✅ Binary built: {{.TOOL_DIR}}/milo-search"
+    silent: true
+
   # Development tasks
   dev:build:
     desc: Build the Search server container image for development
