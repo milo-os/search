@@ -118,22 +118,7 @@ func (i *Indexer) Start(ctx context.Context) error {
 
 		// Handle deletions separately
 		if event.Verb == deleteVerb {
-			docID := resolveUID(&event)
-			if docID == "" {
-				logMissingUIDDetails(&event)
-				msg.Ack()
-				return
-			}
-
-			// Queue delete for all policies since we don't know which one it matched
-			for _, cp := range i.policyCache.GetPolicies() {
-				// Skip if index name is not set yet
-				if cp.Policy.Status.IndexName == "" {
-					continue
-				}
-
-				i.batcher.QueueDelete(cp.Policy.Status.IndexName, docID, &msg)
-			}
+			i.handleDelete(msg, &event)
 			return
 		}
 
@@ -145,6 +130,16 @@ func (i *Indexer) Start(ctx context.Context) error {
 
 		// Build unstructured from responseObject if present
 		obj := &unstructured.Unstructured{Object: event.ResponseObject}
+
+		// Treat create/update/patch events on terminating resources as deletes.
+		// For resources with finalizers, the terminal audit event is the update
+		// that removes the last finalizer (deletionTimestamp still set) — the
+		// physical etcd purge emits no delete-verb event. Upserting here would
+		// resurrect the document the earlier delete event just removed.
+		if obj.GetDeletionTimestamp() != nil {
+			i.handleDelete(msg, &event)
+			return
+		}
 
 		// Attempt to resolve UID using helper
 		resourceUID := resolveUID(&event)
@@ -223,4 +218,26 @@ func (i *Indexer) Start(ctx context.Context) error {
 	<-ctx.Done()
 	klog.Info("Shutting down indexer...")
 	return nil
+}
+
+// handleDelete queues a delete for the event's resource across all policies
+// with an index. It is used for delete-verb events and for create/update/patch
+// events on terminating resources (deletionTimestamp set).
+func (i *Indexer) handleDelete(msg jetstream.Msg, event *auditEvent) {
+	docID := resolveUID(event)
+	if docID == "" {
+		logMissingUIDDetails(event)
+		msg.Ack()
+		return
+	}
+
+	// Queue delete for all policies since we don't know which one it matched
+	for _, cp := range i.policyCache.GetPolicies() {
+		// Skip if index name is not set yet
+		if cp.Policy.Status.IndexName == "" {
+			continue
+		}
+
+		i.batcher.QueueDelete(cp.Policy.Status.IndexName, docID, &msg)
+	}
 }
