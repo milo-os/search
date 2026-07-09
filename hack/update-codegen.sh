@@ -26,6 +26,17 @@ kube::codegen::gen_helpers \
   --boilerplate "${SCRIPT_ROOT}/hack/boilerplate.go.txt" \
   "${SCRIPT_ROOT}/pkg/apis"
 
+# Generate a versioned typed clientset (with fakes) for the search API group.
+# Listers/informers and apply-configurations are intentionally skipped: the CLI
+# plugin only needs a typed client, so --with-watch and --with-applyconfig are
+# omitted to keep the generated surface minimal.
+echo "Generating clientset..."
+kube::codegen::gen_client \
+  --boilerplate "${SCRIPT_ROOT}/hack/boilerplate.go.txt" \
+  --output-dir "${SCRIPT_ROOT}/pkg/generated" \
+  --output-pkg "${MODULE_NAME}/pkg/generated" \
+  "${SCRIPT_ROOT}/pkg/apis"
+
 # Generate OpenAPI definitions
 echo "Generating OpenAPI definitions..."
 go run k8s.io/kube-openapi/cmd/openapi-gen \
@@ -45,4 +56,5 @@ echo "Code generation complete!"
 echo ""
 echo "Generated:"
 echo "  - Deepcopy functions: pkg/apis/search/v1alpha1/zz_generated.deepcopy.go"
+echo "  - Clientset: pkg/generated/clientset/"
 echo "  - OpenAPI: pkg/generated/openapi/"
