@@ -1,0 +1,84 @@
+name: Release Plugin
+
+# Builds and publishes the milo-search datumctl plugin, then opens a PR against
+# the datumctl plugin catalog. This is separate from build-apiserver.yaml (which
+# publishes the search apiserver container image and kustomize bundle) so the
+# plugin release cadence stays independent of the service's.
+
+on:
+  release:
+    types: ["published"]
+
+jobs:
+  # Build and publish the milo-search datumctl plugin as per-platform archives +
+  # checksums.txt, attached as GitHub release assets. The produced asset names
+  # are consumed by the datumctl plugin catalog entry in milo-os/cli-plugins
+  # (plugins/search.yaml).
+  #
+  # Runs ONLY on `release: published`. Publishing a release via the GitHub UI
+  # creates the tag; gating on the release event (rather than the tag ref) makes
+  # this run exactly once and gives goreleaser a real release to attach
+  # artifacts to.
+  publish-plugin:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Syft CLI
+        run: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sudo sh -s -- -b /usr/local/bin
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # After goreleaser attaches the archives + checksums.txt to the release, open
+  # a PR against the datumctl plugin catalog (milo-os/cli-plugins) bumping
+  # plugins/search.yaml to this release: new version, per-platform download URLs,
+  # and refreshed sha256s pulled from checksums.txt.
+  #
+  # One job: mint a short-lived, repo-scoped installation token from the milo-os
+  # GitHub App and hand it straight to the composite action in the same job. A
+  # GitHub App token minted in a separate job and passed via outputs is scrubbed
+  # to empty (masked values don't survive job-to-job hops), so mint + use must
+  # share a job. Gated on the release event (matching publish-plugin) so it runs
+  # once, and depends on publish-plugin so checksums.txt exists before it reads
+  # it. The App's ID and private key are stored as secrets (org-level, shared by
+  # every milo plugin repo); the minted token is repo-scoped and expires ~1h.
+  update-plugin-index:
+    needs:
+      - publish-plugin
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint catalog token from the milo-os GitHub App
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.PLUGIN_INDEX_APP_ID }}
+          private-key: ${{ secrets.PLUGIN_INDEX_APP_PRIVATE_KEY }}
+          owner: milo-os
+          repositories: cli-plugins
+
+      - name: Open the catalog PR
+        uses: datum-cloud/actions/update-plugin-index@v1.18.0
+        with:
+          index-repo: milo-os/cli-plugins
+          plugin-name: search
+          version: ${{ github.event.release.tag_name }}
+          token: ${{ steps.app-token.outputs.token }}
