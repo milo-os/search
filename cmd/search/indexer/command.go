@@ -327,6 +327,14 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 		return fmt.Errorf("failed to get consumer %s: %w", o.NatsAuditConsumerName, err)
 	}
 
+	auditInfo, err := auditConsumer.Info(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get info for consumer %s: %w", o.NatsAuditConsumerName, err)
+	}
+	if err := checkAckWait(o.NatsAuditConsumerName, auditInfo.Config.AckWait, o.BatchAckProgressInterval); err != nil {
+		return err
+	}
+
 	// ── Re-index consumer (separate REINDEX_EVENTS stream) ──────────────────
 	// The stream is declared in config/components/nats-streams/reindex-stream.yaml
 	reindexStream, err := js.Stream(ctx, o.NatsReindexStream)
@@ -338,6 +346,14 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 	reindexJSConsumer, err := reindexStream.Consumer(ctx, o.NatsReindexConsumerName)
 	if err != nil {
 		return fmt.Errorf("failed to get re-index consumer %s: %w", o.NatsReindexConsumerName, err)
+	}
+
+	reindexInfo, err := reindexJSConsumer.Info(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get info for re-index consumer %s: %w", o.NatsReindexConsumerName, err)
+	}
+	if err := checkAckWait(o.NatsReindexConsumerName, reindexInfo.Config.AckWait, o.BatchAckProgressInterval); err != nil {
+		return err
 	}
 
 	// ── Meilisearch client ──────────────────────────────────────────────────
@@ -405,6 +421,35 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 	case <-ctx.Done():
 		return nil
 	}
+}
+
+// checkAckWait checks the heartbeat interval against a consumer's live ackWait,
+// which can disagree with consumerAckWait: the constant tracks the manifest, but
+// the NACK reconcile and this pod's rollout are not ordered, and whether NACK
+// applies an AckWait change to an existing durable consumer is unverified, so a
+// long-lived consumer can still be running with the value it was created with.
+//
+// The rule is deliberately looser than Validate()'s. Failing on the 3x margin
+// would crashloop every pod of a rollout that landed before the consumer was
+// reconciled, taking down indexing to protect it. So a shortfall against the 3x
+// margin is only a warning: the batch still gets heartbeats, just with less room
+// for one to be lost. It is an error only when fewer than two heartbeats fit in
+// the window, where a single delayed tick means JetStream redelivers messages
+// that are still being indexed.
+func checkAckWait(name string, ackWait time.Duration, progress time.Duration) error {
+	klog.Infof("Consumer %s has a live ackWait of %s; heartbeating in-flight batches every %s", name, ackWait, progress)
+
+	if budget := 2 * progress; budget > ackWait {
+		return fmt.Errorf("consumer %s has a live ackWait of %s, but 2 * batch-ack-progress-interval is %s, so a heartbeat can miss the window entirely: lower batch-ack-progress-interval or bring the consumer up to the %s the manifest expects",
+			name, ackWait, budget, consumerAckWait)
+	}
+
+	if budget := 3 * progress; budget > ackWait {
+		klog.Warningf("Consumer %s has a live ackWait of %s, which is under the %s that 3 * batch-ack-progress-interval (%s) wants: heartbeats still fit, but only just. Expected the manifest value of %s; check whether the consumer has been reconciled.",
+			name, ackWait, budget, progress, consumerAckWait)
+	}
+
+	return nil
 }
 
 // serveMetrics starts the Prometheus endpoint and shuts it down when ctx is

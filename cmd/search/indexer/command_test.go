@@ -72,6 +72,65 @@ func TestResourceIndexerOptions_Validate_AckProgressBudget(t *testing.T) {
 	}
 }
 
+// TestCheckAckWait covers the live-ackWait check made against each consumer at
+// startup. The rule is looser than Validate()'s constant-based one: falling
+// short of the 3x margin only warns, because the consumer reconcile and this
+// pod's rollout are not ordered and a hard failure would crashloop the rollout.
+// Fewer than two heartbeats in the window is an error.
+func TestCheckAckWait(t *testing.T) {
+	tests := []struct {
+		name     string
+		ackWait  time.Duration
+		progress time.Duration
+		wantErr  bool
+	}{
+		{
+			name:     "shipped manifest ackWait with the default heartbeat",
+			ackWait:  300 * time.Second,
+			progress: 60 * time.Second,
+			wantErr:  false,
+		},
+		{
+			name:     "live consumer still on the old 120s ackWait warns but starts",
+			ackWait:  120 * time.Second,
+			progress: 60 * time.Second,
+			wantErr:  false,
+		},
+		{
+			name:     "fewer than two heartbeats fit",
+			ackWait:  100 * time.Second,
+			progress: 60 * time.Second,
+			wantErr:  true,
+		},
+		{
+			name:     "exactly at the 3x margin",
+			ackWait:  180 * time.Second,
+			progress: 60 * time.Second,
+			wantErr:  false,
+		},
+		{
+			name:     "one second under two heartbeats",
+			ackWait:  119 * time.Second,
+			progress: 60 * time.Second,
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkAckWait("search-indexer", tt.ackWait, tt.progress)
+			if tt.wantErr && err == nil {
+				t.Fatalf("checkAckWait(_, %s, %s) = nil, want an error: 2 * %s = %s exceeds the live ackWait",
+					tt.ackWait, tt.progress, tt.progress, 2*tt.progress)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("checkAckWait(_, %s, %s) = %v, want no error: 2 * %s = %s is within the live ackWait",
+					tt.ackWait, tt.progress, err, tt.progress, 2*tt.progress)
+			}
+		})
+	}
+}
+
 // consumerManifest is the subset of the JetStream Consumer manifest fields
 // this test needs.
 type consumerManifest struct {

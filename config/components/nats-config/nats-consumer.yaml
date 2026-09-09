@@ -18,10 +18,10 @@ spec:
   maxAckPending: 1000000
   # ReplayPolicy indicates that the consumer will replay messages from the stream
   replayPolicy: instant
-  # Keep ackWait comfortably above 2x the indexer's
-  # --meilisearch-task-wait-timeout (default 60s): a queued batch can block that
-  # long waiting for a flush slot and that long again on its own Meilisearch
-  # task wait, while prefetched messages age the whole time.
+  # Must be at least 3x the indexer's --batch-ack-progress-interval (default
+  # 60s) so a heartbeat always lands inside the window; the indexer checks that
+  # against its compiled mirror of this value (cmd/search/indexer) at startup,
+  # and against the live consumer once connected.
   ackWait: 300s
 ---
 apiVersion: jetstream.nats.io/v1beta2
@@ -39,5 +39,5 @@ spec:
   maxAckPending: 1000000
   # ReplayPolicy indicates that the consumer will replay messages from the stream
   replayPolicy: instant
-  # Same 240s worst-case flush budget as search-indexer; see the note there.
+  # Same heartbeat invariant as search-indexer; see the note there.
   ackWait: 300s
