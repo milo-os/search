@@ -4,3 +4,4 @@ kind: Component
 resources:
   # ServiceMonitors for metrics collection
   - servicemonitors/search-apiserver-servicemonitor.yaml
+  - servicemonitors/resource-indexer-servicemonitor.yaml
