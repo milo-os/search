@@ -1,6 +1,8 @@
 package meilisearch
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -17,8 +19,13 @@ type SDKConfig struct {
 	Domain string
 	// APIKey is the API key for the Meilisearch instance
 	APIKey string
-	// WaitTimeout is the timeout for waiting for tasks to complete
+	// WaitTimeout bounds how long a wait for Meilisearch task completion may
+	// take before it gives up and returns an error. A non-positive value leaves
+	// the wait unbounded.
 	WaitTimeout time.Duration
+	// PollInterval is how often Meilisearch is polled while waiting for a task
+	// to reach a terminal state. Defaults to 500ms.
+	PollInterval time.Duration
 	// HTTPTimeout is the timeout for HTTP requests
 	HTTPTimeout time.Duration
 	// ChunkSize is the number of documents to process in a single chunk
@@ -30,11 +37,12 @@ type SDKConfig struct {
 }
 
 type SDKClient struct {
-	client      meilisearch.ServiceManager
-	waitTimeout time.Duration
-	chunkSize   int
-	maxRetries  int
-	retryDelay  time.Duration
+	client       meilisearch.ServiceManager
+	waitTimeout  time.Duration
+	pollInterval time.Duration
+	chunkSize    int
+	maxRetries   int
+	retryDelay   time.Duration
 }
 
 func NewSDKClient(config SDKConfig) (*SDKClient, error) {
@@ -80,12 +88,18 @@ func NewSDKClient(config SDKConfig) (*SDKClient, error) {
 		retryDelay = 500 * time.Millisecond
 	}
 
+	pollInterval := config.PollInterval
+	if pollInterval <= 0 {
+		pollInterval = 500 * time.Millisecond
+	}
+
 	return &SDKClient{
-		client:      client,
-		waitTimeout: config.WaitTimeout,
-		chunkSize:   chunkSize,
-		maxRetries:  maxRetries,
-		retryDelay:  retryDelay,
+		client:       client,
+		waitTimeout:  config.WaitTimeout,
+		pollInterval: pollInterval,
+		chunkSize:    chunkSize,
+		maxRetries:   maxRetries,
+		retryDelay:   retryDelay,
 	}, nil
 }
 
@@ -115,7 +129,7 @@ func (s *SDKClient) CreateIndex(uid string) (*meilisearch.Task, error) {
 	}
 
 	// Wait for task to complete for index creation as it's a structural change
-	task, err := s.waitForTask(resp.TaskUID)
+	task, err := s.waitForSingleTask(resp.TaskUID, uid)
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +161,9 @@ func (s *SDKClient) GetIndexCreationTask(indexUID string) (*meilisearch.Task, er
 	return &resp.Results[0], nil
 }
 
-// withRetry executes a function with a simple retry logic for transient network errors.
+// withRetry executes a function with a simple retry logic for connection-level
+// failures that are cheap to retry. Timeouts are deliberately not retried; see
+// the retry predicate below.
 func (s *SDKClient) withRetry(operation string, fn func() (*meilisearch.Task, error)) (*meilisearch.Task, error) {
 	var lastErr error
 	for i := 0; i < s.maxRetries; i++ {
@@ -160,9 +176,14 @@ func (s *SDKClient) withRetry(operation string, fn func() (*meilisearch.Task, er
 			return task, nil
 		}
 		lastErr = err
-		// Only retry on suspected transient network errors
+		// Only retry connection-level failures that are likely to succeed
+		// immediately. Timeouts are excluded on purpose: a request that timed out
+		// means Meilisearch is overloaded, and retrying here holds the flush slot
+		// for the full HTTP timeout again, tripling the stall. The batch is nacked
+		// instead and JetStream redelivery becomes the retry, paced by the
+		// in-flight flush cap.
 		errMsg := err.Error()
-		if !strings.Contains(errMsg, "EOF") && !strings.Contains(errMsg, "connection reset") && !strings.Contains(errMsg, "timeout") {
+		if !strings.Contains(errMsg, "EOF") && !strings.Contains(errMsg, "connection reset") {
 			return nil, err
 		}
 	}
@@ -244,14 +265,19 @@ func (s *SDKClient) processInChunks(totalItems int, chunkSize int, operationName
 }
 
 // WaitForTasks waits for a slice of tasks to complete and returns the last one.
+// All tasks share a single deadline derived from the configured wait timeout, so
+// a large batch cannot stretch the wait without bound.
 func (s *SDKClient) WaitForTasks(tasks []*meilisearch.Task) (*meilisearch.Task, error) {
 	if len(tasks) == 0 {
 		return nil, nil
 	}
 
+	ctx, cancel := s.waitContext(context.Background())
+	defer cancel()
+
 	var lastTask *meilisearch.Task
 	for _, t := range tasks {
-		res, err := s.WaitForTaskCompletion(t)
+		res, err := s.waitForTaskCompletion(ctx, t)
 		if err != nil {
 			return res, err
 		}
@@ -265,7 +291,19 @@ func (s *SDKClient) WaitForTaskCompletion(task *meilisearch.Task) (*meilisearch.
 	if task == nil {
 		return nil, nil
 	}
-	res, err := s.waitForTask(task.TaskUID)
+
+	ctx, cancel := s.waitContext(context.Background())
+	defer cancel()
+
+	return s.waitForTaskCompletion(ctx, task)
+}
+
+// waitForTaskCompletion waits for a task to succeed under the caller's deadline.
+func (s *SDKClient) waitForTaskCompletion(ctx context.Context, task *meilisearch.Task) (*meilisearch.Task, error) {
+	if task == nil {
+		return nil, nil
+	}
+	res, err := s.waitForTask(ctx, task.TaskUID, task.IndexUID)
 	if err != nil {
 		return nil, err
 	}
@@ -282,15 +320,38 @@ func (s *SDKClient) WaitForTaskCompletion(task *meilisearch.Task) (*meilisearch.
 
 // WaitForTask waits for the given task to complete.
 func (s *SDKClient) WaitForTask(taskUid int64) (*meilisearch.Task, error) {
-	return s.waitForTask(taskUid)
+	return s.waitForSingleTask(taskUid, "")
 }
 
-// waitForTask waits for the given task to complete. Internal use.
-func (s *SDKClient) waitForTask(taskUid int64) (*meilisearch.Task, error) {
-	task, err := s.client.WaitForTask(taskUid, s.waitTimeout)
+// waitContext derives a context bounded by the configured wait timeout. A
+// non-positive wait timeout leaves the wait unbounded.
+func (s *SDKClient) waitContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if s.waitTimeout <= 0 {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, s.waitTimeout)
+}
+
+// waitForSingleTask waits for one task with its own timeout budget. Internal use.
+func (s *SDKClient) waitForSingleTask(taskUid int64, indexUID string) (*meilisearch.Task, error) {
+	ctx, cancel := s.waitContext(context.Background())
+	defer cancel()
+
+	return s.waitForTask(ctx, taskUid, indexUID)
+}
+
+// waitForTask polls Meilisearch until the task reaches a terminal state or ctx
+// expires. The context carries the deadline so a batch of tasks can share one;
+// the SDK's second argument is the poll interval, not a timeout. Internal use.
+func (s *SDKClient) waitForTask(ctx context.Context, taskUid int64, indexUID string) (*meilisearch.Task, error) {
+	task, err := s.client.WaitForTaskWithContext(ctx, taskUid, s.pollInterval)
 	if err != nil {
-		klog.Errorf("Failed to wait for task %d: %v", taskUid, err)
-		return nil, fmt.Errorf("failed to wait for task: %w", err)
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			klog.Errorf("Timed out after %s waiting for task %d on index %q", s.waitTimeout, taskUid, indexUID)
+			return nil, fmt.Errorf("timed out after %s waiting for task %d on index %q: %w", s.waitTimeout, taskUid, indexUID, context.DeadlineExceeded)
+		}
+		klog.Errorf("Failed to wait for task %d on index %q: %v", taskUid, indexUID, err)
+		return nil, fmt.Errorf("failed to wait for task %d on index %q: %w", taskUid, indexUID, err)
 	}
 	return task, nil
 }
@@ -370,7 +431,7 @@ func (s *SDKClient) DeleteDocumentsByFilter(indexUID string, filter string) erro
 		return fmt.Errorf("failed to delete documents by filter for index %s: %w", indexUID, err)
 	}
 
-	task, err := s.waitForTask(resp.TaskUID)
+	task, err := s.waitForSingleTask(resp.TaskUID, indexUID)
 	if err != nil {
 		return fmt.Errorf("failed to wait for delete-by-filter task: %w", err)
 	}
@@ -412,7 +473,7 @@ func (s *SDKClient) DeleteAllDocuments(indexUID string) error {
 		return fmt.Errorf("failed to delete all documents from index %s: %w", indexUID, err)
 	}
 
-	task, err := s.waitForTask(resp.TaskUID)
+	task, err := s.waitForSingleTask(resp.TaskUID, indexUID)
 	if err != nil {
 		return fmt.Errorf("failed to wait for document deletion task: %w", err)
 	}
@@ -442,7 +503,7 @@ func (s *SDKClient) DeleteIndex(indexUID string) error {
 		return fmt.Errorf("failed to delete index %s: %w", indexUID, err)
 	}
 
-	task, err := s.waitForTask(resp.TaskUID)
+	task, err := s.waitForSingleTask(resp.TaskUID, indexUID)
 	if err != nil {
 		return fmt.Errorf("failed to wait for index deletion task: %w", err)
 	}

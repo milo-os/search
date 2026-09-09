@@ -4,12 +4,15 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/meilisearch/meilisearch-go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 // MockSearchClient is a mock implementation of the SearchClient interface
@@ -46,6 +49,21 @@ type MockJetStreamMsg struct {
 	mock.Mock
 	jetstream.Msg
 	seq uint64
+
+	// metaErr, when set, makes Metadata() return this error instead of a
+	// sequence. trackMessage cannot dedup a message whose metadata errors, so
+	// every call is treated as unique.
+	metaErr error
+
+	// inProgressErr, when set, is returned by InProgress(), letting tests
+	// exercise the ack-progress heartbeat's error path.
+	inProgressErr error
+
+	nakMu     sync.Mutex
+	nakDelays []time.Duration
+
+	inProgressMu    sync.Mutex
+	inProgressCalls []time.Time
 }
 
 func (m *MockJetStreamMsg) Ack() error {
@@ -53,7 +71,47 @@ func (m *MockJetStreamMsg) Ack() error {
 	return args.Error(0)
 }
 
+// NakWithDelay records the redelivery request. It deliberately does not go
+// through testify expectations so that tests which only care about Ack do not
+// have to declare one on every message.
+func (m *MockJetStreamMsg) NakWithDelay(delay time.Duration) error {
+	m.nakMu.Lock()
+	defer m.nakMu.Unlock()
+	m.nakDelays = append(m.nakDelays, delay)
+	return nil
+}
+
+// NakDelays returns the delays this message was nacked with, in call order.
+func (m *MockJetStreamMsg) NakDelays() []time.Duration {
+	m.nakMu.Lock()
+	defer m.nakMu.Unlock()
+	return append([]time.Duration(nil), m.nakDelays...)
+}
+
+// InProgress records the heartbeat call, in the same tolerant style as
+// NakWithDelay: it does not go through testify expectations so tests
+// exercising the ack-progress heartbeat don't have to declare an expectation
+// for every tick on every message. inProgressErr, when set, is returned to
+// the caller so tests can exercise startAckProgress's error-logging path
+// without failing the flush.
+func (m *MockJetStreamMsg) InProgress() error {
+	m.inProgressMu.Lock()
+	defer m.inProgressMu.Unlock()
+	m.inProgressCalls = append(m.inProgressCalls, time.Now())
+	return m.inProgressErr
+}
+
+// InProgressCalls returns the times InProgress was called, in call order.
+func (m *MockJetStreamMsg) InProgressCalls() []time.Time {
+	m.inProgressMu.Lock()
+	defer m.inProgressMu.Unlock()
+	return append([]time.Time(nil), m.inProgressCalls...)
+}
+
 func (m *MockJetStreamMsg) Metadata() (*jetstream.MsgMetadata, error) {
+	if m.metaErr != nil {
+		return nil, m.metaErr
+	}
 	// Return a static metadata with the sequence ID configured for this mock
 	return &jetstream.MsgMetadata{
 		Sequence: jetstream.SequencePair{
@@ -286,4 +344,225 @@ func TestBatcher_Flush_ErrorHandling(t *testing.T) {
 	msg2.AssertNotCalled(t, "Ack")
 	msg3.AssertNotCalled(t, "Ack")
 	msg4.AssertNotCalled(t, "Ack")
+}
+
+// TestBatcher_QueueDelete_MultiPolicyFanOut_TriggersOnMessageCount covers
+// issue #113's delete-side fix: a source message that fans out into one
+// delete operation per matching policy must only trigger a flush once
+// BatchSize distinct *messages* have been seen, not once BatchSize pending
+// delete keys have accumulated, and every operation derived from one message
+// must land in the same flush. Submit applies all of a message's operations
+// under one lock and evaluates the trigger once afterwards, so message 100's
+// ten fanned-out deletes can never be split across two flushes the way
+// ten sequential QueueDelete calls could.
+func TestBatcher_QueueDelete_MultiPolicyFanOut_TriggersOnMessageCount(t *testing.T) {
+	const (
+		numIndices = 10
+		batchSize  = 100
+	)
+
+	mockClient := new(MockSearchClient)
+
+	var mu sync.Mutex
+	idCounts := make(map[string]int)
+	var deleteCallCount int32
+	// completedCount tracks flush completion (WaitForTasks returning), not just
+	// DeleteDocumentsAsync being called: the per-index flush goroutines run
+	// concurrently, so waiting on deleteCallCount alone can race ahead of the
+	// matching WaitForTasks call still being in flight.
+	var completedCount int32
+
+	for p := 0; p < numIndices; p++ {
+		indexUID := fmt.Sprintf("index-%d", p)
+		mockClient.On("DeleteDocumentsAsync", indexUID, mock.Anything).
+			Run(func(args mock.Arguments) {
+				ids := args.Get(1).([]string)
+				mu.Lock()
+				idCounts[indexUID] = len(ids)
+				mu.Unlock()
+				atomic.AddInt32(&deleteCallCount, 1)
+			}).
+			Return([]*meilisearch.Task{{TaskUID: 1}}, nil).Once()
+	}
+	mockClient.On("WaitForTasks", mock.Anything).
+		Run(func(mock.Arguments) { atomic.AddInt32(&completedCount, 1) }).
+		Return(&meilisearch.Task{Status: "succeeded"}, nil).Times(numIndices)
+
+	batcher := NewBatcher(mockClient, BatchConfig{
+		BatchSize:     batchSize,
+		FlushInterval: time.Hour,
+	})
+
+	submitMessage := func(m int) {
+		msg := &MockJetStreamMsg{seq: uint64(m)}
+		msg.On("Ack").Return(nil)
+		var jm jetstream.Msg = msg
+		deletes := make([]DeleteOp, numIndices)
+		for p := 0; p < numIndices; p++ {
+			deletes[p] = DeleteOp{IndexUID: fmt.Sprintf("index-%d", p), DocID: fmt.Sprintf("doc-%d", m)}
+		}
+		batcher.Submit(&jm, nil, deletes)
+	}
+
+	// Under the old key-count trigger, these first 10 messages (100 pending
+	// keys) would already have flushed. Confirm the fix does not.
+	for m := 1; m <= 10; m++ {
+		submitMessage(m)
+	}
+	assert.Equal(t, int32(0), atomic.LoadInt32(&deleteCallCount), "flush must not fire on pending-key count alone")
+
+	for m := 11; m <= 99; m++ {
+		submitMessage(m)
+	}
+	assert.Equal(t, int32(0), atomic.LoadInt32(&deleteCallCount), "flush must not fire before the 100th message")
+
+	submitMessage(100)
+
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(&completedCount) == numIndices
+	}, time.Second, 5*time.Millisecond, "expected exactly one flush, fanned out to all %d indices", numIndices)
+
+	mockClient.AssertExpectations(t)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, idCounts, numIndices)
+	// Submit applies message 100's ten deletes atomically and evaluates the
+	// trigger only once afterwards, so every index sees all 100 IDs in the
+	// single flush that fires - no off-by-one split of message 100 across two
+	// batches.
+	for p := 0; p < numIndices; p++ {
+		assert.Equal(t, 100, idCounts[fmt.Sprintf("index-%d", p)], "index-%d", p)
+	}
+}
+
+// TestBatcher_TrackMessage_DedupBySequence verifies that queueing the same
+// underlying message multiple times (e.g. once per matched policy) tracks it
+// for acknowledgement exactly once, keyed on its stream sequence.
+func TestBatcher_TrackMessage_DedupBySequence(t *testing.T) {
+	mockClient := new(MockSearchClient)
+	batcher := NewBatcher(mockClient, BatchConfig{BatchSize: 1000, FlushInterval: time.Hour})
+
+	msg := &MockJetStreamMsg{seq: 42}
+	ackDone := make(chan struct{})
+	msg.On("Ack").Run(func(mock.Arguments) { close(ackDone) }).Return(nil)
+	var jm jetstream.Msg = msg
+
+	const fanOut = 10
+	for i := 0; i < fanOut; i++ {
+		batcher.QueueDelete("index-1", fmt.Sprintf("doc-%d", i), &jm)
+	}
+
+	batcher.mu.Lock()
+	assert.Len(t, batcher.deleteMsgs, 1, "the same stream sequence must be tracked once")
+	assert.Len(t, batcher.deleteMsgSeqs, 1)
+	assert.Len(t, batcher.pendingDeletes, fanOut, "distinct doc IDs are still queued as separate deletes")
+	batcher.mu.Unlock()
+
+	mockClient.On("DeleteDocumentsAsync", "index-1", mock.MatchedBy(func(ids []string) bool {
+		return len(ids) == fanOut
+	})).Return([]*meilisearch.Task{{TaskUID: 1}}, nil).Once()
+	mockClient.On("WaitForTasks", mock.Anything).Return(&meilisearch.Task{Status: "succeeded"}, nil).Once()
+
+	batcher.flushDeletes()
+
+	select {
+	case <-ackDone:
+	case <-time.After(time.Second):
+		t.Fatal("flush did not ack the message")
+	}
+
+	mockClient.AssertExpectations(t)
+	msg.AssertNumberOfCalls(t, "Ack", 1)
+}
+
+// TestBatcher_TrackMessage_MetadataErrorTreatedAsUnique verifies the fallback
+// path in trackMessage: a message whose Metadata() call errors cannot be
+// deduped by stream sequence, so every call to Queue{Upsert,Delete} appends
+// it again rather than being dropped or panicking.
+func TestBatcher_TrackMessage_MetadataErrorTreatedAsUnique(t *testing.T) {
+	mockClient := new(MockSearchClient)
+	batcher := NewBatcher(mockClient, BatchConfig{BatchSize: 1000, FlushInterval: time.Hour})
+
+	msg := &MockJetStreamMsg{metaErr: fmt.Errorf("metadata unavailable")}
+	var jm jetstream.Msg = msg
+
+	const calls = 10
+	for i := 0; i < calls; i++ {
+		batcher.QueueDelete("index-1", fmt.Sprintf("doc-%d", i), &jm)
+	}
+
+	batcher.mu.Lock()
+	defer batcher.mu.Unlock()
+	assert.Len(t, batcher.deleteMsgs, calls, "a message whose metadata errors cannot be deduped, so each call is appended")
+}
+
+// TestBatcher_NakOnFlushFailure covers issue #113's failure path: whatever
+// stage fails (enqueueing the request or waiting for the Meilisearch task),
+// every message in the batch must be nacked with the fixed redelivery delay
+// and none may be acked.
+func TestBatcher_NakOnFlushFailure(t *testing.T) {
+	tests := []struct {
+		name     string
+		isUpsert bool
+		addErr   error // AddDocumentsAsync/DeleteDocumentsAsync error; nil means that stage succeeds
+		waitErr  error // WaitForTasks error; only used when addErr is nil
+	}{
+		{name: "upsert enqueue error", isUpsert: true, addErr: fmt.Errorf("add failed")},
+		{name: "upsert wait error", isUpsert: true, waitErr: fmt.Errorf("wait failed")},
+		{name: "delete enqueue error", isUpsert: false, addErr: fmt.Errorf("delete failed")},
+		{name: "delete wait error", isUpsert: false, waitErr: fmt.Errorf("wait failed")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockClient := new(MockSearchClient)
+			batcher := NewBatcher(mockClient, BatchConfig{BatchSize: 3, FlushInterval: time.Hour})
+
+			const n = 3
+			indexUID := "index-nak"
+
+			if tt.addErr != nil {
+				if tt.isUpsert {
+					mockClient.On("AddDocumentsAsync", indexUID, mock.Anything).Return(nil, tt.addErr).Once()
+				} else {
+					mockClient.On("DeleteDocumentsAsync", indexUID, mock.Anything).Return(nil, tt.addErr).Once()
+				}
+			} else {
+				if tt.isUpsert {
+					mockClient.On("AddDocumentsAsync", indexUID, mock.Anything).Return([]*meilisearch.Task{{TaskUID: 1}}, nil).Once()
+				} else {
+					mockClient.On("DeleteDocumentsAsync", indexUID, mock.Anything).Return([]*meilisearch.Task{{TaskUID: 1}}, nil).Once()
+				}
+				mockClient.On("WaitForTasks", mock.Anything).Return(nil, tt.waitErr).Once()
+			}
+
+			msgs := make([]*MockJetStreamMsg, n)
+			for i := 0; i < n; i++ {
+				msgs[i] = &MockJetStreamMsg{seq: uint64(i + 1)}
+			}
+			for i, m := range msgs {
+				var jm jetstream.Msg = m
+				if tt.isUpsert {
+					batcher.QueueUpsert(indexUID, map[string]any{"uid": fmt.Sprintf("doc-%d", i)}, &jm)
+				} else {
+					batcher.QueueDelete(indexUID, fmt.Sprintf("doc-%d", i), &jm)
+				}
+			}
+
+			require.Eventually(t, func() bool {
+				total := 0
+				for _, m := range msgs {
+					total += len(m.NakDelays())
+				}
+				return total == n
+			}, time.Second, 5*time.Millisecond, "expected all %d messages to be nacked", n)
+
+			mockClient.AssertExpectations(t)
+			for _, m := range msgs {
+				assert.Equal(t, []time.Duration{nakDelay}, m.NakDelays())
+				m.AssertNotCalled(t, "Ack")
+			}
+		})
+	}
 }

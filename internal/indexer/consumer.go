@@ -157,7 +157,12 @@ func (i *Indexer) Start(ctx context.Context) error {
 			return
 		}
 
-		queued := false
+		// Collect every operation this message produces before handing any of
+		// them to the batcher, so they all land in the same batch as the ack.
+		var (
+			upserts []UpsertOp
+			deletes []DeleteOp
+		)
 
 		policies := i.policyCache.GetPolicies()
 
@@ -188,23 +193,24 @@ func (i *Indexer) Start(ctx context.Context) error {
 				// Ensure UID is set as primary key if not present in the map under "uid"
 				ensureUID(doc, resourceUID)
 
-				i.batcher.QueueUpsert(cp.Policy.Status.IndexName, doc, &msg)
-				queued = true
+				upserts = append(upserts, UpsertOp{IndexUID: cp.Policy.Status.IndexName, Doc: doc})
 			} else {
 				// "Update and patch events that don't match should still queue a delete operation"
 				if event.Verb == "update" || event.Verb == "patch" {
 					if cp.Policy.Status.IndexName != "" {
-						i.batcher.QueueDelete(cp.Policy.Status.IndexName, resourceUID, &msg)
-						queued = true
+						deletes = append(deletes, DeleteOp{IndexUID: cp.Policy.Status.IndexName, DocID: resourceUID})
 					}
 				}
 			}
 		}
 
 		// If the message wasn't queued for any operation, acknowledge it immediately
-		if !queued {
+		if len(upserts) == 0 && len(deletes) == 0 {
 			msg.Ack()
+			return
 		}
+
+		i.batcher.Submit(&msg, upserts, deletes)
 
 	})
 	if err != nil {
@@ -231,13 +237,24 @@ func (i *Indexer) handleDelete(msg jetstream.Msg, event *auditEvent) {
 		return
 	}
 
-	// Queue delete for all policies since we don't know which one it matched
+	// Queue delete for all policies since we don't know which one it matched.
+	// They are submitted together so the batch that acks this message also owns
+	// every delete derived from it.
+	var deletes []DeleteOp
 	for _, cp := range i.policyCache.GetPolicies() {
 		// Skip if index name is not set yet
 		if cp.Policy.Status.IndexName == "" {
 			continue
 		}
 
-		i.batcher.QueueDelete(cp.Policy.Status.IndexName, docID, &msg)
+		deletes = append(deletes, DeleteOp{IndexUID: cp.Policy.Status.IndexName, DocID: docID})
 	}
+
+	// No policy has an index yet, so there is nothing to delete from.
+	if len(deletes) == 0 {
+		msg.Ack()
+		return
+	}
+
+	i.batcher.Submit(&msg, nil, deletes)
 }

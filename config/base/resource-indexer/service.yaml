@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: resource-indexer
+  labels:
+    app.kubernetes.io/name: resource-indexer
+    app.kubernetes.io/component: indexer
+    app.kubernetes.io/part-of: search
+spec:
+  type: ClusterIP
+  # Headless: this Service only exists so Prometheus can discover the indexer
+  # pods' metrics endpoints; nothing load balances traffic to the indexer.
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: resource-indexer
+  ports:
+  - name: metrics
+    port: 8080
+    targetPort: metrics
+    protocol: TCP

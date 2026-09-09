@@ -65,8 +65,10 @@ spec:
           value: "4"
         - name: MEILISEARCH_DOMAIN
           value: "http://meilisearch.meilisearch-system.svc.cluster.local:7700"
+        # Bounds one-off index operations (create, delete, delete-all,
+        # settings), which can take minutes on large indexes.
         - name: MEILISEARCH_TASK_WAIT_TIMEOUT
-          value: "3s"
+          value: "10m"
         - name: MAX_CEL_DEPTH
           value: "10"
         - name: NATS_URL
