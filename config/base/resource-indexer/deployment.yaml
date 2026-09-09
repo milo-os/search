@@ -29,6 +29,7 @@ spec:
         - --nats-tls-key=$(NATS_TLS_KEY)
         - --meilisearch-domain=$(MEILISEARCH_DOMAIN)
         - --enable-multi-tenancy=$(ENABLE_MULTI_TENANCY)
+        - --pprof-bind-address=$(PPROF_BIND_ADDRESS)
         ports:
         # Prometheus metrics endpoint served by --metrics-bind-address
         # (defaults to :8080, so no explicit arg is needed).
@@ -56,6 +57,8 @@ spec:
           value: "http://meilisearch.meilisearch-system.svc.cluster.local:7700"
         - name: ENABLE_MULTI_TENANCY
           value: "false"
+        - name: PPROF_BIND_ADDRESS
+          value: ""
         - name: MEILISEARCH_API_KEY
           valueFrom:
             secretKeyRef:
