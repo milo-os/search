@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"time"
 
@@ -88,6 +89,10 @@ type ResourceIndexerOptions struct {
 
 	// Multi-tenancy settings.
 	EnableMultiTenancy bool
+
+	// PprofBindAddress is the host:port that the net/http/pprof debug server
+	// binds to. Empty (the default) disables the pprof server entirely.
+	PprofBindAddress string
 }
 
 // NewResourceIndexerOptions creates a new ResourceIndexerOptions with default values.
@@ -112,6 +117,7 @@ func NewResourceIndexerOptions() *ResourceIndexerOptions {
 		BatchAckProgressInterval:    indexer.DefaultAckProgressInterval,
 		MetricsBindAddress:          ":8080",
 		EnableMultiTenancy:          false,
+		PprofBindAddress:            "",
 	}
 }
 
@@ -149,6 +155,9 @@ func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 
 	// Multi-tenancy
 	fs.BoolVar(&o.EnableMultiTenancy, "enable-multi-tenancy", o.EnableMultiTenancy, "Enable multi-tenant mode to index resources from all project control planes.")
+
+	// Debugging
+	fs.StringVar(&o.PprofBindAddress, "pprof-bind-address", o.PprofBindAddress, "The `host:port` to bind the net/http/pprof debug server to. Empty (the default) disables pprof; setting it enables the net/http/pprof handlers under /debug/pprof/. Binding to 127.0.0.1:6060 keeps the endpoint reachable only via kubectl port-forward (port-forward runs inside the pod network namespace, so localhost works) and not from the cluster network.")
 }
 
 // Validate checks if the resource indexer options are valid.
@@ -229,6 +238,11 @@ func (o *ResourceIndexerOptions) Validate() error {
 	if budget := heartbeatMargin * o.BatchAckProgressInterval; budget > consumerAckWait {
 		return fmt.Errorf("%d * batch-ack-progress-interval is %s, which exceeds the consumer ackWait of %s: lower batch-ack-progress-interval", heartbeatMargin, budget, consumerAckWait)
 	}
+	if o.PprofBindAddress != "" {
+		if _, _, err := net.SplitHostPort(o.PprofBindAddress); err != nil {
+			return fmt.Errorf("pprof-bind-address %q is not a valid host:port: %w", o.PprofBindAddress, err)
+		}
+	}
 
 	return nil
 }
@@ -268,6 +282,11 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 	// Serve the batcher and search metrics; the indexer has no other HTTP surface.
 	if err := serveMetrics(ctx, o.MetricsBindAddress); err != nil {
 		return err
+	}
+
+	// Optional pprof debug server. Disabled unless --pprof-bind-address is set.
+	if o.PprofBindAddress != "" {
+		startPprofServer(ctx, o.PprofBindAddress)
 	}
 
 	// Build a scheme and REST config for the controller-runtime cache.
@@ -521,4 +540,46 @@ func serveMetrics(ctx context.Context, addr string) error {
 	}()
 
 	return nil
+}
+
+// startPprofServer starts a net/http/pprof server on addr in its own goroutine
+// and shuts it down when ctx is cancelled.
+//
+// The handlers are registered on a dedicated ServeMux rather than by importing
+// net/http/pprof for its side effects, which would mutate http.DefaultServeMux
+// and expose the profiles on any other server using the default mux.
+//
+// Failures here are logged and never fatal: profiling must not be able to take
+// down the indexer.
+func startPprofServer(ctx context.Context, addr string) {
+	mux := http.NewServeMux()
+	// pprof.Index also serves the runtime/pprof named profiles (heap, goroutine,
+	// allocs, block, mutex, threadcreate) under /debug/pprof/<name>.
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	go func() {
+		klog.Infof("Starting pprof server on %s (endpoints under /debug/pprof/)", addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			klog.Errorf("pprof server stopped with error: %v", err)
+		}
+	}()
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			klog.Errorf("failed to shut down pprof server: %v", err)
+		}
+	}()
 }
