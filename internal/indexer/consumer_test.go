@@ -432,3 +432,86 @@ func TestIndexer_Consume_UpdateWithoutDeletionTimestamp_Upserts(t *testing.T) {
 	mockSearch.AssertExpectations(t)
 	mockSearch.AssertNotCalled(t, "DeleteDocumentsAsync", mock.Anything, mock.Anything)
 }
+
+// TestIndexer_HandleDelete_SubmitsAllPolicyDeletesInOneBatch is a
+// consumer-level regression test for issue #113: handleDelete builds one
+// DeleteOp per policy with an index and hands them all to batcher.Submit in
+// one call. With three policies and BatchSize 1, a per-call trigger (the
+// pre-Submit QueueDelete-per-policy behaviour) would fire after the first
+// policy's delete and split the remaining two into later flushes, acking the
+// message more than once. Submit's single trigger evaluation after all three
+// deletes are buffered must instead produce exactly one flush per index and
+// exactly one Ack.
+func TestIndexer_HandleDelete_SubmitsAllPolicyDeletesInOneBatch(t *testing.T) {
+	env, _ := internalcel.NewEnv()
+	policyCache := &PolicyCache{
+		policies: make(map[string]*policyevaluation.CachedPolicy),
+		celEnv:   env,
+	}
+	indexNames := []string{"index-a", "index-b", "index-c"}
+	for i, name := range []string{"policy-a", "policy-b", "policy-c"} {
+		policyCache.upsertPolicy(&v1alpha1.ResourceIndexPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: v1alpha1.ResourceIndexPolicySpec{
+				TargetResource: v1alpha1.TargetResource{Kind: "Pod"},
+			},
+			Status: v1alpha1.ResourceIndexPolicyStatus{
+				IndexName: indexNames[i],
+			},
+		})
+	}
+
+	mockSearch := new(MockSearchClient)
+	// BatchSize 1: a trigger evaluated per QueueDelete call (instead of once
+	// per Submit) would fire after the very first policy's delete is queued.
+	batcher := NewBatcher(mockSearch, BatchConfig{BatchSize: 1, FlushInterval: 1 * time.Minute})
+
+	mockConsumer := new(MockConsumer)
+	mockContext := new(MockConsumeContext)
+	mockContext.On("Stop").Return()
+
+	event := map[string]interface{}{
+		"verb":    "delete",
+		"auditID": "999",
+		"objectRef": map[string]string{
+			"resource": "pods",
+			"name":     "mypod",
+			"uid":      "pod-uid-multi",
+		},
+	}
+	eventBytes, _ := json.Marshal(event)
+
+	msg := &MockJetStreamMsg{seq: 200}
+	msg.On("Data").Return(eventBytes)
+	ackDone := make(chan struct{})
+	var closeAckDoneOnce sync.Once
+	// sync.Once guards against a panic (close of a closed channel) if this
+	// regresses and Ack ends up called more than once; AssertNumberOfCalls
+	// below still catches that as a normal test failure either way.
+	msg.On("Ack").Run(func(mock.Arguments) { closeAckDoneOnce.Do(func() { close(ackDone) }) }).Return(nil)
+
+	mockConsumer.On("Consume", mock.Anything).Return(mockContext, []jetstream.Msg{msg}, nil)
+
+	for _, idx := range indexNames {
+		mockSearch.On("DeleteDocumentsAsync", idx, mock.MatchedBy(func(ids []string) bool {
+			return len(ids) == 1 && ids[0] == "pod-uid-multi"
+		})).Return(nil, nil).Once()
+	}
+	mockSearch.On("WaitForTasks", mock.Anything).Return(nil, nil).Times(len(indexNames))
+
+	indexer := NewIndexer(mockConsumer, policyCache, batcher, false)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go indexer.Start(ctx)
+
+	select {
+	case <-ackDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("message was not acked in time")
+	}
+
+	cancel()
+
+	mockSearch.AssertExpectations(t)
+	msg.AssertNumberOfCalls(t, "Ack", 1)
+}

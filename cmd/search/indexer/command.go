@@ -2,7 +2,10 @@ package indexer
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"time"
 
@@ -14,11 +17,17 @@ import (
 	searchv1alpha1 "go.miloapis.net/search/pkg/apis/search/v1alpha1"
 	"go.miloapis.net/search/pkg/meilisearch"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/component-base/metrics/legacyregistry"
 	"k8s.io/klog/v2"
 	runtimecache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+// consumerAckWait mirrors the ackWait configured on the JetStream consumers in
+// config/components/nats-config/nats-consumer.yaml. It is not exposed to this
+// process, so it is duplicated here to bound the indexing timeouts.
+const consumerAckWait = 300 * time.Second
 
 // ResourceIndexerOptions holds the configuration for the resource indexer.
 type ResourceIndexerOptions struct {
@@ -35,17 +44,22 @@ type ResourceIndexerOptions struct {
 	NatsReindexConsumerName string
 
 	// Meilisearch connection and timeout settings
-	MeilisearchTaskWaitTimeout time.Duration
-	MeilisearchHTTPTimeout     time.Duration
-	MeilisearchDomain          string
-	MeilisearchChunkSize       int
-	MeilisearchMaxRetries      int
-	MeilisearchRetryDelay      time.Duration
+	MeilisearchTaskWaitTimeout  time.Duration
+	MeilisearchTaskPollInterval time.Duration
+	MeilisearchHTTPTimeout      time.Duration
+	MeilisearchDomain           string
+	MeilisearchChunkSize        int
+	MeilisearchMaxRetries       int
+	MeilisearchRetryDelay       time.Duration
 
 	// Batching and throughput tuning
 	BatchSize                 int
 	FlushInterval             time.Duration
 	BatchMaxConcurrentUploads int
+	BatchMaxInFlightFlushes   int
+
+	// Observability
+	MetricsBindAddress string
 
 	// Multi-tenancy settings.
 	EnableMultiTenancy bool
@@ -54,21 +68,24 @@ type ResourceIndexerOptions struct {
 // NewResourceIndexerOptions creates a new ResourceIndexerOptions with default values.
 func NewResourceIndexerOptions() *ResourceIndexerOptions {
 	return &ResourceIndexerOptions{
-		NatsURL:                    "nats://nats.nats-system.svc.cluster.local:4222",
-		NatsAuditConsumerName:      "search-indexer",
-		NatsStreamName:             "AUDIT_EVENTS",
-		NatsReindexStream:          "REINDEX_EVENTS",
-		NatsReindexConsumerName:    "search-reindexer",
-		MeilisearchTaskWaitTimeout: 4 * time.Second,
-		MeilisearchHTTPTimeout:     60 * time.Second,
-		MeilisearchDomain:          "http://meilisearch.meilisearch-system.svc.cluster.local:7700",
-		MeilisearchChunkSize:       1000,
-		BatchSize:                  1000,
-		FlushInterval:              5 * time.Second,
-		MeilisearchMaxRetries:      3,
-		MeilisearchRetryDelay:      500 * time.Millisecond,
-		BatchMaxConcurrentUploads:  100,
-		EnableMultiTenancy:         false,
+		NatsURL:                     "nats://nats.nats-system.svc.cluster.local:4222",
+		NatsAuditConsumerName:       "search-indexer",
+		NatsStreamName:              "AUDIT_EVENTS",
+		NatsReindexStream:           "REINDEX_EVENTS",
+		NatsReindexConsumerName:     "search-reindexer",
+		MeilisearchTaskWaitTimeout:  60 * time.Second,
+		MeilisearchTaskPollInterval: 500 * time.Millisecond,
+		MeilisearchHTTPTimeout:      60 * time.Second,
+		MeilisearchDomain:           "http://meilisearch.meilisearch-system.svc.cluster.local:7700",
+		MeilisearchChunkSize:        1000,
+		BatchSize:                   1000,
+		FlushInterval:               5 * time.Second,
+		MeilisearchMaxRetries:       3,
+		MeilisearchRetryDelay:       500 * time.Millisecond,
+		BatchMaxConcurrentUploads:   100,
+		BatchMaxInFlightFlushes:     8,
+		MetricsBindAddress:          ":8080",
+		EnableMultiTenancy:          false,
 	}
 }
 
@@ -85,7 +102,8 @@ func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.NatsTLSKey, "nats-tls-key", o.NatsTLSKey, "The path to the NATS TLS key file.")
 
 	fs.StringVar(&o.MeilisearchDomain, "meilisearch-domain", o.MeilisearchDomain, "Domain of the Meilisearch instance.")
-	fs.DurationVar(&o.MeilisearchTaskWaitTimeout, "meilisearch-task-wait-timeout", o.MeilisearchTaskWaitTimeout, "Timeout for waiting for Meilisearch tasks to complete.")
+	fs.DurationVar(&o.MeilisearchTaskWaitTimeout, "meilisearch-task-wait-timeout", o.MeilisearchTaskWaitTimeout, "Maximum time to wait for a Meilisearch task to complete before the batch is nacked and redelivered. Budget it against the consumer ackWait (300s in the shipped manifest): a flush can take up to meilisearch-http-timeout to enqueue plus this wait for the task, and a queue call can then wait that long again for a free in-flight flush slot, so 2 * (meilisearch-http-timeout + meilisearch-task-wait-timeout) must stay under the ackWait.")
+	fs.DurationVar(&o.MeilisearchTaskPollInterval, "meilisearch-task-poll-interval", o.MeilisearchTaskPollInterval, "How often to poll Meilisearch for task completion while waiting.")
 	fs.DurationVar(&o.MeilisearchHTTPTimeout, "meilisearch-http-timeout", o.MeilisearchHTTPTimeout, "Timeout for HTTP requests to Meilisearch.")
 	fs.IntVar(&o.MeilisearchChunkSize, "meilisearch-chunk-size", o.MeilisearchChunkSize, "The number of documents to process in a single chunk.")
 	fs.IntVar(&o.BatchSize, "batch-size", o.BatchSize, "The batch size for upserts and deletes.")
@@ -93,6 +111,9 @@ func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&o.MeilisearchMaxRetries, "meilisearch-max-retries", o.MeilisearchMaxRetries, "The maximum number of retries for transient Meilisearch errors.")
 	fs.DurationVar(&o.MeilisearchRetryDelay, "meilisearch-retry-delay", o.MeilisearchRetryDelay, "The base delay between Meilisearch retries.")
 	fs.IntVar(&o.BatchMaxConcurrentUploads, "batch-max-concurrent-uploads", o.BatchMaxConcurrentUploads, "The maximum number of concurrent uploads to Meilisearch.")
+	fs.IntVar(&o.BatchMaxInFlightFlushes, "batch-max-inflight-flushes", o.BatchMaxInFlightFlushes, "The maximum number of flushes in flight at once. Each in-flight flush pins its batch of NATS messages in memory, so this bounds the indexer's memory use and applies backpressure to the consumer.")
+
+	fs.StringVar(&o.MetricsBindAddress, "metrics-bind-address", o.MetricsBindAddress, "The address the metrics endpoint binds to. Set to an empty string to disable metrics serving.")
 
 	// Multi-tenancy
 	fs.BoolVar(&o.EnableMultiTenancy, "enable-multi-tenancy", o.EnableMultiTenancy, "Enable multi-tenant mode to index resources from all project control planes.")
@@ -139,6 +160,30 @@ func (o *ResourceIndexerOptions) Validate() error {
 	if o.BatchMaxConcurrentUploads < 1 {
 		return fmt.Errorf("batch-max-concurrent-uploads must be greater than 0")
 	}
+	if o.BatchMaxInFlightFlushes < 1 {
+		return fmt.Errorf("batch-max-inflight-flushes must be greater than 0")
+	}
+	if o.MeilisearchTaskWaitTimeout <= 0 {
+		return fmt.Errorf("meilisearch-task-wait-timeout must be greater than 0")
+	}
+	if o.MeilisearchTaskPollInterval <= 0 {
+		return fmt.Errorf("meilisearch-task-poll-interval must be greater than 0")
+	}
+	// A message can be held for one flush (enqueue plus task wait) and, before
+	// that, for one wait on a free in-flight flush slot occupied by another such
+	// flush. If that worst case exceeds the consumer's ackWait, JetStream
+	// redelivers the batch while it is still being indexed. The ackWait is set on
+	// the consumer manifest and is not visible to this process, so the shipped
+	// value is asserted here.
+	//
+	// Residual case, accepted rather than modelled: one handler invocation can
+	// launch a due upsert flush and a due delete flush back to back, so a message
+	// can wait for two slots and roughly double this budget. The consequence is
+	// redelivery of a batch that was already committed to Meilisearch, which the
+	// idempotent upserts and deletes absorb, not data loss.
+	if budget := 2 * (o.MeilisearchHTTPTimeout + o.MeilisearchTaskWaitTimeout); budget > consumerAckWait {
+		return fmt.Errorf("2 * (meilisearch-http-timeout + meilisearch-task-wait-timeout) is %s, which exceeds the consumer ackWait of %s: lower meilisearch-http-timeout or meilisearch-task-wait-timeout", budget, consumerAckWait)
+	}
 
 	return nil
 }
@@ -174,6 +219,12 @@ func NewIndexerCommand() *cobra.Command {
 // Run starts the indexer consumer
 func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 	ctrllog.SetLogger(klog.NewKlogr())
+
+	// Serve the batcher and search metrics; the indexer has no other HTTP surface.
+	if err := serveMetrics(ctx, o.MetricsBindAddress); err != nil {
+		return err
+	}
+
 	// Build a scheme and REST config for the controller-runtime cache.
 	scheme := runtime.NewScheme()
 	if err := searchv1alpha1.AddToScheme(scheme); err != nil {
@@ -275,13 +326,14 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 
 	// ── Meilisearch client ──────────────────────────────────────────────────
 	searchClient, err := meilisearch.NewSDKClient(meilisearch.SDKConfig{
-		Domain:      o.MeilisearchDomain,
-		APIKey:      os.Getenv("MEILISEARCH_API_KEY"),
-		WaitTimeout: o.MeilisearchTaskWaitTimeout,
-		ChunkSize:   o.MeilisearchChunkSize,
-		HTTPTimeout: o.MeilisearchHTTPTimeout,
-		MaxRetries:  o.MeilisearchMaxRetries,
-		RetryDelay:  o.MeilisearchRetryDelay,
+		Domain:       o.MeilisearchDomain,
+		APIKey:       os.Getenv("MEILISEARCH_API_KEY"),
+		WaitTimeout:  o.MeilisearchTaskWaitTimeout,
+		PollInterval: o.MeilisearchTaskPollInterval,
+		ChunkSize:    o.MeilisearchChunkSize,
+		HTTPTimeout:  o.MeilisearchHTTPTimeout,
+		MaxRetries:   o.MeilisearchMaxRetries,
+		RetryDelay:   o.MeilisearchRetryDelay,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create search client: %w", err)
@@ -291,6 +343,7 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 		BatchSize:            o.BatchSize,
 		FlushInterval:        o.FlushInterval,
 		MaxConcurrentUploads: o.BatchMaxConcurrentUploads,
+		MaxInFlightFlushes:   o.BatchMaxInFlightFlushes,
 	}
 
 	// Create separate batchers for audit events and re-indexing events
@@ -335,4 +388,46 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 	case <-ctx.Done():
 		return nil
 	}
+}
+
+// serveMetrics starts the Prometheus endpoint and shuts it down when ctx is
+// cancelled. An empty address disables metrics serving. The listener is bound
+// synchronously so a port clash fails startup instead of leaving the process
+// running without metrics.
+func serveMetrics(ctx context.Context, addr string) error {
+	if addr == "" {
+		klog.Info("Metrics endpoint disabled")
+		return nil
+	}
+
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("failed to bind metrics endpoint on %s: %w", addr, err)
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", legacyregistry.Handler())
+
+	server := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	go func() {
+		klog.Infof("Serving metrics on %s/metrics", listener.Addr())
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			klog.Errorf("Metrics server failed: %v", err)
+		}
+	}()
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			klog.Errorf("Failed to shut down metrics server: %v", err)
+		}
+	}()
+
+	return nil
 }
