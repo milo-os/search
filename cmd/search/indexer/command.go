@@ -180,7 +180,9 @@ func (o *ResourceIndexerOptions) Validate() error {
 	// launch a due upsert flush and a due delete flush back to back, so a message
 	// can wait for two slots and roughly double this budget. The consequence is
 	// redelivery of a batch that was already committed to Meilisearch, which the
-	// idempotent upserts and deletes absorb, not data loss.
+	// idempotent upserts and deletes absorb, not data loss. In production this
+	// case shows up as the indexer's backpressure warning log and a rise in the
+	// search_indexer_flush_slot_wait_seconds histogram.
 	if budget := 2 * (o.MeilisearchHTTPTimeout + o.MeilisearchTaskWaitTimeout); budget > consumerAckWait {
 		return fmt.Errorf("2 * (meilisearch-http-timeout + meilisearch-task-wait-timeout) is %s, which exceeds the consumer ackWait of %s: lower meilisearch-http-timeout or meilisearch-task-wait-timeout", budget, consumerAckWait)
 	}
