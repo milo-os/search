@@ -24,7 +24,11 @@ const (
 
 	// defaultMaxInFlightFlushes caps the number of concurrent flush goroutines,
 	// and with it the number of message batches held in memory at once.
-	defaultMaxInFlightFlushes = 8
+	defaultMaxInFlightFlushes = 16
+
+	// defaultAckProgressInterval is how often an in-progress flush heartbeats its
+	// messages to keep JetStream from redelivering them.
+	defaultAckProgressInterval = 60 * time.Second
 
 	flushTypeUpsert = "upsert"
 	flushTypeDelete = "delete"
@@ -45,6 +49,10 @@ type BatchConfig struct {
 	// in-flight flush pins its batch of NATS messages until Meilisearch finishes,
 	// so this is what bounds the indexer's memory use.
 	MaxInFlightFlushes int
+	// AckProgressInterval is how often a running flush tells JetStream that its
+	// messages are still being worked on, extending ackWait for as long as the
+	// flush is genuinely progressing.
+	AckProgressInterval time.Duration
 }
 
 // SearchClient abstracts the search backend interactions.
@@ -92,6 +100,8 @@ type Batcher struct {
 	upsertMsgSeqs map[uint64]struct{}
 	deleteMsgSeqs map[uint64]struct{}
 
+	ackProgressInterval time.Duration
+
 	mu       sync.Mutex
 	sem      chan struct{} // Global semaphore to limit concurrent Meilisearch requests
 	flushSem chan struct{} // Bounds the number of flushes (and their message batches) in flight
@@ -117,17 +127,23 @@ func NewBatcher(client SearchClient, batchConfig BatchConfig) *Batcher {
 		maxInFlight = defaultMaxInFlightFlushes
 	}
 
+	ackProgressInterval := batchConfig.AckProgressInterval
+	if ackProgressInterval <= 0 {
+		ackProgressInterval = defaultAckProgressInterval
+	}
+
 	return &Batcher{
-		client:         client,
-		batchConfig:    batchConfig,
-		pendingUpserts: make(map[string]upsertItem),
-		pendingDeletes: make(map[string]deleteItem),
-		upsertMsgs:     make([]jetstream.Msg, 0, batchConfig.BatchSize),
-		deleteMsgs:     make([]jetstream.Msg, 0, batchConfig.BatchSize),
-		upsertMsgSeqs:  make(map[uint64]struct{}),
-		deleteMsgSeqs:  make(map[uint64]struct{}),
-		sem:            make(chan struct{}, maxConcurrent),
-		flushSem:       make(chan struct{}, maxInFlight),
+		client:              client,
+		batchConfig:         batchConfig,
+		ackProgressInterval: ackProgressInterval,
+		pendingUpserts:      make(map[string]upsertItem),
+		pendingDeletes:      make(map[string]deleteItem),
+		upsertMsgs:          make([]jetstream.Msg, 0, batchConfig.BatchSize),
+		deleteMsgs:          make([]jetstream.Msg, 0, batchConfig.BatchSize),
+		upsertMsgSeqs:       make(map[uint64]struct{}),
+		deleteMsgSeqs:       make(map[uint64]struct{}),
+		sem:                 make(chan struct{}, maxConcurrent),
+		flushSem:            make(chan struct{}, maxInFlight),
 	}
 }
 
@@ -449,6 +465,62 @@ func (b *Batcher) takeDeleteBatch() ([]deleteItem, []jetstream.Msg) {
 	return queue, msgs
 }
 
+// startAckProgress heartbeats a batch's messages for as long as its flush is
+// running, and returns a stop function that joins the heartbeat goroutine.
+//
+// A healthy Meilisearch can take longer to finish a batch's tasks than the
+// consumer's ackWait, and a flush waits for the slowest of its per-index tasks.
+// Without a heartbeat JetStream would redeliver messages that are being indexed
+// right now. Calling InProgress on every tick extends the window for as long as
+// the flush is progressing, so the wait timeout no longer has to fit inside
+// ackWait. The stop function must be called before the ack/nak loop so a
+// heartbeat can never race an Ack on the same message.
+func (b *Batcher) startAckProgress(msgs []jetstream.Msg, flushType string) (stop func()) {
+	if len(msgs) == 0 {
+		return func() {}
+	}
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+
+		ticker := time.NewTicker(b.ackProgressInterval)
+		defer ticker.Stop()
+
+		warned := false
+
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				var firstErr error
+				for _, msg := range msgs {
+					if err := msg.InProgress(); err != nil && firstErr == nil {
+						firstErr = err
+					}
+				}
+				searchmetrics.IndexerAckProgress.WithLabelValues(flushType).Add(float64(len(msgs)))
+
+				// Once per flush, not once per message or per tick: a failure here
+				// is the same connection problem for every message in the batch.
+				if firstErr != nil && !warned {
+					warned = true
+					klog.Warningf("Failed to extend ackWait for a %s batch of %d messages: %v", flushType, len(msgs), firstErr)
+				}
+			}
+		}
+	}()
+
+	return func() {
+		close(done)
+		wg.Wait()
+	}
+}
+
 func (b *Batcher) performUpsertFlush(queue []upsertItem, msgs []jetstream.Msg) {
 	klog.Infof("Flushing batch of %d upserts to Meilisearch...", len(queue))
 
@@ -467,6 +539,9 @@ func (b *Batcher) performUpsertFlush(queue []upsertItem, msgs []jetstream.Msg) {
 	var wg sync.WaitGroup
 	var errs []error
 	var errMu sync.Mutex
+
+	// Heartbeat the batch for the whole time its tasks are outstanding.
+	stopAckProgress := b.startAckProgress(msgs, flushTypeUpsert)
 
 	for indexUID, docs := range groups {
 		wg.Add(1)
@@ -495,6 +570,7 @@ func (b *Batcher) performUpsertFlush(queue []upsertItem, msgs []jetstream.Msg) {
 		}(indexUID, docs)
 	}
 	wg.Wait()
+	stopAckProgress()
 
 	if len(errs) > 0 {
 		searchmetrics.IndexerFlushTotal.WithLabelValues(flushTypeUpsert, flushStatusFailure).Inc()
@@ -530,6 +606,9 @@ func (b *Batcher) performDeleteFlush(queue []deleteItem, msgs []jetstream.Msg) {
 	var errs []error
 	var errMu sync.Mutex
 
+	// Heartbeat the batch for the whole time its tasks are outstanding.
+	stopAckProgress := b.startAckProgress(msgs, flushTypeDelete)
+
 	for indexUID, docIDs := range groups {
 		wg.Add(1)
 		go func(uid string, ids []string) {
@@ -557,6 +636,7 @@ func (b *Batcher) performDeleteFlush(queue []deleteItem, msgs []jetstream.Msg) {
 		}(indexUID, docIDs)
 	}
 	wg.Wait()
+	stopAckProgress()
 
 	if len(errs) > 0 {
 		searchmetrics.IndexerFlushTotal.WithLabelValues(flushTypeDelete, flushStatusFailure).Inc()

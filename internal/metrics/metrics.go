@@ -101,6 +101,19 @@ var (
 		[]string{"type"},
 	)
 
+	// IndexerAckProgress tracks InProgress heartbeats sent while a flush is
+	// running, counted once per message per tick.
+	IndexerAckProgress = metrics.NewCounterVec(
+		&metrics.CounterOpts{
+			Namespace:      namespace,
+			Subsystem:      indexerSubsystem,
+			Name:           "ack_progress_total",
+			Help:           "Total number of JetStream InProgress heartbeats sent during indexer flushes",
+			StabilityLevel: metrics.ALPHA,
+		},
+		[]string{"type"},
+	)
+
 	// IndexerMessagesNacked tracks messages returned to JetStream for redelivery
 	// because their batch failed to flush.
 	IndexerMessagesNacked = metrics.NewCounterVec(
@@ -126,6 +139,7 @@ func init() {
 		IndexerFlushDuration,
 		IndexerFlushTotal,
 		IndexerFlushSlotWait,
+		IndexerAckProgress,
 		IndexerMessagesNacked,
 	)
 }

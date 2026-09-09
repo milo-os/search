@@ -55,8 +55,15 @@ type MockJetStreamMsg struct {
 	// every call is treated as unique.
 	metaErr error
 
+	// inProgressErr, when set, is returned by InProgress(), letting tests
+	// exercise the ack-progress heartbeat's error path.
+	inProgressErr error
+
 	nakMu     sync.Mutex
 	nakDelays []time.Duration
+
+	inProgressMu    sync.Mutex
+	inProgressCalls []time.Time
 }
 
 func (m *MockJetStreamMsg) Ack() error {
@@ -79,6 +86,26 @@ func (m *MockJetStreamMsg) NakDelays() []time.Duration {
 	m.nakMu.Lock()
 	defer m.nakMu.Unlock()
 	return append([]time.Duration(nil), m.nakDelays...)
+}
+
+// InProgress records the heartbeat call, in the same tolerant style as
+// NakWithDelay: it does not go through testify expectations so tests
+// exercising the ack-progress heartbeat don't have to declare an expectation
+// for every tick on every message. inProgressErr, when set, is returned to
+// the caller so tests can exercise startAckProgress's error-logging path
+// without failing the flush.
+func (m *MockJetStreamMsg) InProgress() error {
+	m.inProgressMu.Lock()
+	defer m.inProgressMu.Unlock()
+	m.inProgressCalls = append(m.inProgressCalls, time.Now())
+	return m.inProgressErr
+}
+
+// InProgressCalls returns the times InProgress was called, in call order.
+func (m *MockJetStreamMsg) InProgressCalls() []time.Time {
+	m.inProgressMu.Lock()
+	defer m.inProgressMu.Unlock()
+	return append([]time.Time(nil), m.inProgressCalls...)
 }
 
 func (m *MockJetStreamMsg) Metadata() (*jetstream.MsgMetadata, error) {

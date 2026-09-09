@@ -13,58 +13,60 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// TestResourceIndexerOptions_Validate_Budget covers the 2 * (http-timeout +
-// task-wait-timeout) <= consumerAckWait assertion in Validate(), including the
-// boundary at exactly consumerAckWait, where the budget is allowed.
-func TestResourceIndexerOptions_Validate_Budget(t *testing.T) {
+// TestResourceIndexerOptions_Validate_AckProgressBudget covers the
+// 3 * batch-ack-progress-interval <= consumerAckWait assertion in Validate(),
+// including the boundary at exactly consumerAckWait, where the budget is
+// allowed. Three intervals per ackWait leaves room for two heartbeats to be
+// lost or delayed before JetStream redelivers a message that is still being
+// indexed.
+func TestResourceIndexerOptions_Validate_AckProgressBudget(t *testing.T) {
 	t.Setenv("MEILISEARCH_API_KEY", "test-key")
 
 	tests := []struct {
-		name        string
-		httpTimeout time.Duration
-		taskWait    time.Duration
-		wantErr     bool
+		name                string
+		ackProgressInterval time.Duration
+		wantErr             bool
 	}{
 		{
-			name:        "well under the ackWait budget",
-			httpTimeout: 30 * time.Second,
-			taskWait:    30 * time.Second,
-			wantErr:     false,
+			name:                "well under the ackWait budget",
+			ackProgressInterval: 60 * time.Second,
+			wantErr:             false,
 		},
 		{
-			name:        "exactly at the ackWait budget",
-			httpTimeout: 75 * time.Second,
-			taskWait:    75 * time.Second,
-			wantErr:     false,
+			name:                "exactly at the ackWait budget",
+			ackProgressInterval: 100 * time.Second,
+			wantErr:             false,
 		},
 		{
-			name:        "one millisecond over the ackWait budget",
-			httpTimeout: 75 * time.Second,
-			taskWait:    75*time.Second + time.Millisecond,
-			wantErr:     true,
+			name:                "one millisecond over the ackWait budget",
+			ackProgressInterval: 100*time.Second + time.Millisecond,
+			wantErr:             true,
 		},
 		{
-			name:        "well over the ackWait budget",
-			httpTimeout: 200 * time.Second,
-			taskWait:    200 * time.Second,
-			wantErr:     true,
+			name:                "well over the ackWait budget",
+			ackProgressInterval: 5 * time.Minute,
+			wantErr:             true,
+		},
+		{
+			name:                "zero is rejected outright",
+			ackProgressInterval: 0,
+			wantErr:             true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			o := NewResourceIndexerOptions()
-			o.MeilisearchHTTPTimeout = tt.httpTimeout
-			o.MeilisearchTaskWaitTimeout = tt.taskWait
+			o.BatchAckProgressInterval = tt.ackProgressInterval
 
 			err := o.Validate()
 			if tt.wantErr && err == nil {
-				t.Fatalf("Validate() = nil, want an error: 2 * (%s + %s) = %s exceeds consumerAckWait %s",
-					tt.httpTimeout, tt.taskWait, 2*(tt.httpTimeout+tt.taskWait), consumerAckWait)
+				t.Fatalf("Validate() = nil, want an error: 3 * %s = %s exceeds consumerAckWait %s",
+					tt.ackProgressInterval, 3*tt.ackProgressInterval, consumerAckWait)
 			}
 			if !tt.wantErr && err != nil {
-				t.Fatalf("Validate() = %v, want no error: 2 * (%s + %s) = %s is within consumerAckWait %s",
-					err, tt.httpTimeout, tt.taskWait, 2*(tt.httpTimeout+tt.taskWait), consumerAckWait)
+				t.Fatalf("Validate() = %v, want no error: 3 * %s = %s is within consumerAckWait %s",
+					err, tt.ackProgressInterval, 3*tt.ackProgressInterval, consumerAckWait)
 			}
 		})
 	}

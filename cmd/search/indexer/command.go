@@ -57,6 +57,7 @@ type ResourceIndexerOptions struct {
 	FlushInterval             time.Duration
 	BatchMaxConcurrentUploads int
 	BatchMaxInFlightFlushes   int
+	BatchAckProgressInterval  time.Duration
 
 	// Observability
 	MetricsBindAddress string
@@ -73,17 +74,18 @@ func NewResourceIndexerOptions() *ResourceIndexerOptions {
 		NatsStreamName:              "AUDIT_EVENTS",
 		NatsReindexStream:           "REINDEX_EVENTS",
 		NatsReindexConsumerName:     "search-reindexer",
-		MeilisearchTaskWaitTimeout:  60 * time.Second,
+		MeilisearchTaskWaitTimeout:  10 * time.Minute,
 		MeilisearchTaskPollInterval: 500 * time.Millisecond,
 		MeilisearchHTTPTimeout:      60 * time.Second,
 		MeilisearchDomain:           "http://meilisearch.meilisearch-system.svc.cluster.local:7700",
 		MeilisearchChunkSize:        1000,
 		BatchSize:                   1000,
-		FlushInterval:               5 * time.Second,
+		FlushInterval:               10 * time.Second,
 		MeilisearchMaxRetries:       3,
 		MeilisearchRetryDelay:       500 * time.Millisecond,
-		BatchMaxConcurrentUploads:   100,
-		BatchMaxInFlightFlushes:     8,
+		BatchMaxConcurrentUploads:   200,
+		BatchMaxInFlightFlushes:     16,
+		BatchAckProgressInterval:    60 * time.Second,
 		MetricsBindAddress:          ":8080",
 		EnableMultiTenancy:          false,
 	}
@@ -102,7 +104,7 @@ func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.NatsTLSKey, "nats-tls-key", o.NatsTLSKey, "The path to the NATS TLS key file.")
 
 	fs.StringVar(&o.MeilisearchDomain, "meilisearch-domain", o.MeilisearchDomain, "Domain of the Meilisearch instance.")
-	fs.DurationVar(&o.MeilisearchTaskWaitTimeout, "meilisearch-task-wait-timeout", o.MeilisearchTaskWaitTimeout, "Maximum time to wait for a Meilisearch task to complete before the batch is nacked and redelivered. Budget it against the consumer ackWait (300s in the shipped manifest): a flush can take up to meilisearch-http-timeout to enqueue plus this wait for the task, and a queue call can then wait that long again for a free in-flight flush slot, so 2 * (meilisearch-http-timeout + meilisearch-task-wait-timeout) must stay under the ackWait.")
+	fs.DurationVar(&o.MeilisearchTaskWaitTimeout, "meilisearch-task-wait-timeout", o.MeilisearchTaskWaitTimeout, "Maximum time to wait for a Meilisearch task to complete before the batch is nacked and redelivered. This is a backstop against a wedged Meilisearch, not a throughput knob: a running flush heartbeats its messages every batch-ack-progress-interval, so the batch stays alive for as long as it waits and this no longer needs to sit under the consumer ackWait.")
 	fs.DurationVar(&o.MeilisearchTaskPollInterval, "meilisearch-task-poll-interval", o.MeilisearchTaskPollInterval, "How often to poll Meilisearch for task completion while waiting.")
 	fs.DurationVar(&o.MeilisearchHTTPTimeout, "meilisearch-http-timeout", o.MeilisearchHTTPTimeout, "Timeout for HTTP requests to Meilisearch.")
 	fs.IntVar(&o.MeilisearchChunkSize, "meilisearch-chunk-size", o.MeilisearchChunkSize, "The number of documents to process in a single chunk.")
@@ -110,8 +112,14 @@ func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.DurationVar(&o.FlushInterval, "flush-interval", o.FlushInterval, "The flush interval for upserts and deletes.")
 	fs.IntVar(&o.MeilisearchMaxRetries, "meilisearch-max-retries", o.MeilisearchMaxRetries, "The maximum number of retries for transient Meilisearch errors.")
 	fs.DurationVar(&o.MeilisearchRetryDelay, "meilisearch-retry-delay", o.MeilisearchRetryDelay, "The base delay between Meilisearch retries.")
-	fs.IntVar(&o.BatchMaxConcurrentUploads, "batch-max-concurrent-uploads", o.BatchMaxConcurrentUploads, "The maximum number of concurrent uploads to Meilisearch.")
+	// Each in-flight flush fans out one upload per index, so this must exceed
+	// batch-max-inflight-flushes times the policy count or uploads throttle here
+	// instead of at the in-flight cap, leaving flushes stalled while holding their
+	// slots.
+	fs.IntVar(&o.BatchMaxConcurrentUploads, "batch-max-concurrent-uploads", o.BatchMaxConcurrentUploads, "The maximum number of concurrent uploads to Meilisearch. Keep it above batch-max-inflight-flushes times the number of index policies, since each flush issues one upload per index.")
 	fs.IntVar(&o.BatchMaxInFlightFlushes, "batch-max-inflight-flushes", o.BatchMaxInFlightFlushes, "The maximum number of flushes in flight at once. Each in-flight flush pins its batch of NATS messages in memory, so this bounds the indexer's memory use and applies backpressure to the consumer.")
+
+	fs.DurationVar(&o.BatchAckProgressInterval, "batch-ack-progress-interval", o.BatchAckProgressInterval, "How often a running flush tells JetStream its messages are still in progress, extending ackWait. Must stay comfortably under the consumer ackWait so a heartbeat always lands inside the window.")
 
 	fs.StringVar(&o.MetricsBindAddress, "metrics-bind-address", o.MetricsBindAddress, "The address the metrics endpoint binds to. Set to an empty string to disable metrics serving.")
 
@@ -169,22 +177,28 @@ func (o *ResourceIndexerOptions) Validate() error {
 	if o.MeilisearchTaskPollInterval <= 0 {
 		return fmt.Errorf("meilisearch-task-poll-interval must be greater than 0")
 	}
-	// A message can be held for one flush (enqueue plus task wait) and, before
-	// that, for one wait on a free in-flight flush slot occupied by another such
-	// flush. If that worst case exceeds the consumer's ackWait, JetStream
-	// redelivers the batch while it is still being indexed. The ackWait is set on
-	// the consumer manifest and is not visible to this process, so the shipped
-	// value is asserted here.
+	if o.BatchAckProgressInterval <= 0 {
+		return fmt.Errorf("batch-ack-progress-interval must be greater than 0")
+	}
+	// A running flush heartbeats its messages every BatchAckProgressInterval, so
+	// the Meilisearch task wait no longer counts against ackWait. What must hold
+	// instead is that a heartbeat always lands well inside the window: at three
+	// intervals per ackWait, two can be lost or delayed before JetStream gives up
+	// on a message that is still being indexed. The ackWait lives on the consumer
+	// manifest and is not visible to this process, so the shipped value is
+	// asserted here.
 	//
-	// Residual case, accepted rather than modelled: one handler invocation can
-	// launch a due upsert flush and a due delete flush back to back, so a message
-	// can wait for two slots and roughly double this budget. The consequence is
-	// redelivery of a batch that was already committed to Meilisearch, which the
-	// idempotent upserts and deletes absorb, not data loss. In production this
-	// case shows up as the indexer's backpressure warning log and a rise in the
-	// search_indexer_flush_slot_wait_seconds histogram.
-	if budget := 2 * (o.MeilisearchHTTPTimeout + o.MeilisearchTaskWaitTimeout); budget > consumerAckWait {
-		return fmt.Errorf("2 * (meilisearch-http-timeout + meilisearch-task-wait-timeout) is %s, which exceeds the consumer ackWait of %s: lower meilisearch-http-timeout or meilisearch-task-wait-timeout", budget, consumerAckWait)
+	// Residual case, accepted rather than modelled: a prefetched message can sit
+	// in the consumer's buffer waiting for the handler while an earlier queue call
+	// blocks on a flush slot, and nothing heartbeats a message the batcher has not
+	// been handed yet. Under a deep backlog that wait can exceed ackWait and
+	// redeliver up to the 500-message prefetch window per pod. The redelivered
+	// work is idempotent upserts and deletes, so it costs throughput rather than
+	// correctness; the backpressure warning log and a rise in the
+	// search_indexer_flush_slot_wait_seconds histogram are the signal that it is
+	// happening.
+	if budget := 3 * o.BatchAckProgressInterval; budget > consumerAckWait {
+		return fmt.Errorf("3 * batch-ack-progress-interval is %s, which exceeds the consumer ackWait of %s: lower batch-ack-progress-interval", budget, consumerAckWait)
 	}
 
 	return nil
@@ -346,6 +360,7 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 		FlushInterval:        o.FlushInterval,
 		MaxConcurrentUploads: o.BatchMaxConcurrentUploads,
 		MaxInFlightFlushes:   o.BatchMaxInFlightFlushes,
+		AckProgressInterval:  o.BatchAckProgressInterval,
 	}
 
 	// Create separate batchers for audit events and re-indexing events
