@@ -22,13 +22,24 @@ const (
 	// slot before it reports that the indexer is applying backpressure.
 	flushSlotWaitWarnThreshold = 5 * time.Second
 
-	// defaultMaxInFlightFlushes caps the number of concurrent flush goroutines,
-	// and with it the number of message batches held in memory at once.
-	defaultMaxInFlightFlushes = 16
+	// DefaultMaxInFlightFlushes caps the number of concurrent flush goroutines,
+	// and with it the number of message batches held in memory at once. It is the
+	// primary knob that bounds the indexer's memory during a Meilisearch stall.
+	//
+	// It is a tuned value, not a derived one. Measured in production at a healthy
+	// 2.8k-deep task queue, a delete task takes a median of 47s and up to 79s from
+	// enqueue to finish, and a flush waits for the slowest of its per-index tasks.
+	// 16 was chosen so that completions clear the stream's fill rate at that
+	// latency: with each flush holding a slot for ~47-79s, 16 slots give enough
+	// throughput to keep the backlog (and therefore memory) flat against the
+	// incoming audit-event rate. If Meilisearch latency or the event rate changes,
+	// re-measure against the search_indexer_flush_duration_seconds histogram
+	// rather than assuming 16 still holds.
+	DefaultMaxInFlightFlushes = 16
 
-	// defaultAckProgressInterval is how often an in-progress flush heartbeats its
+	// DefaultAckProgressInterval is how often an in-progress flush heartbeats its
 	// messages to keep JetStream from redelivering them.
-	defaultAckProgressInterval = 60 * time.Second
+	DefaultAckProgressInterval = 60 * time.Second
 
 	flushTypeUpsert = "upsert"
 	flushTypeDelete = "delete"
@@ -124,12 +135,12 @@ func NewBatcher(client SearchClient, batchConfig BatchConfig) *Batcher {
 
 	maxInFlight := batchConfig.MaxInFlightFlushes
 	if maxInFlight <= 0 {
-		maxInFlight = defaultMaxInFlightFlushes
+		maxInFlight = DefaultMaxInFlightFlushes
 	}
 
 	ackProgressInterval := batchConfig.AckProgressInterval
 	if ackProgressInterval <= 0 {
-		ackProgressInterval = defaultAckProgressInterval
+		ackProgressInterval = DefaultAckProgressInterval
 	}
 
 	return &Batcher{

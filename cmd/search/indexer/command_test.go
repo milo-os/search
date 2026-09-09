@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"go.miloapis.net/search/internal/indexer"
 	"gopkg.in/yaml.v3"
 )
 
@@ -67,6 +68,77 @@ func TestResourceIndexerOptions_Validate_AckProgressBudget(t *testing.T) {
 			if !tt.wantErr && err != nil {
 				t.Fatalf("Validate() = %v, want no error: 3 * %s = %s is within consumerAckWait %s",
 					err, tt.ackProgressInterval, 3*tt.ackProgressInterval, consumerAckWait)
+			}
+		})
+	}
+}
+
+// TestResourceIndexerOptions_Validate_UploadSemaphore covers the invariant that
+// the upload semaphore must accommodate every in-flight flush's per-index
+// uploads at once. Falling under it does not fail loudly at runtime; flushes
+// just stall on the upload semaphore while holding their flush slots, so the
+// check exists to catch the misconfiguration at startup.
+func TestResourceIndexerOptions_Validate_UploadSemaphore(t *testing.T) {
+	t.Setenv("MEILISEARCH_API_KEY", "test-key")
+
+	tests := []struct {
+		name              string
+		inFlightFlushes   int
+		concurrentUploads int
+		wantErr           bool
+	}{
+		{
+			name:              "shipped defaults clear the floor with headroom",
+			inFlightFlushes:   indexer.DefaultMaxInFlightFlushes,
+			concurrentUploads: batchMaxConcurrentUploadsDefault,
+			wantErr:           false,
+		},
+		{
+			name:              "exactly at the floor",
+			inFlightFlushes:   20,
+			concurrentUploads: 20 * indexesPerFlushBudget,
+			wantErr:           false,
+		},
+		{
+			name:              "one upload slot under the floor",
+			inFlightFlushes:   20,
+			concurrentUploads: 20*indexesPerFlushBudget - 1,
+			wantErr:           true,
+		},
+		{
+			name:              "in-flight cap raised without raising uploads",
+			inFlightFlushes:   32,
+			concurrentUploads: batchMaxConcurrentUploadsDefault,
+			wantErr:           true,
+		},
+		{
+			name:              "a single flush needs one upload slot per index",
+			inFlightFlushes:   1,
+			concurrentUploads: indexesPerFlushBudget,
+			wantErr:           false,
+		},
+		{
+			name:              "a single flush short by one",
+			inFlightFlushes:   1,
+			concurrentUploads: indexesPerFlushBudget - 1,
+			wantErr:           true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := NewResourceIndexerOptions()
+			o.BatchMaxInFlightFlushes = tt.inFlightFlushes
+			o.BatchMaxConcurrentUploads = tt.concurrentUploads
+
+			err := o.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatalf("Validate() = nil, want an error: %d uploads is under %d in-flight flushes * %d indices = %d",
+					tt.concurrentUploads, tt.inFlightFlushes, indexesPerFlushBudget, tt.inFlightFlushes*indexesPerFlushBudget)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Validate() = %v, want no error: %d uploads covers %d in-flight flushes * %d indices = %d",
+					err, tt.concurrentUploads, tt.inFlightFlushes, indexesPerFlushBudget, tt.inFlightFlushes*indexesPerFlushBudget)
 			}
 		})
 	}

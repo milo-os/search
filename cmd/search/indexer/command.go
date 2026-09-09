@@ -29,6 +29,30 @@ import (
 // process, so it is duplicated here to bound the indexing timeouts.
 const consumerAckWait = 300 * time.Second
 
+const (
+	// heartbeatMargin is how many heartbeat intervals an ackWait must fit. The
+	// spare intervals absorb a lost or delayed tick without JetStream giving up on
+	// a message that is still being indexed.
+	heartbeatMargin = 3
+	// heartbeatHardFloor is the point below which a single delayed tick already
+	// redelivers messages, so falling under it is an error rather than a warning.
+	heartbeatHardFloor = 2
+)
+
+// indexesPerFlushBudget is the assumed maximum number of index policies a
+// single message can fan out to during one flush. Each in-flight flush issues
+// one upload per index, so the upload semaphore must be able to accommodate
+// every in-flight flush's per-index uploads at once, or flushes stall holding
+// their flush slots while waiting on the upload semaphore and memory stays
+// pinned. Taken from the production profile (see indexer.DefaultMaxInFlightFlushes).
+const indexesPerFlushBudget = 10
+
+// batchMaxConcurrentUploadsDefault sits above the floor the upload semaphore has
+// to clear, indexer.DefaultMaxInFlightFlushes * indexesPerFlushBudget
+// (16 * 10 = 160), leaving headroom for a policy count that grows past the
+// profiled fan-out before the invariant in Validate trips.
+const batchMaxConcurrentUploadsDefault = 200
+
 // ResourceIndexerOptions holds the configuration for the resource indexer.
 type ResourceIndexerOptions struct {
 	// NATS connection and consumer settings
@@ -83,9 +107,9 @@ func NewResourceIndexerOptions() *ResourceIndexerOptions {
 		FlushInterval:               10 * time.Second,
 		MeilisearchMaxRetries:       3,
 		MeilisearchRetryDelay:       500 * time.Millisecond,
-		BatchMaxConcurrentUploads:   200,
-		BatchMaxInFlightFlushes:     16,
-		BatchAckProgressInterval:    60 * time.Second,
+		BatchMaxConcurrentUploads:   batchMaxConcurrentUploadsDefault,
+		BatchMaxInFlightFlushes:     indexer.DefaultMaxInFlightFlushes,
+		BatchAckProgressInterval:    indexer.DefaultAckProgressInterval,
 		MetricsBindAddress:          ":8080",
 		EnableMultiTenancy:          false,
 	}
@@ -117,7 +141,7 @@ func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 	// instead of at the in-flight cap, leaving flushes stalled while holding their
 	// slots.
 	fs.IntVar(&o.BatchMaxConcurrentUploads, "batch-max-concurrent-uploads", o.BatchMaxConcurrentUploads, "The maximum number of concurrent uploads to Meilisearch. Keep it above batch-max-inflight-flushes times the number of index policies, since each flush issues one upload per index.")
-	fs.IntVar(&o.BatchMaxInFlightFlushes, "batch-max-inflight-flushes", o.BatchMaxInFlightFlushes, "The maximum number of flushes in flight at once. Each in-flight flush pins its batch of NATS messages in memory, so this bounds the indexer's memory use and applies backpressure to the consumer.")
+	fs.IntVar(&o.BatchMaxInFlightFlushes, "batch-max-inflight-flushes", o.BatchMaxInFlightFlushes, "The maximum number of flushes in flight at once. Each in-flight flush pins its batch of NATS messages in memory, so this bounds the indexer's memory use and applies backpressure to the consumer. The default is tuned against measured Meilisearch task latency; see indexer.DefaultMaxInFlightFlushes before changing it.")
 
 	fs.DurationVar(&o.BatchAckProgressInterval, "batch-ack-progress-interval", o.BatchAckProgressInterval, "How often a running flush tells JetStream its messages are still in progress, extending ackWait. Must stay comfortably under the consumer ackWait so a heartbeat always lands inside the window.")
 
@@ -165,8 +189,13 @@ func (o *ResourceIndexerOptions) Validate() error {
 	if o.MeilisearchRetryDelay < 0 {
 		return fmt.Errorf("meilisearch-retry-delay must be non-negative")
 	}
-	if o.BatchMaxConcurrentUploads < 1 {
-		return fmt.Errorf("batch-max-concurrent-uploads must be greater than 0")
+	// Each in-flight flush issues one upload per index, so the upload semaphore
+	// must accommodate every in-flight flush's per-index uploads at once.
+	// Otherwise flushes stall waiting on the upload semaphore while still holding
+	// their flush slots, and the memory those batches pin is held longer than the
+	// in-flight cap implies.
+	if minUploads := o.BatchMaxInFlightFlushes * indexesPerFlushBudget; o.BatchMaxConcurrentUploads < minUploads {
+		return fmt.Errorf("batch-max-concurrent-uploads %d must be at least batch-max-inflight-flushes (%d) times the per-flush index fan-out (%d) = %d", o.BatchMaxConcurrentUploads, o.BatchMaxInFlightFlushes, indexesPerFlushBudget, minUploads)
 	}
 	if o.BatchMaxInFlightFlushes < 1 {
 		return fmt.Errorf("batch-max-inflight-flushes must be greater than 0")
@@ -182,9 +211,9 @@ func (o *ResourceIndexerOptions) Validate() error {
 	}
 	// A running flush heartbeats its messages every BatchAckProgressInterval, so
 	// the Meilisearch task wait no longer counts against ackWait. What must hold
-	// instead is that a heartbeat always lands well inside the window: at three
-	// intervals per ackWait, two can be lost or delayed before JetStream gives up
-	// on a message that is still being indexed. The ackWait lives on the consumer
+	// instead is that a heartbeat always lands well inside the window: at
+	// heartbeatMargin intervals per ackWait, the spare ones can be lost or delayed
+	// before JetStream gives up on a message that is still being indexed. The ackWait lives on the consumer
 	// manifest and is not visible to this process, so the shipped value is
 	// asserted here.
 	//
@@ -197,8 +226,8 @@ func (o *ResourceIndexerOptions) Validate() error {
 	// correctness; the backpressure warning log and a rise in the
 	// search_indexer_flush_slot_wait_seconds histogram are the signal that it is
 	// happening.
-	if budget := 3 * o.BatchAckProgressInterval; budget > consumerAckWait {
-		return fmt.Errorf("3 * batch-ack-progress-interval is %s, which exceeds the consumer ackWait of %s: lower batch-ack-progress-interval", budget, consumerAckWait)
+	if budget := heartbeatMargin * o.BatchAckProgressInterval; budget > consumerAckWait {
+		return fmt.Errorf("%d * batch-ack-progress-interval is %s, which exceeds the consumer ackWait of %s: lower batch-ack-progress-interval", heartbeatMargin, budget, consumerAckWait)
 	}
 
 	return nil
@@ -429,24 +458,24 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 // applies an AckWait change to an existing durable consumer is unverified, so a
 // long-lived consumer can still be running with the value it was created with.
 //
-// The rule is deliberately looser than Validate()'s. Failing on the 3x margin
-// would crashloop every pod of a rollout that landed before the consumer was
-// reconciled, taking down indexing to protect it. So a shortfall against the 3x
-// margin is only a warning: the batch still gets heartbeats, just with less room
-// for one to be lost. It is an error only when fewer than two heartbeats fit in
-// the window, where a single delayed tick means JetStream redelivers messages
-// that are still being indexed.
+// The rule is deliberately looser than Validate()'s. Failing on the full
+// heartbeatMargin would crashloop every pod of a rollout that landed before the
+// consumer was reconciled, taking down indexing to protect it. So a shortfall
+// against that margin is only a warning: the batch still gets heartbeats, just
+// with less room for one to be lost. It is an error only when fewer than
+// heartbeatHardFloor heartbeats fit in the window, where a single delayed tick
+// means JetStream redelivers messages that are still being indexed.
 func checkAckWait(name string, ackWait time.Duration, progress time.Duration) error {
 	klog.Infof("Consumer %s has a live ackWait of %s; heartbeating in-flight batches every %s", name, ackWait, progress)
 
-	if budget := 2 * progress; budget > ackWait {
-		return fmt.Errorf("consumer %s has a live ackWait of %s, but 2 * batch-ack-progress-interval is %s, so a heartbeat can miss the window entirely: lower batch-ack-progress-interval or bring the consumer up to the %s the manifest expects",
-			name, ackWait, budget, consumerAckWait)
+	if budget := heartbeatHardFloor * progress; budget > ackWait {
+		return fmt.Errorf("consumer %s has a live ackWait of %s, but %d * batch-ack-progress-interval is %s, so a heartbeat can miss the window entirely: lower batch-ack-progress-interval or bring the consumer up to the %s the manifest expects",
+			name, ackWait, heartbeatHardFloor, budget, consumerAckWait)
 	}
 
-	if budget := 3 * progress; budget > ackWait {
-		klog.Warningf("Consumer %s has a live ackWait of %s, which is under the %s that 3 * batch-ack-progress-interval (%s) wants: heartbeats still fit, but only just. Expected the manifest value of %s; check whether the consumer has been reconciled.",
-			name, ackWait, budget, progress, consumerAckWait)
+	if budget := heartbeatMargin * progress; budget > ackWait {
+		klog.Warningf("Consumer %s has a live ackWait of %s, which is under the %s that %d * batch-ack-progress-interval (%s) wants: heartbeats still fit, but only just. Expected the manifest value of %s; check whether the consumer has been reconciled.",
+			name, ackWait, budget, heartbeatMargin, progress, consumerAckWait)
 	}
 
 	return nil
