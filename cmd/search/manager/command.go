@@ -78,7 +78,7 @@ func NewControllerManagerOptions() *ControllerManagerOptions {
 		EnableHTTP2:                false,
 		MaxCELDepth:                50,
 		MeilisearchChunkSize:       1000,
-		MeilisearchTaskWaitTimeout: 30 * time.Second,
+		MeilisearchTaskWaitTimeout: 10 * time.Minute,
 		MeilisearchHTTPTimeout:     60 * time.Second,
 		MeilisearchDomain:          "http://meilisearch.meilisearch-system.svc.cluster.local:7700",
 		NatsURL:                    "nats://nats.nats-system.svc.cluster.local:4222",
@@ -104,7 +104,7 @@ func (o *ControllerManagerOptions) AddFlags(fs *pflag.FlagSet) {
 
 	// Meilisearch
 	fs.StringVar(&o.MeilisearchDomain, "meilisearch-domain", o.MeilisearchDomain, "Domain of the Meilisearch instance.")
-	fs.DurationVar(&o.MeilisearchTaskWaitTimeout, "meilisearch-task-wait-timeout", o.MeilisearchTaskWaitTimeout, "Timeout for waiting for Meilisearch tasks to complete.")
+	fs.DurationVar(&o.MeilisearchTaskWaitTimeout, "meilisearch-task-wait-timeout", o.MeilisearchTaskWaitTimeout, "Deadline for a single Meilisearch task to complete. The manager only waits on one-off index operations (create, delete, delete-all, settings updates), which can legitimately take minutes on large indexes, so this is set generously.")
 	fs.DurationVar(&o.MeilisearchHTTPTimeout, "meilisearch-http-timeout", o.MeilisearchHTTPTimeout, "Timeout for HTTP requests to Meilisearch.")
 	fs.IntVar(&o.MeilisearchChunkSize, "meilisearch-chunk-size", o.MeilisearchChunkSize, "The number of documents to process in a single chunk.")
 
