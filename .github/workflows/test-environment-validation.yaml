@@ -30,6 +30,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Test HTTP probe helper
+        run: python3 -m unittest discover -s test/helpers -p 'test_*.py' -v
+
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
@@ -53,16 +56,13 @@ jobs:
             [worker.oci]
               max-parallelism = 4
 
-      - name: Install kubectl
-        uses: azure/setup-kubectl@v5
-        with:
-          version: 'v1.30.0'
-
       - name: Install KinD
         uses: helm/kind-action@v1
         with:
           install_only: true
           version: v0.24.0
+          # Match the node version supplied by test-infra v0.6.0.
+          kubectl_version: v1.32.0
 
       - name: Verify prerequisites
         run: |
