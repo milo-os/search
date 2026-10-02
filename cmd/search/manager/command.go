@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/dynamic"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -188,12 +190,14 @@ func Run(o *ControllerManagerOptions, ctx context.Context) error {
 	cfg := ctrl.GetConfigOrDie()
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme:                  scheme,
-		Metrics:                 metricsserver.Options{BindAddress: o.MetricsAddr, SecureServing: o.SecureMetrics, TLSOpts: tlsOpts},
-		HealthProbeBindAddress:  o.ProbeAddr,
-		LeaderElection:          o.EnableLeaderElection,
-		LeaderElectionID:        "controller.search.miloapis.com",
-		LeaderElectionNamespace: o.LeaderElectionNamespace,
+		Scheme:                        scheme,
+		Metrics:                       metricsserver.Options{BindAddress: o.MetricsAddr, SecureServing: o.SecureMetrics, TLSOpts: tlsOpts},
+		HealthProbeBindAddress:        o.ProbeAddr,
+		LeaderElection:                o.EnableLeaderElection,
+		LeaderElectionID:              "controller.search.miloapis.com",
+		LeaderElectionNamespace:       o.LeaderElectionNamespace,
+		LeaderElectionConfig:          leaderElectionRestConfig(cfg),
+		LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -320,4 +324,21 @@ func Run(o *ControllerManagerOptions, ctx context.Context) error {
 		os.Exit(1)
 	}
 	return nil
+}
+
+const (
+	leaderElectionQPS   = 5
+	leaderElectionBurst = 10
+)
+
+func leaderElectionRestConfig(base *rest.Config) *rest.Config {
+	cfg := rest.CopyConfig(base)
+	cfg.RateLimiter = nil
+	cfg.QPS = leaderElectionQPS
+	cfg.Burst = leaderElectionBurst
+	cfg.Dial = (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+	return cfg
 }
