@@ -28,7 +28,8 @@ spec:
         - script:
             timeout: 120s
             content: |
-              kubectl run curl-health-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -f -v http://meilisearch.meilisearch-system.svc.cluster.local:7700/health
+              set -e
+              python3 ../../helpers/curl_probe.py http://meilisearch.meilisearch-system.svc.cluster.local:7700/health
             check:
               ($error): ~
 
@@ -38,7 +39,8 @@ spec:
         - script:
             timeout: 120s
             content: |
-              kubectl run curl-create-index-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -f -X POST \
+              set -e
+              python3 ../../helpers/curl_probe.py -X POST \
                 -H "Authorization: Bearer search-master-key" \
                 -H "Content-Type: application/json" \
                 --data '{"uid": "movies", "primaryKey": "id"}' \
@@ -52,10 +54,11 @@ spec:
         - script:
             timeout: 120s
             content: |
+              set -e
               # Get title from ConfigMap
-              TITLE=$(kubectl get cm meilisearch-test-data -o jsonpath='{.data.title}')
+              TITLE=$(kubectl --request-timeout=5s get cm meilisearch-test-data -o jsonpath='{.data.title}')
               
-              kubectl run curl-add-doc-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -f -X POST \
+              python3 ../../helpers/curl_probe.py -X POST \
                 -H "Authorization: Bearer search-master-key" \
                 -H "Content-Type: application/json" \
                 --data '[{"id": 1, "title": "'"$TITLE"'", "genres": ["Romance", "Drama"]}]' \
@@ -67,18 +70,20 @@ spec:
       description: "Searches for the document to verify indexing"
       try:
         - script:
-            timeout: 20s
+            timeout: 120s
             content: |
+              set -e
               # Wait for task to process
               sleep 2
               # Get title from ConfigMap
-              TITLE=$(kubectl get cm meilisearch-test-data -o jsonpath='{.data.title}')
+              TITLE=$(kubectl --request-timeout=5s get cm meilisearch-test-data -o jsonpath='{.data.title}')
               
-              kubectl run curl-search-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -f -X POST \
+              RESPONSE=$(python3 ../../helpers/curl_probe.py -X POST \
                 -H "Authorization: Bearer search-master-key" \
                 -H "Content-Type: application/json" \
                 --data '{"q": "'"$TITLE"'"}' \
-                http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/movies/search | grep "$TITLE"
+                http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/movies/search)
+              printf '%s\n' "$RESPONSE" | grep -F -- "$TITLE"
             check:
               ($error): ~
     
