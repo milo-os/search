@@ -8,6 +8,12 @@ spec:
   kind: ResourceIndexPolicy
   plural: resourceindexpolicies
   singular: resourceindexpolicy
+  subresources:
+    - name: status
+      permissions:
+        - get
+        - update
+        - patch
   permissions:
     - list
     - get
