@@ -214,10 +214,11 @@ spec:
       description: "Confirms annotation paths are stored as dot-notation (not bracket notation) in Meilisearch"
       try:
         - script:
-            timeout: 30s
+            timeout: 120s
             content: |
-              kubectl run curl-cm-attrs-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -H "Authorization: Bearer search-master-key" http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_ConfigMap/settings/searchable-attributes
+              python3 ../../helpers/curl_probe.py -H "Authorization: Bearer search-master-key" http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_ConfigMap/settings/searchable-attributes
             check:
+              ($error): ~
               (contains($stdout, 'metadata.annotations.app.kubernetes.io/description')): true
               (contains($stdout, 'metadata.annotations.app.kubernetes.io/owner')): true
               (contains($stdout, 'metadata.annotations.kubernetes.io/display-name')): true
@@ -227,10 +228,11 @@ spec:
       description: "Confirms spec/status paths are stored as dot-notation in Meilisearch, including [*] wildcard path"
       try:
         - script:
-            timeout: 30s
+            timeout: 120s
             content: |
-              kubectl run curl-svc-attrs-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -H "Authorization: Bearer search-master-key" http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_Service/settings/searchable-attributes
+              python3 ../../helpers/curl_probe.py -H "Authorization: Bearer search-master-key" http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_Service/settings/searchable-attributes
             check:
+              ($error): ~
               (contains($stdout, 'metadata.labels.app')): true
               (contains($stdout, 'metadata.labels.app.kubernetes.io/name')): true
               (contains($stdout, 'spec.type')): true
@@ -245,30 +247,33 @@ spec:
       description: "Finds ConfigMap by value in a bracket-notation annotation field"
       try:
         - script:
-            timeout: 30s
+            timeout: 120s
             content: |
-              kubectl run curl-search-desc-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "Platform configuration"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_ConfigMap/search
+              python3 ../../helpers/curl_probe.py -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "Platform configuration"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_ConfigMap/search
             check:
+              ($error): ~
               (contains($stdout, 'e2e-cm-platform')): true
 
     - name: search-configmap-by-annotation-owner
       description: "Finds ConfigMap by owner annotation value (bracket notation)"
       try:
         - script:
-            timeout: 30s
+            timeout: 120s
             content: |
-              kubectl run curl-search-owner-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "data-team"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_ConfigMap/search
+              python3 ../../helpers/curl_probe.py -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "data-team"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_ConfigMap/search
             check:
+              ($error): ~
               (contains($stdout, 'e2e-cm-database')): true
 
     - name: search-configmap-by-display-name-annotation
       description: "Finds ConfigMap by fully qualified kubernetes.io/display-name annotation"
       try:
         - script:
-            timeout: 30s
+            timeout: 120s
             content: |
-              kubectl run curl-search-dn-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "Platform Config"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_ConfigMap/search
+              python3 ../../helpers/curl_probe.py -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "Platform Config"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_ConfigMap/search
             check:
+              ($error): ~
               (contains($stdout, 'e2e-cm-platform')): true
 
     # =========================================================================
@@ -278,10 +283,11 @@ spec:
       description: "Finds ConfigMap by value in a bracket-notation data field"
       try:
         - script:
-            timeout: 30s
+            timeout: 120s
             content: |
-              kubectl run curl-search-data-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "database-value"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_ConfigMap/search
+              python3 ../../helpers/curl_probe.py -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "database-value"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_ConfigMap/search
             check:
+              ($error): ~
               (contains($stdout, 'e2e-cm-database')): true
 
     # =========================================================================
@@ -292,50 +298,55 @@ spec:
       description: "Finds Service by spec.type (standard dot-notation spec field)"
       try:
         - script:
-            timeout: 30s
+            timeout: 120s
             content: |
-              kubectl run curl-search-type-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "ClusterIP"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_Service/search
+              python3 ../../helpers/curl_probe.py -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "ClusterIP"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_Service/search
             check:
+              ($error): ~
               (contains($stdout, 'e2e-svc-frontend')): true
 
     - name: search-service-by-fully-qualified-label
       description: "Finds Service by fully qualified app.kubernetes.io/name label (bracket notation)"
       try:
         - script:
-            timeout: 30s
+            timeout: 120s
             content: |
-              kubectl run curl-search-fql-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "frontend-service"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_Service/search
+              python3 ../../helpers/curl_probe.py -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "frontend-service"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_Service/search
             check:
+              ($error): ~
               (contains($stdout, 'e2e-svc-frontend')): true
 
     - name: search-service-by-spec-selector
       description: "Finds Service by spec.selector.app (bracket notation spec field)"
       try:
         - script:
-            timeout: 30s
+            timeout: 120s
             content: |
-              kubectl run curl-search-sel-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "frontend"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_Service/search
+              python3 ../../helpers/curl_probe.py -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "frontend"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_Service/search
             check:
+              ($error): ~
               (contains($stdout, 'e2e-svc-frontend')): true
 
     - name: search-service-by-port-wildcard-second
       description: "Finds Service by second port name via .spec.ports[*].name (anti-regression for [*] wildcard)"
       try:
         - script:
-            timeout: 30s
+            timeout: 120s
             content: |
-              kubectl run curl-search-port2-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "grpc-backend"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_Service/search
+              python3 ../../helpers/curl_probe.py -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "grpc-backend"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_Service/search
             check:
+              ($error): ~
               (contains($stdout, 'e2e-svc-frontend')): true
 
     - name: search-service-by-port-wildcard-first
       description: "Finds Service by first port name via .spec.ports[*].name"
       try:
         - script:
-            timeout: 30s
+            timeout: 120s
             content: |
-              kubectl run curl-search-port1-$(date +%s) --image=curlimages/curl --restart=Never --rm -i -- curl -sf -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "http-frontend"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_Service/search
+              python3 ../../helpers/curl_probe.py -X POST -H "Authorization: Bearer search-master-key" -H "Content-Type: application/json" --data '{"q": "http-frontend"}' http://meilisearch.meilisearch-system.svc.cluster.local:7700/indexes/_v1_Service/search
             check:
+              ($error): ~
               (contains($stdout, 'e2e-svc-frontend')): true
 
     # =========================================================================
