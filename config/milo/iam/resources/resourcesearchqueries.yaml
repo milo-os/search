@@ -10,3 +10,6 @@ spec:
   singular: resourcesearchquery
   permissions:
     - create
+  parentResources:
+    - apiGroup: resourcemanager.miloapis.com
+      kind: Project
