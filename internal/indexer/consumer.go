@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/nats-io/nats.go/jetstream"
+	policyevaluation "go.miloapis.net/search/internal/policy/evaluation"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -165,6 +166,7 @@ func (i *Indexer) Start(ctx context.Context) error {
 		)
 
 		policies := i.policyCache.GetPolicies()
+		gvk := obj.GroupVersionKind()
 
 		for _, cp := range policies {
 			evalResult, err := cp.Evaluate(obj)
@@ -195,8 +197,10 @@ func (i *Indexer) Start(ctx context.Context) error {
 
 				upserts = append(upserts, UpsertOp{IndexUID: cp.Policy.Status.IndexName, Doc: doc})
 			} else {
-				// "Update and patch events that don't match should still queue a delete operation"
-				if event.Verb == "update" || event.Verb == "patch" {
+				// An update or patch to a resource of the policy's kind that no
+				// longer passes its conditions may have been indexed before, so
+				// it is deleted. Policies for other kinds never indexed it.
+				if (event.Verb == "update" || event.Verb == "patch") && targetsResource(cp, gvk.Group, gvk.Kind) {
 					if cp.Policy.Status.IndexName != "" {
 						deletes = append(deletes, DeleteOp{IndexUID: cp.Policy.Status.IndexName, DocID: resourceUID})
 					}
@@ -226,9 +230,10 @@ func (i *Indexer) Start(ctx context.Context) error {
 	return nil
 }
 
-// handleDelete queues a delete for the event's resource across all policies
-// with an index. It is used for delete-verb events and for create/update/patch
-// events on terminating resources (deletionTimestamp set).
+// handleDelete queues a delete for the event's resource across every policy
+// with an index that targets the resource's type. It is used for delete-verb
+// events and for create/update/patch events on terminating resources
+// (deletionTimestamp set).
 func (i *Indexer) handleDelete(msg jetstream.Msg, event *auditEvent) {
 	docID := resolveUID(event)
 	if docID == "" {
@@ -237,13 +242,19 @@ func (i *Indexer) handleDelete(msg jetstream.Msg, event *auditEvent) {
 		return
 	}
 
-	// Queue delete for all policies since we don't know which one it matched.
-	// They are submitted together so the batch that acks this message also owns
-	// every delete derived from it.
+	group, kind := deletedResourceType(event)
+
+	// Queue delete for all policies of the resource's type since we don't know
+	// which one it matched. They are submitted together so the batch that acks
+	// this message also owns every delete derived from it.
 	var deletes []DeleteOp
 	for _, cp := range i.policyCache.GetPolicies() {
 		// Skip if index name is not set yet
 		if cp.Policy.Status.IndexName == "" {
+			continue
+		}
+
+		if !targetsResource(cp, group, kind) {
 			continue
 		}
 
@@ -257,4 +268,28 @@ func (i *Indexer) handleDelete(msg jetstream.Msg, event *auditEvent) {
 	}
 
 	i.batcher.Submit(&msg, nil, deletes)
+}
+
+// targetsResource reports whether the policy indexes resources of the given
+// API group and kind. The version is ignored because a policy targets one
+// version while the same object can be written through any served version.
+// An empty kind matches every kind in the group.
+func targetsResource(cp *policyevaluation.CachedPolicy, group, kind string) bool {
+	target := cp.Policy.Spec.TargetResource
+	return target.Group == group && (kind == "" || target.Kind == kind)
+}
+
+// deletedResourceType returns the API group and kind of the resource an event
+// deletes. The kind comes from the response object when it is the resource
+// itself, as it is for terminating resources. A delete-verb response is often
+// a Status, and the audit objectRef names only the plural resource, so for
+// those only the group is known and the kind is returned empty.
+func deletedResourceType(event *auditEvent) (group, kind string) {
+	if event.ResponseObject != nil {
+		gvk := (&unstructured.Unstructured{Object: event.ResponseObject}).GroupVersionKind()
+		if gvk.Kind != "" && gvk.Kind != "Status" {
+			return gvk.Group, gvk.Kind
+		}
+	}
+	return event.ObjectRef.APIGroup, ""
 }
