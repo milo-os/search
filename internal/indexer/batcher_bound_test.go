@@ -17,7 +17,7 @@ import (
 // release is closed, with an atomic high-water mark of how many calls were
 // blocked concurrently. AddDocumentsAsync/DeleteDocumentsAsync return
 // immediately, so all observed concurrency comes from flushSem contention in
-// launchUpsertFlush/launchDeleteFlush, not from the upload semaphore.
+// launchFlush, not from the upload semaphore.
 type blockingSearchClient struct {
 	release chan struct{}
 
@@ -163,10 +163,9 @@ func runInFlightBoundTest(t *testing.T, isUpsert bool) {
 	// A single queueing goroutine can have at most maxInFlight batches
 	// actively flushing, plus the one further batch it has already pulled off
 	// the pending buffer while blocked waiting for the next free slot (see
-	// launchUpsertFlush/launchDeleteFlush: takeUpsertBatch/takeDeleteBatch run
-	// before acquireFlushSlot). That bounds memory to a small constant
-	// multiple of BatchSize regardless of how many messages are queued in
-	// total (numMsgs here), which is what issue #113 was about.
+	// launchFlush: takeBatch runs before acquireFlushSlot). That bounds memory
+	// to a small constant multiple of BatchSize regardless of how many messages
+	// are queued in total (numMsgs here), which is what issue #113 was about.
 	assert.LessOrEqual(t, unacked, (maxInFlight+1)*batchSize,
 		"more messages held un-acked than the in-flight bound should allow (queued=%d acked=%d)", queued, acked)
 	assert.Greater(t, unacked, 0)
@@ -197,7 +196,7 @@ func runInFlightBoundTest(t *testing.T, isUpsert bool) {
 }
 
 // TestBatcher_TickerFlush_RespectsInFlightBound covers the FlushInterval path:
-// runBatcher's own goroutine drives flushUpserts/flushDeletes, so a stalled
+// runBatcher's own goroutine drives flush, so a stalled
 // flush must not let the ticker spawn additional concurrent flushes beyond
 // MaxInFlightFlushes.
 func TestBatcher_TickerFlush_RespectsInFlightBound(t *testing.T) {

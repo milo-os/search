@@ -454,9 +454,9 @@ func TestBatcher_TrackMessage_DedupBySequence(t *testing.T) {
 	}
 
 	batcher.mu.Lock()
-	assert.Len(t, batcher.deleteMsgs, 1, "the same stream sequence must be tracked once")
-	assert.Len(t, batcher.deleteMsgSeqs, 1)
-	assert.Len(t, batcher.pendingDeletes, fanOut, "distinct doc IDs are still queued as separate deletes")
+	assert.Len(t, batcher.msgs, 1, "the same stream sequence must be tracked once")
+	assert.Len(t, batcher.msgSeqs, 1)
+	assert.Len(t, batcher.pending, fanOut, "distinct doc IDs are still queued as separate deletes")
 	batcher.mu.Unlock()
 
 	mockClient.On("DeleteDocumentsAsync", "index-1", mock.MatchedBy(func(ids []string) bool {
@@ -464,7 +464,7 @@ func TestBatcher_TrackMessage_DedupBySequence(t *testing.T) {
 	})).Return([]*meilisearch.Task{{TaskUID: 1}}, nil).Once()
 	mockClient.On("WaitForTasks", mock.Anything).Return(&meilisearch.Task{Status: "succeeded"}, nil).Once()
 
-	batcher.flushDeletes()
+	batcher.flush()
 
 	select {
 	case <-ackDone:
@@ -494,7 +494,7 @@ func TestBatcher_TrackMessage_MetadataErrorTreatedAsUnique(t *testing.T) {
 
 	batcher.mu.Lock()
 	defer batcher.mu.Unlock()
-	assert.Len(t, batcher.deleteMsgs, calls, "a message whose metadata errors cannot be deduped, so each call is appended")
+	assert.Len(t, batcher.msgs, calls, "a message whose metadata errors cannot be deduped, so each call is appended")
 }
 
 // TestBatcher_NakOnFlushFailure covers issue #113's failure path: whatever

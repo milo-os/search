@@ -197,14 +197,21 @@ The indexer manages documents in the search index based on audit events:
 | Create | Yes | Upsert document |
 | Create | No | Acknowledge only (never indexed) |
 | Update | Yes | Upsert document |
-| Update | No | Delete document (may have been indexed) |
-| Delete | — | Delete document |
+| Update | No | Delete document from the policy's index if the resource is the policy's kind (may have been indexed) |
+| Delete | — | Delete document from every index whose policy targets the resource's type |
 
-When a resource is updated and no longer matches any policy (e.g., labels
-changed, CEL filter no longer passes), the indexer queues a delete. Since the
-indexer doesn't track what was previously indexed, it always attempts deletion
-for non-matching updates — Meilisearch treats deletes of non-existent documents
-as no-ops.
+When a resource of a policy's kind is updated and no longer passes the policy's
+conditions (e.g., labels changed, CEL filter no longer passes), the indexer
+queues a delete for that policy's index. Since the indexer doesn't track what
+was previously indexed, it always attempts that deletion — Meilisearch treats
+deletes of non-existent documents as no-ops. Policies for other kinds are left
+alone, since they could never have indexed the resource.
+
+Kind matching compares API group and kind and ignores the version, since the
+same object can be written through any served version. A delete-verb event
+usually returns a `Status` and its object reference names only the plural
+resource, so its kind is unknown; it deletes from every policy in the
+resource's API group.
 
 ### Transformation
 
@@ -226,16 +233,19 @@ persistence.
 ### Batching
 
 For efficiency, batch multiple operations before persisting. The indexer
-maintains separate queues for upserts and deletes since Meilisearch requires
-separate API calls for each operation type. When either queue reaches its size
-or time threshold:
+buffers one pending operation per index and document, so a later upsert or
+delete for a document replaces an earlier one and only the latest is sent. When
+the buffer reaches its size or time threshold:
 
-1. Flush pending upserts via the [add documents][meilisearch-add-documents]
+1. Send its upserts via the [add documents][meilisearch-add-documents] endpoint
+   and its deletes via the [delete documents][meilisearch-delete-documents]
    endpoint
-2. Flush pending deletes via the [delete documents][meilisearch-delete-documents]
-   endpoint
-3. On success, acknowledge all events whose operations were flushed
-4. On failure, do not acknowledge — JetStream redelivers after ack timeout
+2. On success, acknowledge all events in the batch
+3. On failure, nack the batch so JetStream redelivers it
+
+Meilisearch applies an index's tasks in the order they are enqueued, so each
+batch enqueues its tasks only after the batch taken before it has enqueued.
+This ordering holds within one indexer replica only.
 
 Create events that don't match any policy can be acknowledged immediately since
 the resource was never indexed. Update and delete events that don't match should

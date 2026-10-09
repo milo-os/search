@@ -70,7 +70,7 @@ func TestBatcher_NoSplit_PureDeletes(t *testing.T) {
 	}
 
 	// Flush the 50-message remainder that never reached BatchSize on its own.
-	batcher.flushDeletes()
+	batcher.flush()
 
 	require.Eventually(t, func() bool {
 		return atomic.LoadInt32(&totalAcked) == numMsgs
@@ -96,11 +96,8 @@ func TestBatcher_NoSplit_PureDeletes(t *testing.T) {
 
 // TestBatcher_NoSplit_MixedUpsertsAndDeletes is the mixed-operation variant:
 // 250 messages, each submitting three upserts and two deletes together in one
-// Submit call. A message with both operation types is tracked in both the
-// upsert and delete buffers (see the nakBatch comment in batcher.go), so it
-// is acked once per buffer it populated - twice here, not once - but neither
-// its three upserts nor its two deletes may be split across two flushes of
-// their own kind.
+// Submit call. Each message must be acked exactly once, and neither its three
+// upserts nor its two deletes may be split across two flushes.
 func TestBatcher_NoSplit_MixedUpsertsAndDeletes(t *testing.T) {
 	const (
 		numUpsertIndices = 3
@@ -167,18 +164,17 @@ func TestBatcher_NoSplit_MixedUpsertsAndDeletes(t *testing.T) {
 		batcher.Submit(&jm, upserts, deletes)
 	}
 
-	// Flush whatever remainder didn't reach BatchSize in either buffer.
-	batcher.flushUpserts()
-	batcher.flushDeletes()
+	// Flush whatever remainder didn't reach BatchSize.
+	batcher.flush()
 
 	require.Eventually(t, func() bool {
 		for m := 1; m <= numMsgs; m++ {
-			if atomic.LoadInt32(&ackCounts[m]) != 2 {
+			if atomic.LoadInt32(&ackCounts[m]) != 1 {
 				return false
 			}
 		}
 		return true
-	}, 2*time.Second, 5*time.Millisecond, "expected every message to be acked exactly twice (once per buffer it populated)")
+	}, 2*time.Second, 5*time.Millisecond, "expected every message to be acked exactly once")
 
 	mu.Lock()
 	defer mu.Unlock()
