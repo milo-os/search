@@ -226,16 +226,19 @@ persistence.
 ### Batching
 
 For efficiency, batch multiple operations before persisting. The indexer
-maintains separate queues for upserts and deletes since Meilisearch requires
-separate API calls for each operation type. When either queue reaches its size
-or time threshold:
+buffers one pending operation per index and document, so a later upsert or
+delete for a document replaces an earlier one and only the latest is sent. When
+the buffer reaches its size or time threshold:
 
-1. Flush pending upserts via the [add documents][meilisearch-add-documents]
+1. Send its upserts via the [add documents][meilisearch-add-documents] endpoint
+   and its deletes via the [delete documents][meilisearch-delete-documents]
    endpoint
-2. Flush pending deletes via the [delete documents][meilisearch-delete-documents]
-   endpoint
-3. On success, acknowledge all events whose operations were flushed
-4. On failure, do not acknowledge — JetStream redelivers after ack timeout
+2. On success, acknowledge all events in the batch
+3. On failure, nack the batch so JetStream redelivers it
+
+Meilisearch applies an index's tasks in the order they are enqueued, so each
+batch enqueues its tasks only after the batch taken before it has enqueued.
+This ordering holds within one indexer replica only.
 
 Create events that don't match any policy can be acknowledged immediately since
 the resource was never indexed. Update and delete events that don't match should

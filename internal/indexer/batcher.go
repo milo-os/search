@@ -43,6 +43,7 @@ const (
 
 	flushTypeUpsert = "upsert"
 	flushTypeDelete = "delete"
+	flushTypeMixed  = "mixed"
 
 	flushStatusSuccess = "success"
 	flushStatusFailure = "failure"
@@ -95,21 +96,64 @@ type deleteItem struct {
 	docID    string
 }
 
+// pendingOp is the latest operation buffered for one document in one index.
+type pendingOp struct {
+	isDelete bool
+	upsert   upsertItem
+	delete   deleteItem
+}
+
+// batch is one flush's worth of operations and the messages they came from.
+type batch struct {
+	upserts []upsertItem
+	deletes []deleteItem
+	msgs    []jetstream.Msg
+	turn    enqueueTurn
+}
+
+// flushType labels the batch's metrics and logs by the operations it carries.
+func (bt *batch) flushType() string {
+	switch {
+	case len(bt.upserts) > 0 && len(bt.deletes) > 0:
+		return flushTypeMixed
+	case len(bt.deletes) > 0:
+		return flushTypeDelete
+	default:
+		return flushTypeUpsert
+	}
+}
+
+// enqueueTurn orders a batch's Meilisearch enqueue calls after those of every
+// batch taken before it. prev closes once the previous batch has enqueued its
+// tasks (or given up), and done must be closed once this batch has.
+type enqueueTurn struct {
+	prev <-chan struct{}
+	done chan struct{}
+}
+
 // Batcher manages batching of upsert and delete operations.
 type Batcher struct {
 	client      SearchClient
 	batchConfig BatchConfig
 
-	// Track unique operations in the current batch
-	pendingUpserts map[string]upsertItem
-	pendingDeletes map[string]deleteItem
+	// pending holds the latest operation per index/docID, so an upsert and a
+	// delete for the same document can never both be buffered: whichever came
+	// last is the one flushed. pendingUpserts counts the upserts among them.
+	pending        map[string]pendingOp
+	pendingUpserts int
 
 	// Track NATS messages for acknowledgement, with the stream sequences already
 	// buffered so deduplication stays O(1).
-	upsertMsgs    []jetstream.Msg
-	deleteMsgs    []jetstream.Msg
-	upsertMsgSeqs map[uint64]struct{}
-	deleteMsgSeqs map[uint64]struct{}
+	msgs    []jetstream.Msg
+	msgSeqs map[uint64]struct{}
+
+	// lastEnqueue is the done channel of the most recently taken batch.
+	// Meilisearch applies an index's tasks in the order they were enqueued, so
+	// chaining every batch's enqueue behind the one taken before it keeps an
+	// older operation from landing after a newer one for the same document when
+	// two batches are in flight. Only the enqueue calls are serialized; waiting
+	// for the tasks to finish still runs concurrently across flushes.
+	lastEnqueue chan struct{}
 
 	ackProgressInterval time.Duration
 
@@ -143,16 +187,17 @@ func NewBatcher(client SearchClient, batchConfig BatchConfig) *Batcher {
 		ackProgressInterval = DefaultAckProgressInterval
 	}
 
+	lastEnqueue := make(chan struct{})
+	close(lastEnqueue)
+
 	return &Batcher{
 		client:              client,
 		batchConfig:         batchConfig,
 		ackProgressInterval: ackProgressInterval,
-		pendingUpserts:      make(map[string]upsertItem),
-		pendingDeletes:      make(map[string]deleteItem),
-		upsertMsgs:          make([]jetstream.Msg, 0, batchConfig.BatchSize),
-		deleteMsgs:          make([]jetstream.Msg, 0, batchConfig.BatchSize),
-		upsertMsgSeqs:       make(map[uint64]struct{}),
-		deleteMsgSeqs:       make(map[uint64]struct{}),
+		lastEnqueue:         lastEnqueue,
+		pending:             make(map[string]pendingOp),
+		msgs:                make([]jetstream.Msg, 0, batchConfig.BatchSize),
+		msgSeqs:             make(map[uint64]struct{}),
 		sem:                 make(chan struct{}, maxConcurrent),
 		flushSem:            make(chan struct{}, maxInFlight),
 	}
@@ -198,6 +243,15 @@ func (b *Batcher) Submit(msg *jetstream.Msg, upserts []UpsertOp, deletes []Delet
 
 	b.mu.Lock()
 
+	// Deletes are buffered before upserts so that, within one message, a policy
+	// that matches wins over one that does not for the same index.
+	for _, op := range deletes {
+		b.setPending(op.IndexUID, op.DocID, pendingOp{
+			isDelete: true,
+			delete:   deleteItem{indexUID: op.IndexUID, docID: op.DocID},
+		})
+	}
+
 	for _, op := range upserts {
 		// Extract UID for deduplication key
 		var docID string
@@ -207,75 +261,64 @@ func (b *Batcher) Submit(msg *jetstream.Msg, upserts []UpsertOp, deletes []Delet
 			}
 		}
 
-		// Add/Update the pending item (last write wins for same docID)
-		b.pendingUpserts[op.IndexUID+"/"+docID] = upsertItem{
-			indexUID: op.IndexUID,
-			doc:      op.Doc,
-		}
-	}
-
-	for _, op := range deletes {
-		b.pendingDeletes[op.IndexUID+"/"+op.DocID] = deleteItem{
-			indexUID: op.IndexUID,
-			docID:    op.DocID,
-		}
+		b.setPending(op.IndexUID, docID, pendingOp{
+			upsert: upsertItem{indexUID: op.IndexUID, doc: op.Doc},
+		})
 	}
 
 	if msg != nil {
-		if len(upserts) > 0 {
-			b.trackMessage(msg, true)
-		}
-		if len(deletes) > 0 {
-			b.trackMessage(msg, false)
-		}
+		b.trackMessage(msg)
 	}
 
-	// Both triggers are evaluated once, here, after every operation belonging to
-	// this message is in the buffers, so a message is never split across two
-	// batches of the same kind.
+	// The trigger is evaluated once, here, after every operation belonging to
+	// this message is in the buffer, so a message is never split across two
+	// batches.
 	//
-	// Upserts flush on the message count or the key count: a source message
-	// contributes at most one upsert key per policy but the keys collapse by
-	// document, so both clauses trip at roughly the same point.
+	// A batch flushes on the message count or the upsert key count: a source
+	// message contributes at most one upsert key per policy but the keys
+	// collapse by document, so both clauses trip at roughly the same point.
 	//
-	// Deletes flush on the message count only. A single source message fans out
-	// into one delete key per matching policy, so a key-count trigger would fire
-	// after a fraction of the messages and produce one tiny Meilisearch task per
-	// index. Counting messages keeps each flush at roughly BatchSize IDs per
-	// index, which Meilisearch batches far more efficiently. Dropping the
-	// key-count clause does not risk unbounded growth: pending delete keys are
-	// bounded by policy count times BatchSize and each key is two short strings,
-	// so it is the message slice, holding full payloads, that this bound
-	// protects.
+	// Delete keys are not counted. A single source message can fan out into one
+	// delete key per policy, so a delete key-count trigger would fire after a
+	// fraction of the messages and produce one tiny Meilisearch task per index.
+	// Pending delete keys are bounded by policy count times BatchSize and each
+	// key is two short strings, so it is the message slice, holding full
+	// payloads, that the message count protects.
 	var (
-		upsertQueue []upsertItem
-		upsertMsgs  []jetstream.Msg
-		upsertDue   bool
-		deleteQueue []deleteItem
-		deleteMsgs  []jetstream.Msg
-		deleteDue   bool
+		bt  batch
+		due bool
 	)
-	if len(b.upsertMsgs) >= b.batchConfig.BatchSize || len(b.pendingUpserts) >= b.batchConfig.BatchSize {
-		upsertQueue, upsertMsgs = b.takeUpsertBatch()
-		upsertDue = true
-	}
-	if len(b.deleteMsgs) >= b.batchConfig.BatchSize {
-		deleteQueue, deleteMsgs = b.takeDeleteBatch()
-		deleteDue = true
+	if len(b.msgs) >= b.batchConfig.BatchSize || b.pendingUpserts >= b.batchConfig.BatchSize {
+		bt = b.takeBatch()
+		due = true
 	}
 
-	searchmetrics.IndexerPendingOperations.WithLabelValues(flushTypeUpsert).Set(float64(len(b.pendingUpserts)))
-	searchmetrics.IndexerPendingOperations.WithLabelValues(flushTypeDelete).Set(float64(len(b.pendingDeletes)))
+	b.setPendingMetrics()
 	b.mu.Unlock()
 
-	if upsertDue {
-		klog.Infof("Batch size reached, flushing %d upserts from %d unique messages", len(upsertQueue), len(upsertMsgs))
-		b.launchUpsertFlush(upsertQueue, upsertMsgs)
+	if due {
+		klog.Infof("Batch size reached, flushing %d upserts and %d deletes from %d unique messages", len(bt.upserts), len(bt.deletes), len(bt.msgs))
+		b.launchFlush(bt)
 	}
-	if deleteDue {
-		klog.Infof("Batch size reached, flushing %d deletes from %d unique messages", len(deleteQueue), len(deleteMsgs))
-		b.launchDeleteFlush(deleteQueue, deleteMsgs)
+}
+
+// setPending records op as the latest operation for docID in indexUID,
+// replacing whatever was buffered for it. MUST hold lock.
+func (b *Batcher) setPending(indexUID, docID string, op pendingOp) {
+	key := indexUID + "/" + docID
+	if prev, ok := b.pending[key]; ok && !prev.isDelete {
+		b.pendingUpserts--
 	}
+	if !op.isDelete {
+		b.pendingUpserts++
+	}
+	b.pending[key] = op
+}
+
+// setPendingMetrics publishes the buffered operation counts. MUST hold lock.
+func (b *Batcher) setPendingMetrics() {
+	searchmetrics.IndexerPendingOperations.WithLabelValues(flushTypeUpsert).Set(float64(b.pendingUpserts))
+	searchmetrics.IndexerPendingOperations.WithLabelValues(flushTypeDelete).Set(float64(len(b.pending) - b.pendingUpserts))
 }
 
 // QueueUpsert adds a document to the pending map and triggers an asynchronous
@@ -293,36 +336,22 @@ func (b *Batcher) QueueDelete(indexUID string, docID string, msg *jetstream.Msg)
 	b.Submit(msg, nil, []DeleteOp{{IndexUID: indexUID, DocID: docID}})
 }
 
-// trackMessage adds the message to the appropriate list if it hasn't been seen yet.
+// trackMessage adds the message to the batch if it hasn't been seen yet.
 // must be called with lock held.
-func (b *Batcher) trackMessage(msg *jetstream.Msg, isUpsert bool) {
+func (b *Batcher) trackMessage(msg *jetstream.Msg) {
 	meta, err := (*msg).Metadata()
 	if err != nil {
 		klog.Warningf("Failed to get message metadata, message will be treated as unique: %v", err)
-		if isUpsert {
-			b.upsertMsgs = append(b.upsertMsgs, *msg)
-		} else {
-			b.deleteMsgs = append(b.deleteMsgs, *msg)
-		}
+		b.msgs = append(b.msgs, *msg)
 		return
 	}
 
 	seq := meta.Sequence.Stream
-
-	if isUpsert {
-		if _, ok := b.upsertMsgSeqs[seq]; ok {
-			return // Already have this message
-		}
-		b.upsertMsgSeqs[seq] = struct{}{}
-		b.upsertMsgs = append(b.upsertMsgs, *msg)
-		return
-	}
-
-	if _, ok := b.deleteMsgSeqs[seq]; ok {
+	if _, ok := b.msgSeqs[seq]; ok {
 		return // Already have this message
 	}
-	b.deleteMsgSeqs[seq] = struct{}{}
-	b.deleteMsgs = append(b.deleteMsgs, *msg)
+	b.msgSeqs[seq] = struct{}{}
+	b.msgs = append(b.msgs, *msg)
 }
 
 func (b *Batcher) runBatcher(ctx context.Context) {
@@ -334,66 +363,60 @@ func (b *Batcher) runBatcher(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			b.flushUpserts()
-			b.flushDeletes()
+			b.flush()
 		}
 	}
 }
 
-func (b *Batcher) flushUpserts() {
+func (b *Batcher) flush() {
 	b.mu.Lock()
-	if len(b.upsertMsgs) == 0 && len(b.pendingUpserts) == 0 {
+	if len(b.msgs) == 0 && len(b.pending) == 0 {
 		b.mu.Unlock()
 		return
 	}
-	queue, msgs := b.takeUpsertBatch()
-	searchmetrics.IndexerPendingOperations.WithLabelValues(flushTypeUpsert).Set(0)
+	bt := b.takeBatch()
+	b.setPendingMetrics()
 	b.mu.Unlock()
 
-	b.launchUpsertFlush(queue, msgs)
+	b.launchFlush(bt)
 }
 
-func (b *Batcher) flushDeletes() {
-	b.mu.Lock()
-	if len(b.deleteMsgs) == 0 && len(b.pendingDeletes) == 0 {
-		b.mu.Unlock()
-		return
-	}
-	queue, msgs := b.takeDeleteBatch()
-	searchmetrics.IndexerPendingOperations.WithLabelValues(flushTypeDelete).Set(0)
-	b.mu.Unlock()
-
-	b.launchDeleteFlush(queue, msgs)
-}
-
-// launchUpsertFlush waits for a free in-flight flush slot and then runs the
-// flush asynchronously. Blocking the caller is intentional: the JetStream
-// handler queues messages sequentially, so blocking here makes the consumer's
-// prefetch window the intake bound instead of letting flush goroutines (and the
-// message payloads they pin) pile up without limit.
-func (b *Batcher) launchUpsertFlush(queue []upsertItem, msgs []jetstream.Msg) {
-	if !b.acquireFlushSlot(flushTypeUpsert) {
+// launchFlush waits for the previous batch to finish enqueueing and for a free
+// in-flight flush slot, then runs the flush asynchronously. Blocking the caller
+// is intentional: the JetStream handler queues messages sequentially, so
+// blocking here makes the consumer's prefetch window the intake bound instead
+// of letting flush goroutines (and the message payloads they pin) pile up
+// without limit.
+//
+// The turn is awaited before the slot so that a slot is only ever held by a
+// batch whose predecessors have all enqueued. Holding a slot while waiting for
+// the turn would let later batches fill every slot and starve the batch they
+// are waiting on.
+func (b *Batcher) launchFlush(bt batch) {
+	flushType := bt.flushType()
+	if !b.awaitTurn(bt.turn, flushType) || !b.acquireFlushSlot(flushType) {
 		// Shutting down. The batch is abandoned without being acked or nacked, so
 		// JetStream redelivers it to another replica once ackWait expires.
+		close(bt.turn.done)
 		return
 	}
 	go func() {
 		defer func() { <-b.flushSem }()
-		b.performUpsertFlush(queue, msgs)
+		b.performFlush(bt)
 	}()
 }
 
-// launchDeleteFlush is the delete counterpart of launchUpsertFlush.
-func (b *Batcher) launchDeleteFlush(queue []deleteItem, msgs []jetstream.Msg) {
-	if !b.acquireFlushSlot(flushTypeDelete) {
-		// Shutting down. The batch is abandoned without being acked or nacked, so
-		// JetStream redelivers it to another replica once ackWait expires.
-		return
+// awaitTurn blocks until every batch taken before this one has enqueued its
+// tasks. It returns false if the batcher's context is cancelled first. Never
+// call it while holding b.mu.
+func (b *Batcher) awaitTurn(turn enqueueTurn, flushType string) bool {
+	select {
+	case <-turn.prev:
+		return true
+	case <-b.doneChan():
+		klog.Infof("Shutting down, abandoning a %s flush that was waiting for an earlier batch to enqueue", flushType)
+		return false
 	}
-	go func() {
-		defer func() { <-b.flushSem }()
-		b.performDeleteFlush(queue, msgs)
-	}()
 }
 
 // acquireFlushSlot blocks until an in-flight flush slot frees up, reporting the
@@ -441,39 +464,31 @@ func (b *Batcher) warnFlushBackpressure(flushType string, blocked time.Duration)
 		flushType, blocked.Truncate(time.Second), cap(b.flushSem))
 }
 
-// takeUpsertBatch captures and resets the current upsert buffer. MUST hold lock.
-func (b *Batcher) takeUpsertBatch() ([]upsertItem, []jetstream.Msg) {
-	queue := make([]upsertItem, 0, len(b.pendingUpserts))
-	for _, item := range b.pendingUpserts {
-		queue = append(queue, item)
+// takeBatch captures and resets the current buffer and reserves the batch's
+// place in the enqueue order. MUST hold lock.
+func (b *Batcher) takeBatch() batch {
+	bt := batch{
+		upserts: make([]upsertItem, 0, b.pendingUpserts),
+		deletes: make([]deleteItem, 0, len(b.pending)-b.pendingUpserts),
+		msgs:    b.msgs,
+		turn:    enqueueTurn{prev: b.lastEnqueue, done: make(chan struct{})},
 	}
-
-	msgs := b.upsertMsgs
+	for _, op := range b.pending {
+		if op.isDelete {
+			bt.deletes = append(bt.deletes, op.delete)
+		} else {
+			bt.upserts = append(bt.upserts, op.upsert)
+		}
+	}
+	b.lastEnqueue = bt.turn.done
 
 	// Reset
-	b.pendingUpserts = make(map[string]upsertItem)
-	b.upsertMsgs = make([]jetstream.Msg, 0, b.batchConfig.BatchSize)
-	b.upsertMsgSeqs = make(map[uint64]struct{})
+	b.pending = make(map[string]pendingOp)
+	b.pendingUpserts = 0
+	b.msgs = make([]jetstream.Msg, 0, b.batchConfig.BatchSize)
+	b.msgSeqs = make(map[uint64]struct{})
 
-	return queue, msgs
-}
-
-// takeDeleteBatch captures and resets the current delete buffer. MUST hold lock.
-func (b *Batcher) takeDeleteBatch() ([]deleteItem, []jetstream.Msg) {
-	// Convert map to slice for processing
-	queue := make([]deleteItem, 0, len(b.pendingDeletes))
-	for _, item := range b.pendingDeletes {
-		queue = append(queue, item)
-	}
-
-	msgs := b.deleteMsgs
-
-	// Reset
-	b.pendingDeletes = make(map[string]deleteItem)
-	b.deleteMsgs = make([]jetstream.Msg, 0, b.batchConfig.BatchSize)
-	b.deleteMsgSeqs = make(map[uint64]struct{})
-
-	return queue, msgs
+	return bt
 }
 
 // startAckProgress heartbeats a batch's messages for as long as its flush is
@@ -532,37 +547,47 @@ func (b *Batcher) startAckProgress(msgs []jetstream.Msg, flushType string) (stop
 	}
 }
 
-func (b *Batcher) performUpsertFlush(queue []upsertItem, msgs []jetstream.Msg) {
-	klog.Infof("Flushing batch of %d upserts to Meilisearch...", len(queue))
+func (b *Batcher) performFlush(bt batch) {
+	flushType := bt.flushType()
+	klog.Infof("Flushing batch of %d upserts and %d deletes to Meilisearch...", len(bt.upserts), len(bt.deletes))
 
 	searchmetrics.IndexerInFlightFlushes.Inc()
 	defer searchmetrics.IndexerInFlightFlushes.Dec()
 	start := time.Now()
 	defer func() {
-		searchmetrics.IndexerFlushDuration.WithLabelValues(flushTypeUpsert).Observe(time.Since(start).Seconds())
+		searchmetrics.IndexerFlushDuration.WithLabelValues(flushType).Observe(time.Since(start).Seconds())
 	}()
 
-	groups := make(map[string][]any)
-	for _, item := range queue {
-		groups[item.indexUID] = append(groups[item.indexUID], item.doc)
+	upsertGroups := make(map[string][]any)
+	for _, item := range bt.upserts {
+		upsertGroups[item.indexUID] = append(upsertGroups[item.indexUID], item.doc)
+	}
+	deleteGroups := make(map[string][]string)
+	for _, item := range bt.deletes {
+		deleteGroups[item.indexUID] = append(deleteGroups[item.indexUID], item.docID)
 	}
 
-	var wg sync.WaitGroup
+	var wg, enqueueWG sync.WaitGroup
 	var errs []error
 	var errMu sync.Mutex
 
 	// Heartbeat the batch for the whole time its tasks are outstanding.
-	stopAckProgress := b.startAckProgress(msgs, flushTypeUpsert)
+	stopAckProgress := b.startAckProgress(bt.msgs, flushType)
 
-	for indexUID, docs := range groups {
+	// run enqueues one Meilisearch task and then waits for it. The keys in a
+	// batch are unique, so the order of its tasks relative to each other does
+	// not matter; only the enqueue barrier against the next batch does.
+	run := func(enqueue func() ([]*meilisearch.Task, error)) {
 		wg.Add(1)
-		go func(uid string, d []any) {
+		enqueueWG.Add(1)
+		go func() {
 			defer wg.Done()
 
-			// 1. Enqueue (POST) - Limited by semaphore
+			// 1. Enqueue - Limited by semaphore
 			b.sem <- struct{}{}
-			tasks, err := b.client.AddDocumentsAsync(uid, d)
+			tasks, err := enqueue()
 			<-b.sem
+			enqueueWG.Done()
 
 			if err != nil {
 				errMu.Lock()
@@ -578,99 +603,37 @@ func (b *Batcher) performUpsertFlush(queue []upsertItem, msgs []jetstream.Msg) {
 				errs = append(errs, err)
 				errMu.Unlock()
 			}
-		}(indexUID, docs)
+		}()
 	}
+
+	for indexUID, docs := range upsertGroups {
+		run(func() ([]*meilisearch.Task, error) { return b.client.AddDocumentsAsync(indexUID, docs) })
+	}
+	for indexUID, docIDs := range deleteGroups {
+		run(func() ([]*meilisearch.Task, error) { return b.client.DeleteDocumentsAsync(indexUID, docIDs) })
+	}
+	enqueueWG.Wait()
+	close(bt.turn.done)
 	wg.Wait()
 	stopAckProgress()
 
 	if len(errs) > 0 {
-		searchmetrics.IndexerFlushTotal.WithLabelValues(flushTypeUpsert, flushStatusFailure).Inc()
-		klog.Errorf("Failed to flush %d upserts from %d messages, nacking for redelivery in %s: %v",
-			len(queue), len(msgs), nakDelay, errors.Join(errs...))
-		b.nakBatch(msgs, flushTypeUpsert)
+		searchmetrics.IndexerFlushTotal.WithLabelValues(flushType, flushStatusFailure).Inc()
+		klog.Errorf("Failed to flush %d upserts and %d deletes from %d messages, nacking for redelivery in %s: %v",
+			len(bt.upserts), len(bt.deletes), len(bt.msgs), nakDelay, errors.Join(errs...))
+		b.nakBatch(bt.msgs, flushType)
 		return
 	}
 
-	searchmetrics.IndexerFlushTotal.WithLabelValues(flushTypeUpsert, flushStatusSuccess).Inc()
-	klog.Infof("Successfully flushed %d upserts", len(queue))
-	for _, msg := range msgs {
-		msg.Ack()
-	}
-}
-
-func (b *Batcher) performDeleteFlush(queue []deleteItem, msgs []jetstream.Msg) {
-	klog.Infof("Flushing batch of %d deletes to Meilisearch...", len(queue))
-
-	searchmetrics.IndexerInFlightFlushes.Inc()
-	defer searchmetrics.IndexerInFlightFlushes.Dec()
-	start := time.Now()
-	defer func() {
-		searchmetrics.IndexerFlushDuration.WithLabelValues(flushTypeDelete).Observe(time.Since(start).Seconds())
-	}()
-
-	groups := make(map[string][]string)
-	for _, item := range queue {
-		groups[item.indexUID] = append(groups[item.indexUID], item.docID)
-	}
-
-	var wg sync.WaitGroup
-	var errs []error
-	var errMu sync.Mutex
-
-	// Heartbeat the batch for the whole time its tasks are outstanding.
-	stopAckProgress := b.startAckProgress(msgs, flushTypeDelete)
-
-	for indexUID, docIDs := range groups {
-		wg.Add(1)
-		go func(uid string, ids []string) {
-			defer wg.Done()
-
-			// 1. Enqueue (DELETE) - Limited by semaphore
-			b.sem <- struct{}{}
-			tasks, err := b.client.DeleteDocumentsAsync(uid, ids)
-			<-b.sem
-
-			if err != nil {
-				errMu.Lock()
-				errs = append(errs, err)
-				errMu.Unlock()
-				return
-			}
-
-			// 2. Wait (Polling) - NOT limited by semaphore
-			_, err = b.client.WaitForTasks(tasks)
-			if err != nil {
-				errMu.Lock()
-				errs = append(errs, err)
-				errMu.Unlock()
-			}
-		}(indexUID, docIDs)
-	}
-	wg.Wait()
-	stopAckProgress()
-
-	if len(errs) > 0 {
-		searchmetrics.IndexerFlushTotal.WithLabelValues(flushTypeDelete, flushStatusFailure).Inc()
-		klog.Errorf("Failed to flush %d deletes from %d messages, nacking for redelivery in %s: %v",
-			len(queue), len(msgs), nakDelay, errors.Join(errs...))
-		b.nakBatch(msgs, flushTypeDelete)
-		return
-	}
-
-	searchmetrics.IndexerFlushTotal.WithLabelValues(flushTypeDelete, flushStatusSuccess).Inc()
-	klog.Infof("Successfully flushed %d deletes", len(queue))
-	for _, msg := range msgs {
+	searchmetrics.IndexerFlushTotal.WithLabelValues(flushType, flushStatusSuccess).Inc()
+	klog.Infof("Successfully flushed %d upserts and %d deletes", len(bt.upserts), len(bt.deletes))
+	for _, msg := range bt.msgs {
 		msg.Ack()
 	}
 }
 
 // nakBatch returns a failed batch to JetStream for redelivery. Without it the
 // batch would sit unacknowledged until ackWait expires.
-//
-// A message buffered in both the upsert and delete buffers (one event matching
-// some policies and not others) can be nacked here after the other flush already
-// acked it; the redelivery just re-applies idempotent operations, and the
-// double-buffering itself is tracked separately.
 func (b *Batcher) nakBatch(msgs []jetstream.Msg, flushType string) {
 	for _, msg := range msgs {
 		if err := msg.NakWithDelay(nakDelay); err != nil {

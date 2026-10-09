@@ -11,14 +11,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestBatcher_SimultaneousUpsertAndDeleteFlush_RespectsInFlightBound covers
-// the residual case documented in the Validate() comment in
-// cmd/search/indexer/command.go: one Submit call can make a due upsert flush
-// and a due delete flush fire back to back, so a message can wait for two
-// flush slots instead of one. With the sole flush slot already held, the
-// second launch must wait its turn rather than spawning past
-// MaxInFlightFlushes, and both flushes must still run once slots free up.
-func TestBatcher_SimultaneousUpsertAndDeleteFlush_RespectsInFlightBound(t *testing.T) {
+// TestBatcher_MixedSubmit_FlushesAsOneBatch_RespectsInFlightBound covers a
+// Submit call that makes a flush due while its buffer holds both upserts and
+// deletes. They travel as one batch, so the call waits for a single flush
+// slot rather than one per operation type, never spawns past
+// MaxInFlightFlushes, and acks each message exactly once.
+func TestBatcher_MixedSubmit_FlushesAsOneBatch_RespectsInFlightBound(t *testing.T) {
 	const (
 		batchSize   = 3
 		maxInFlight = 1
@@ -32,7 +30,7 @@ func TestBatcher_SimultaneousUpsertAndDeleteFlush_RespectsInFlightBound(t *testi
 	})
 
 	// Occupy the sole flush slot with an unrelated holder flush before the
-	// dual-trigger message arrives, so every slot is held when it does.
+	// mixed batch becomes due, so every slot is held when it does.
 	holderMsgs := make([]*boundMsg, batchSize)
 	for i := range holderMsgs {
 		holderMsgs[i] = &boundMsg{seq: uint64(i + 1)}
@@ -44,10 +42,8 @@ func TestBatcher_SimultaneousUpsertAndDeleteFlush_RespectsInFlightBound(t *testi
 		return atomic.LoadInt32(&client.inFlight) == maxInFlight
 	}, time.Second, time.Millisecond, "expected the holder flush to occupy the only slot")
 
-	// Deletes flush on unique message count, not delete-key count, so tripping
-	// both triggers from a single message is not possible: prime the buffers
-	// with two messages, each contributing one upsert and one delete, neither
-	// of which reaches BatchSize on its own.
+	// Prime the buffer with two messages, each contributing one upsert and
+	// one delete, which together stay under BatchSize.
 	primeMsgs := make([]*boundMsg, 0, batchSize-1)
 	for i := 0; i < batchSize-1; i++ {
 		m := &boundMsg{seq: uint64(batchSize + 1 + i)}
@@ -59,10 +55,8 @@ func TestBatcher_SimultaneousUpsertAndDeleteFlush_RespectsInFlightBound(t *testi
 		)
 	}
 
-	// dualMsg is the message whose Submit call pushes both the pending upsert
-	// count and the tracked delete-message count to BatchSize at once, so an
-	// upsert flush and a delete flush are due together in the same call, the
-	// case the Validate() comment documents as a residual double-slot wait.
+	// dualMsg brings the message count to BatchSize, so one batch of upserts
+	// and deletes becomes due in this call.
 	dualMsg := &boundMsg{seq: uint64(2*batchSize + 1)}
 	var jmDual jetstream.Msg = dualMsg
 
@@ -75,8 +69,8 @@ func TestBatcher_SimultaneousUpsertAndDeleteFlush_RespectsInFlightBound(t *testi
 		)
 	}()
 
-	// Submit blocks inside launchUpsertFlush waiting for the only slot, held
-	// by the holder flush, so it must not return yet.
+	// Submit blocks inside launchFlush waiting for the only slot, held by the
+	// holder flush, so it must not return yet.
 	select {
 	case <-submitDone:
 		t.Fatal("Submit returned while the only flush slot was still held")
@@ -85,38 +79,24 @@ func TestBatcher_SimultaneousUpsertAndDeleteFlush_RespectsInFlightBound(t *testi
 	assert.LessOrEqual(t, int(atomic.LoadInt32(&client.maxInFlight)), maxInFlight,
 		"observed more concurrent flushes than MaxInFlightFlushes allows")
 
-	// Free the holder flush. dualMsg's upsert flush should take the slot next.
-	client.release <- struct{}{}
-
-	require.Eventually(t, func() bool {
-		return atomic.LoadInt32(&client.addCalls) == 2 // holder batch + dualMsg's upsert batch
-	}, time.Second, time.Millisecond, "expected the dual message's upsert flush to start once the slot freed")
-
-	// The delete flush still needs its own turn at the sole slot, which the
-	// dual message's upsert flush now holds, so Submit must still be blocked
-	// in launchDeleteFlush rather than having spawned past the cap.
-	select {
-	case <-submitDone:
-		t.Fatal("Submit returned before the delete flush acquired a slot; the second launch did not wait its turn")
-	case <-time.After(50 * time.Millisecond):
-	}
-	assert.LessOrEqual(t, int(atomic.LoadInt32(&client.maxInFlight)), maxInFlight,
-		"observed more concurrent flushes than MaxInFlightFlushes allows")
-
-	// Free dualMsg's upsert flush. Its delete flush should take the slot next.
+	// Free the holder flush. The mixed batch takes the slot and Submit returns
+	// without waiting for a second slot.
 	client.release <- struct{}{}
 
 	select {
 	case <-submitDone:
 	case <-time.After(time.Second):
-		t.Fatal("Submit did not return after the delete flush acquired a slot")
+		t.Fatal("Submit did not return after the mixed batch acquired the slot")
 	}
 
 	require.Eventually(t, func() bool {
-		return atomic.LoadInt32(&client.deleteCalls) == 1
-	}, time.Second, time.Millisecond, "expected the dual message's delete flush to start")
+		return atomic.LoadInt32(&client.addCalls) == 2 && atomic.LoadInt32(&client.deleteCalls) == 1
+	}, time.Second, time.Millisecond, "expected the mixed batch to enqueue its upserts and deletes in one flush")
+	assert.LessOrEqual(t, int(atomic.LoadInt32(&client.maxInFlight)), maxInFlight+1,
+		"a single flush waits on one task per index and operation type")
 
-	// Free the delete flush so both it and the test complete cleanly.
+	// The mixed batch waits on two tasks (one add, one delete).
+	client.release <- struct{}{}
 	client.release <- struct{}{}
 
 	require.Eventually(t, func() bool {
@@ -133,6 +113,7 @@ func TestBatcher_SimultaneousUpsertAndDeleteFlush_RespectsInFlightBound(t *testi
 		return atomic.LoadInt32(&dualMsg.acked) > 0
 	}, time.Second, time.Millisecond, "expected every message to be acked once every flush completed")
 
-	assert.LessOrEqual(t, int(atomic.LoadInt32(&client.maxInFlight)), maxInFlight,
-		"observed more concurrent flushes than MaxInFlightFlushes allows across the whole test")
+	for _, m := range append(append(holderMsgs, primeMsgs...), dualMsg) {
+		assert.Equal(t, int32(1), atomic.LoadInt32(&m.acked), "message %d must be acked exactly once", m.seq)
+	}
 }
