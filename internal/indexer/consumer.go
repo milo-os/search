@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"sync"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -26,6 +27,7 @@ type Indexer struct {
 type auditEvent struct {
 	AuditID     string            `json:"auditID"`
 	Verb        string            `json:"verb"`
+	RequestURI  string            `json:"requestURI"`
 	Annotations map[string]string `json:"annotations"`
 	User        struct {
 		Extra map[string][]string `json:"extra"`
@@ -117,6 +119,17 @@ func (i *Indexer) Start(ctx context.Context) error {
 			return
 		}
 
+		// A dry-run request is audited like a real one, with a response object
+		// that carries a uid, but it never persisted anything: indexing a
+		// dry-run create would publish an object that does not exist, and a
+		// dry-run delete would remove one that does.
+		if isDryRun(&event) {
+			klog.V(4).Infof("Skipping dry-run %s of %s %s/%s (auditID: %s)",
+				event.Verb, event.ObjectRef.Resource, event.ObjectRef.Namespace, event.ObjectRef.Name, event.AuditID)
+			msg.Ack()
+			return
+		}
+
 		// Handle deletions separately
 		if event.Verb == deleteVerb {
 			i.handleDelete(msg, &event)
@@ -149,6 +162,17 @@ func (i *Indexer) Start(ctx context.Context) error {
 			msg.Ack()
 			return
 		}
+
+		// Every persisted write returns the object with its resourceVersion.
+		// Without one there is nothing to order the write by, and nothing was
+		// written for it to describe.
+		if obj.GetResourceVersion() == "" {
+			klog.V(2).Infof("Skipping %s of %s %s/%s with no resourceVersion in its response (auditID: %s)",
+				event.Verb, event.ObjectRef.Resource, event.ObjectRef.Namespace, event.ObjectRef.Name, event.AuditID)
+			msg.Ack()
+			return
+		}
+		resourceVersion := parseResourceVersion(obj.GetResourceVersion())
 
 		// In single-tenant mode, skip non-platform
 		// events entirely so that no policy can accidentally queue them.
@@ -202,7 +226,11 @@ func (i *Indexer) Start(ctx context.Context) error {
 				// it is deleted. Policies for other kinds never indexed it.
 				if (event.Verb == "update" || event.Verb == "patch") && targetsResource(cp, gvk.Group, gvk.Kind) {
 					if cp.Policy.Status.IndexName != "" {
-						deletes = append(deletes, DeleteOp{IndexUID: cp.Policy.Status.IndexName, DocID: resourceUID})
+						deletes = append(deletes, DeleteOp{
+							IndexUID:        cp.Policy.Status.IndexName,
+							DocID:           resourceUID,
+							ResourceVersion: resourceVersion,
+						})
 					}
 				}
 			}
@@ -258,7 +286,12 @@ func (i *Indexer) handleDelete(msg jetstream.Msg, event *auditEvent) {
 			continue
 		}
 
-		deletes = append(deletes, DeleteOp{IndexUID: cp.Policy.Status.IndexName, DocID: docID})
+		deletes = append(deletes, DeleteOp{
+			IndexUID:        cp.Policy.Status.IndexName,
+			DocID:           docID,
+			ResourceVersion: deletedResourceVersion(event),
+			ObjectDeleted:   true,
+		})
 	}
 
 	// No policy has an index yet, so there is nothing to delete from.
@@ -277,6 +310,29 @@ func (i *Indexer) handleDelete(msg jetstream.Msg, event *auditEvent) {
 func targetsResource(cp *policyevaluation.CachedPolicy, group, kind string) bool {
 	target := cp.Policy.Spec.TargetResource
 	return target.Group == group && (kind == "" || target.Kind == kind)
+}
+
+// isDryRun reports whether the event's request asked the API server not to
+// persist anything. The audit event records that only in the request URI.
+func isDryRun(event *auditEvent) bool {
+	if event.RequestURI == "" {
+		return false
+	}
+	u, err := url.Parse(event.RequestURI)
+	if err != nil {
+		return false
+	}
+	return u.Query().Has("dryRun")
+}
+
+// deletedResourceVersion is the resourceVersion of the object an event
+// deletes, when the response carries the object rather than a Status. The
+// deletion wins over other writes regardless, so zero only means unknown.
+func deletedResourceVersion(event *auditEvent) uint64 {
+	if event.ResponseObject == nil {
+		return 0
+	}
+	return parseResourceVersion((&unstructured.Unstructured{Object: event.ResponseObject}).GetResourceVersion())
 }
 
 // deletedResourceType returns the API group and kind of the resource an event
