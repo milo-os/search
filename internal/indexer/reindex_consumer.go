@@ -90,7 +90,12 @@ func (r *ReindexConsumer) processTargetedEvent(msg jetstream.Msg, event ReindexE
 	if obj.GetDeletionTimestamp() != nil {
 		klog.V(4).Infof("ReindexConsumer: resource %s/%s is terminating, deleting from index %s (id=%s)",
 			obj.GetNamespace(), obj.GetName(), event.IndexName, event.ID)
-		r.batcher.QueueDelete(event.IndexName, resourceUID, &msg)
+		r.batcher.Submit(&msg, nil, []DeleteOp{{
+			IndexUID:        event.IndexName,
+			DocID:           resourceUID,
+			ResourceVersion: parseResourceVersion(obj.GetResourceVersion()),
+			ObjectDeleted:   true,
+		}})
 		return
 	}
 
@@ -143,6 +148,10 @@ func (r *ReindexConsumer) processTargetedEvent(msg jetstream.Msg, event ReindexE
 		klog.V(4).Infof("ReindexConsumer: policy %s did not match resource %s/%s (id=%s), deleting from index",
 			event.PolicyName, obj.GetNamespace(), obj.GetName(), event.ID)
 
-		r.batcher.QueueDelete(event.IndexName, resourceUID, &msg)
+		r.batcher.Submit(&msg, nil, []DeleteOp{{
+			IndexUID:        event.IndexName,
+			DocID:           resourceUID,
+			ResourceVersion: parseResourceVersion(obj.GetResourceVersion()),
+		}})
 	}
 }
