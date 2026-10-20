@@ -29,6 +29,12 @@ import (
 // process, so it is duplicated here to bound the indexing timeouts.
 const consumerAckWait = 300 * time.Second
 
+// docStateTTLDefault mirrors the audit stream's maxAge in
+// config/components/nats-streams/nats-streams.yaml. A record must outlive
+// every event that could still be redelivered for its document, or a late
+// event could be applied with nothing left to order it against.
+const docStateTTLDefault = 7 * 24 * time.Hour
+
 const (
 	// heartbeatMargin is how many heartbeat intervals an ackWait must fit. The
 	// spare intervals absorb a lost or delayed tick without JetStream giving up on
@@ -67,6 +73,12 @@ type ResourceIndexerOptions struct {
 	NatsReindexStream       string
 	NatsReindexConsumerName string
 
+	// Document state bucket, shared by every replica so that writes to one
+	// document stay in resourceVersion order whichever replica flushes last.
+	NatsDocStateBucket   string
+	NatsDocStateReplicas int
+	DocStateTTL          time.Duration
+
 	// Meilisearch connection and timeout settings
 	MeilisearchTaskWaitTimeout  time.Duration
 	MeilisearchTaskPollInterval time.Duration
@@ -98,6 +110,9 @@ func NewResourceIndexerOptions() *ResourceIndexerOptions {
 		NatsStreamName:              "AUDIT_EVENTS",
 		NatsReindexStream:           "REINDEX_EVENTS",
 		NatsReindexConsumerName:     "search-reindexer",
+		NatsDocStateBucket:          "SEARCH_INDEXER_DOC_STATE",
+		NatsDocStateReplicas:        1,
+		DocStateTTL:                 docStateTTLDefault,
 		MeilisearchTaskWaitTimeout:  10 * time.Minute,
 		MeilisearchTaskPollInterval: 500 * time.Millisecond,
 		MeilisearchHTTPTimeout:      60 * time.Second,
@@ -123,6 +138,9 @@ func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 
 	fs.StringVar(&o.NatsReindexStream, "nats-reindex-stream", o.NatsReindexStream, "The JetStream stream name for re-index messages.")
 	fs.StringVar(&o.NatsReindexConsumerName, "nats-reindex-consumer-name", o.NatsReindexConsumerName, "The name of the re-index JetStream consumer (must match the manifest).")
+	fs.StringVar(&o.NatsDocStateBucket, "nats-doc-state-bucket", o.NatsDocStateBucket, "The JetStream KV bucket that records the newest indexed state of every document. It is created if missing and must be shared by all replicas.")
+	fs.IntVar(&o.NatsDocStateReplicas, "nats-doc-state-replicas", o.NatsDocStateReplicas, "The number of JetStream replicas for the document state bucket.")
+	fs.DurationVar(&o.DocStateTTL, "doc-state-ttl", o.DocStateTTL, "How long a document's recorded state is kept after its last write. Must cover the audit stream's retention so no redelivered event can outlive the record that orders it.")
 	fs.StringVar(&o.NatsTLSCA, "nats-tls-ca", o.NatsTLSCA, "The path to the NATS TLS CA file.")
 	fs.StringVar(&o.NatsTLSCert, "nats-tls-cert", o.NatsTLSCert, "The path to the NATS TLS certificate file.")
 	fs.StringVar(&o.NatsTLSKey, "nats-tls-key", o.NatsTLSKey, "The path to the NATS TLS key file.")
@@ -167,6 +185,15 @@ func (o *ResourceIndexerOptions) Validate() error {
 	}
 	if o.NatsReindexConsumerName == "" {
 		return fmt.Errorf("nats-reindex-consumer-name must be set")
+	}
+	if o.NatsDocStateBucket == "" {
+		return fmt.Errorf("nats-doc-state-bucket must be set")
+	}
+	if o.NatsDocStateReplicas < 1 {
+		return fmt.Errorf("nats-doc-state-replicas must be at least 1")
+	}
+	if o.DocStateTTL < time.Hour {
+		return fmt.Errorf("doc-state-ttl must be at least 1h")
 	}
 	if o.MeilisearchDomain == "" {
 		return fmt.Errorf("meilisearch-domain must be set")
@@ -400,12 +427,28 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 		return fmt.Errorf("failed to create search client: %w", err)
 	}
 
+	// The bucket is owned by the indexer rather than declared alongside the
+	// consumers because every replica, and the re-index path, must agree on
+	// the one arbiter for a document's newest state.
+	docStateKV, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
+		Bucket:      o.NatsDocStateBucket,
+		Description: "Newest indexed state per document, shared by search indexer replicas to keep writes in resourceVersion order",
+		History:     1,
+		TTL:         o.DocStateTTL,
+		Storage:     jetstream.FileStorage,
+		Replicas:    o.NatsDocStateReplicas,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to open document state bucket %s: %w", o.NatsDocStateBucket, err)
+	}
+
 	batchConfig := indexer.BatchConfig{
 		BatchSize:            o.BatchSize,
 		FlushInterval:        o.FlushInterval,
 		MaxConcurrentUploads: o.BatchMaxConcurrentUploads,
 		MaxInFlightFlushes:   o.BatchMaxInFlightFlushes,
 		AckProgressInterval:  o.BatchAckProgressInterval,
+		DocState:             indexer.NewNATSDocStateStore(docStateKV),
 	}
 
 	// Create separate batchers for audit events and re-indexing events
