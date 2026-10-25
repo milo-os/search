@@ -26,7 +26,7 @@ vars:
   # Test infra repository configuration - can be overridden with environment variable
   TEST_INFRA_REPO_REF: 'v0.6.0'
   # renovate: datasource=go depName=github.com/kyverno/chainsaw
-  CHAINSAW_VERSION: v0.2.13
+  CHAINSAW_VERSION: v0.2.15
   # renovate: datasource=go depName=sigs.k8s.io/controller-tools
   CONTROLLER_TOOLS_VERSION: v0.18.0
   # Local development certificate directory
