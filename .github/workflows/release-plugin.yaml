@@ -76,7 +76,7 @@ jobs:
           repositories: cli-plugins
 
       - name: Open the catalog PR
-        uses: datum-cloud/actions/update-plugin-index@v1.18.0
+        uses: datum-cloud/actions/update-plugin-index@v1.24.0
         with:
           index-repo: milo-os/cli-plugins
           plugin-name: search
