@@ -32,7 +32,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Test HTTP probe helper
         run: python3 -m unittest discover -s test/helpers -p 'test_*.py' -v
