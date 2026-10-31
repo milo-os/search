@@ -125,7 +125,7 @@ jobs:
           fi
 
       - name: Collect debug information on failure
-        if: failure()
+        if: failure() || cancelled()
         run: |
           echo "=== Collecting debug information ==="
 
@@ -146,6 +146,13 @@ jobs:
           echo "=== Controller Manager Logs ==="
           task test-infra:kubectl -- logs -n search-system -l app.kubernetes.io/name=search-controller-manager --tail=100 || true
 
+          echo "=== Resource Indexer Logs ==="
+          task test-infra:kubectl -- logs -n search-system -l app.kubernetes.io/name=resource-indexer --tail=100 || true
+          task test-infra:kubectl -- logs -n search-system -l app.kubernetes.io/name=resource-indexer --tail=100 --previous || true
+
+          echo "=== Events ==="
+          task test-infra:kubectl -- get events -A --sort-by=.lastTimestamp || true
+
           # Docker container status
           echo "=== Docker Containers ==="
           docker ps -a || true
@@ -156,7 +163,7 @@ jobs:
           kind export logs /tmp/kind-logs --name $TEST_INFRA_CLUSTER_NAME || true
 
       - name: Upload debug artifacts
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v7
         with:
           name: debug-logs
