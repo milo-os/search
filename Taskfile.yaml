@@ -335,30 +335,30 @@ tasks:
         task test-infra:kubectl -- apply -k config/components/nats-streams
 
         echo "⏳ Waiting for NATS stream to be ready..."
-        task test-infra:kubectl -- wait --for=condition=ready stream/audit-events -n nats-system --timeout=1000s 2>/dev/null || echo "⚠️  Stream not ready yet"
+        task test-infra:kubectl -- wait --for=condition=ready stream/audit-events -n nats-system --timeout=300s 2>/dev/null || echo "⚠️  Stream not ready yet"
 
         echo ""
         echo "📋 Deploying Search server and components..."
         task test-infra:kubectl -- apply -k {{.OVERLAY_DIR | default "config/overlays/dev"}}
 
         echo "⏳ Waiting for Search API Server to be ready..."
-        task test-infra:kubectl -- wait --for=condition=available deployment/search-apiserver -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  Search API Server not ready yet"
+        task test-infra:kubectl -- wait --for=condition=available deployment/search-apiserver -n search-system --timeout=300s 2>/dev/null || echo "⚠️  Search API Server not ready yet"
 
         echo "⏳ Waiting for Search Controller Manager to be ready..."
-        task test-infra:kubectl -- wait --for=condition=available deployment/search-controller-manager -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  Search Controller Manager not ready yet"
+        task test-infra:kubectl -- wait --for=condition=available deployment/search-controller-manager -n search-system --timeout=300s 2>/dev/null || echo "⚠️  Search Controller Manager not ready yet"
 
         echo "⏳ Waiting for Vector Sidecar to be ready..."
-        task test-infra:kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/instance=vector-sidecar -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  Vector Sidecar not ready yet"
+        task test-infra:kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/instance=vector-sidecar -n search-system --timeout=300s 2>/dev/null || echo "⚠️  Vector Sidecar not ready yet"
         
         echo "⏳ Waiting for Vector Sidecar to be ready..."
-        task test-infra:kubectl -- wait --for=condition=ready helmrelease/vector-sidecar -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  Vector Sidecar HelmRelease not ready yet"
-        task test-infra:kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/instance=vector-sidecar -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  Vector Sidecar pods not ready yet"
+        task test-infra:kubectl -- wait --for=condition=ready helmrelease/vector-sidecar -n search-system --timeout=300s 2>/dev/null || echo "⚠️  Vector Sidecar HelmRelease not ready yet"
+        task test-infra:kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/instance=vector-sidecar -n search-system --timeout=300s 2>/dev/null || echo "⚠️  Vector Sidecar pods not ready yet"
 
         echo "⏳ Waiting for Resource Indexer to be ready..."
-        task test-infra:kubectl -- wait --for=condition=available deployment/resource-indexer -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  Resource Indexer not ready yet"
+        task test-infra:kubectl -- wait --for=condition=available deployment/resource-indexer -n search-system --timeout=300s 2>/dev/null || echo "⚠️  Resource Indexer not ready yet"
 
         echo "⏳ Waiting for NATS Consumer to be ready..."
-        task test-infra:kubectl -- wait --for=condition=ready consumer/search-indexer -n search-system --timeout=1000s 2>/dev/null || echo "⚠️  NATS Consumer not ready yet"
+        task test-infra:kubectl -- wait --for=condition=ready consumer/search-indexer -n search-system --timeout=300s 2>/dev/null || echo "⚠️  NATS Consumer not ready yet"
 
         echo "✅ Search server and all dependencies deployed successfully!"
         echo ""

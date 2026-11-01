@@ -79,11 +79,11 @@ func (s strategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorL
 	return s.validate(ctx, obj)
 }
 
-func (strategy) AllowCreateOnUpdate() bool {
+func (strategy) AllowCreateOnUpdate(context.Context) bool {
 	return false
 }
 
-func (strategy) AllowUnconditionalUpdate() bool {
+func (strategy) AllowUnconditionalUpdate(context.Context) bool {
 	return false
 }
 
