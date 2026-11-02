@@ -2,6 +2,8 @@ module go.miloapis.net/search
 
 go 1.26.0
 
+toolchain go1.27.3
+
 require (
 	github.com/go-logr/logr v1.4.4
 	github.com/golang-jwt/jwt/v5 v5.3.1
