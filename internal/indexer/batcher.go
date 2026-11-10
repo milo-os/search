@@ -613,6 +613,7 @@ func (b *Batcher) performFlush(bt batch) {
 			select {
 			case b.sem <- struct{}{}:
 			case <-ctx.Done():
+				addErr(ctx.Err())
 				enqueueWG.Done()
 				return
 			}
@@ -647,6 +648,10 @@ func (b *Batcher) performFlush(bt batch) {
 		addErr(fmt.Errorf("flush exceeded %s", b.batchConfig.FlushTimeout))
 	}
 	stopAckProgress()
+
+	if err := ctx.Err(); err != nil {
+		addErr(err)
+	}
 
 	errMu.Lock()
 	failed := append([]error(nil), errs...)
