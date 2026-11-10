@@ -168,6 +168,9 @@ type Batcher struct {
 
 	warnMu       sync.Mutex
 	lastSlotWarn time.Time
+
+	progressMu   sync.Mutex
+	lastProgress time.Time
 }
 
 // NewBatcher creates a new Batcher instance.
@@ -359,6 +362,7 @@ func (b *Batcher) runBatcher(ctx context.Context) {
 	defer ticker.Stop()
 
 	for {
+		b.markProgress()
 		select {
 		case <-ctx.Done():
 			return

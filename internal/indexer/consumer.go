@@ -21,6 +21,7 @@ type Indexer struct {
 	batcher            *Batcher
 	enableMultiTenancy bool
 	mu                 sync.Mutex
+	attached           startSignal
 }
 
 type auditEvent struct {
@@ -221,6 +222,7 @@ func (i *Indexer) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start consumer: %w", err)
 	}
 	defer cons.Stop()
+	i.attached.fire()
 
 	klog.Info("Indexer started successfully")
 

@@ -16,6 +16,7 @@ type ReindexConsumer struct {
 	consumer    jetstream.Consumer
 	policyCache *PolicyCache
 	batcher     *Batcher
+	attached    startSignal
 }
 
 // NewReindexConsumer creates a new ReindexConsumer instance.
@@ -66,6 +67,7 @@ func (r *ReindexConsumer) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start re-index consumer: %w", err)
 	}
 	defer cons.Stop()
+	r.attached.fire()
 
 	// Wait for context cancellation
 	<-ctx.Done()
