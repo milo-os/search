@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -37,6 +38,10 @@ const (
 	// rather than assuming 16 still holds.
 	DefaultMaxInFlightFlushes = 16
 
+	// DefaultFlushTimeout is the longest one flush may run before it is
+	// abandoned and its messages are nacked.
+	DefaultFlushTimeout = 11 * time.Minute
+
 	// DefaultAckProgressInterval is how often an in-progress flush heartbeats its
 	// messages to keep JetStream from redelivering them.
 	DefaultAckProgressInterval = 60 * time.Second
@@ -65,6 +70,11 @@ type BatchConfig struct {
 	// messages are still being worked on, extending ackWait for as long as the
 	// flush is genuinely progressing.
 	AckProgressInterval time.Duration
+	// FlushTimeout caps one whole flush, enqueue and task wait together. A flush
+	// that exceeds it frees its slot and nacks its messages for redelivery, so a
+	// slow Meilisearch cannot hold every slot indefinitely. Zero selects
+	// DefaultFlushTimeout.
+	FlushTimeout time.Duration
 }
 
 // SearchClient abstracts the search backend interactions.
@@ -188,6 +198,10 @@ func NewBatcher(client SearchClient, batchConfig BatchConfig) *Batcher {
 	ackProgressInterval := batchConfig.AckProgressInterval
 	if ackProgressInterval <= 0 {
 		ackProgressInterval = DefaultAckProgressInterval
+	}
+
+	if batchConfig.FlushTimeout <= 0 {
+		batchConfig.FlushTimeout = DefaultFlushTimeout
 	}
 
 	lastEnqueue := make(chan struct{})
@@ -571,9 +585,17 @@ func (b *Batcher) performFlush(bt batch) {
 		deleteGroups[item.indexUID] = append(deleteGroups[item.indexUID], item.docID)
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), b.batchConfig.FlushTimeout)
+	defer cancel()
+
 	var wg, enqueueWG sync.WaitGroup
 	var errs []error
 	var errMu sync.Mutex
+	addErr := func(err error) {
+		errMu.Lock()
+		errs = append(errs, err)
+		errMu.Unlock()
+	}
 
 	// Heartbeat the batch for the whole time its tasks are outstanding.
 	stopAckProgress := b.startAckProgress(bt.msgs, flushType)
@@ -588,24 +610,24 @@ func (b *Batcher) performFlush(bt batch) {
 			defer wg.Done()
 
 			// 1. Enqueue - Limited by semaphore
-			b.sem <- struct{}{}
+			select {
+			case b.sem <- struct{}{}:
+			case <-ctx.Done():
+				enqueueWG.Done()
+				return
+			}
 			tasks, err := enqueue()
 			<-b.sem
 			enqueueWG.Done()
 
 			if err != nil {
-				errMu.Lock()
-				errs = append(errs, err)
-				errMu.Unlock()
+				addErr(err)
 				return
 			}
 
 			// 2. Wait (Polling) - NOT limited by semaphore
-			_, err = b.client.WaitForTasks(tasks)
-			if err != nil {
-				errMu.Lock()
-				errs = append(errs, err)
-				errMu.Unlock()
+			if _, err = b.client.WaitForTasks(tasks); err != nil {
+				addErr(err)
 			}
 		}()
 	}
@@ -616,15 +638,24 @@ func (b *Batcher) performFlush(bt batch) {
 	for indexUID, docIDs := range deleteGroups {
 		run(func() ([]*meilisearch.Task, error) { return b.client.DeleteDocumentsAsync(indexUID, docIDs) })
 	}
-	enqueueWG.Wait()
+
+	if !waitOrDone(ctx, &enqueueWG) {
+		addErr(fmt.Errorf("flush exceeded %s while enqueueing", b.batchConfig.FlushTimeout))
+	}
 	close(bt.turn.done)
-	wg.Wait()
+	if !waitOrDone(ctx, &wg) {
+		addErr(fmt.Errorf("flush exceeded %s", b.batchConfig.FlushTimeout))
+	}
 	stopAckProgress()
 
-	if len(errs) > 0 {
+	errMu.Lock()
+	failed := append([]error(nil), errs...)
+	errMu.Unlock()
+
+	if len(failed) > 0 {
 		searchmetrics.IndexerFlushTotal.WithLabelValues(flushType, flushStatusFailure).Inc()
 		klog.Errorf("Failed to flush %d upserts and %d deletes from %d messages, nacking for redelivery in %s: %v",
-			len(bt.upserts), len(bt.deletes), len(bt.msgs), nakDelay, errors.Join(errs...))
+			len(bt.upserts), len(bt.deletes), len(bt.msgs), nakDelay, errors.Join(failed...))
 		b.nakBatch(bt.msgs, flushType)
 		return
 	}
@@ -633,6 +664,22 @@ func (b *Batcher) performFlush(bt batch) {
 	klog.Infof("Successfully flushed %d upserts and %d deletes", len(bt.upserts), len(bt.deletes))
 	for _, msg := range bt.msgs {
 		msg.Ack()
+	}
+}
+
+// waitOrDone waits for wg and reports whether it finished before ctx ended.
+// The goroutines still running when ctx ends are left to finish on their own.
+func waitOrDone(ctx context.Context, wg *sync.WaitGroup) bool {
+	finished := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

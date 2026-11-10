@@ -93,8 +93,15 @@ func TestResourceIndexerOptions_Validate_LivenessStallFloor(t *testing.T) {
 
 	o = NewResourceIndexerOptions()
 	o.MeilisearchTaskWaitTimeout = time.Hour
+	o.BatchFlushTimeout = time.Hour
 	if err := o.Validate(); err == nil {
-		t.Fatal("raising the task wait timeout past the default threshold must be rejected")
+		t.Fatal("raising the flush timeout past the default threshold must be rejected")
+	}
+
+	o = NewResourceIndexerOptions()
+	o.BatchFlushTimeout = o.MeilisearchTaskWaitTimeout - time.Second
+	if err := o.Validate(); err == nil {
+		t.Fatal("a flush timeout under the task wait timeout must be rejected")
 	}
 }
 

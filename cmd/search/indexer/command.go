@@ -71,6 +71,7 @@ type ResourceIndexerOptions struct {
 	MeilisearchTaskWaitTimeout  time.Duration
 	MeilisearchTaskPollInterval time.Duration
 	MeilisearchHTTPTimeout      time.Duration
+	BatchFlushTimeout           time.Duration
 	MeilisearchDomain           string
 	MeilisearchChunkSize        int
 	MeilisearchMaxRetries       int
@@ -103,6 +104,7 @@ func NewResourceIndexerOptions() *ResourceIndexerOptions {
 		MeilisearchTaskWaitTimeout:  10 * time.Minute,
 		MeilisearchTaskPollInterval: 500 * time.Millisecond,
 		MeilisearchHTTPTimeout:      60 * time.Second,
+		BatchFlushTimeout:           indexer.DefaultFlushTimeout,
 		MeilisearchDomain:           "http://meilisearch.meilisearch-system.svc.cluster.local:7700",
 		MeilisearchChunkSize:        1000,
 		BatchSize:                   1000,
@@ -134,6 +136,7 @@ func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.MeilisearchDomain, "meilisearch-domain", o.MeilisearchDomain, "Domain of the Meilisearch instance.")
 	fs.DurationVar(&o.MeilisearchTaskWaitTimeout, "meilisearch-task-wait-timeout", o.MeilisearchTaskWaitTimeout, "Maximum time to wait for a Meilisearch task to complete before the batch is nacked and redelivered. This is a backstop against a wedged Meilisearch, not a throughput knob: a running flush heartbeats its messages every batch-ack-progress-interval, so the batch stays alive for as long as it waits and this no longer needs to sit under the consumer ackWait.")
 	fs.DurationVar(&o.MeilisearchTaskPollInterval, "meilisearch-task-poll-interval", o.MeilisearchTaskPollInterval, "How often to poll Meilisearch for task completion while waiting.")
+	fs.DurationVar(&o.BatchFlushTimeout, "batch-flush-timeout", o.BatchFlushTimeout, "Maximum time one flush may run, enqueue and task wait together, before it frees its slot and its batch is nacked and redelivered. It bounds how long a slow Meilisearch can hold the flush slots, and so what /healthz must tolerate.")
 	fs.DurationVar(&o.MeilisearchHTTPTimeout, "meilisearch-http-timeout", o.MeilisearchHTTPTimeout, "Timeout for HTTP requests to Meilisearch.")
 	fs.IntVar(&o.MeilisearchChunkSize, "meilisearch-chunk-size", o.MeilisearchChunkSize, "The number of documents to process in a single chunk.")
 	fs.IntVar(&o.BatchSize, "batch-size", o.BatchSize, "The batch size for upserts and deletes.")
@@ -235,15 +238,18 @@ func (o *ResourceIndexerOptions) Validate() error {
 	if budget := heartbeatMargin * o.BatchAckProgressInterval; budget > consumerAckWait {
 		return fmt.Errorf("%d * batch-ack-progress-interval is %s, which exceeds the consumer ackWait of %s: lower batch-ack-progress-interval", heartbeatMargin, budget, consumerAckWait)
 	}
+	if o.BatchFlushTimeout < o.MeilisearchTaskWaitTimeout {
+		return fmt.Errorf("batch-flush-timeout %s must be at least meilisearch-task-wait-timeout %s", o.BatchFlushTimeout, o.MeilisearchTaskWaitTimeout)
+	}
 	if floor := o.livenessStallFloor(); o.LivenessStallThreshold < floor {
-		return fmt.Errorf("liveness-stall-threshold %s must be at least %s, twice the longest a flush can hold the loop (meilisearch-task-wait-timeout + meilisearch-http-timeout + flush-interval)", o.LivenessStallThreshold, floor)
+		return fmt.Errorf("liveness-stall-threshold %s must be at least %s, twice the longest a flush can hold the loop (batch-flush-timeout + flush-interval)", o.LivenessStallThreshold, floor)
 	}
 
 	return nil
 }
 
 func (o *ResourceIndexerOptions) livenessStallFloor() time.Duration {
-	return 2 * (o.MeilisearchTaskWaitTimeout + o.MeilisearchHTTPTimeout + o.FlushInterval)
+	return 2 * (o.BatchFlushTimeout + o.FlushInterval)
 }
 
 func (o *ResourceIndexerOptions) Complete() error {
@@ -426,6 +432,7 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 		MaxConcurrentUploads: o.BatchMaxConcurrentUploads,
 		MaxInFlightFlushes:   o.BatchMaxInFlightFlushes,
 		AckProgressInterval:  o.BatchAckProgressInterval,
+		FlushTimeout:         o.BatchFlushTimeout,
 	}
 
 	// Create separate batchers for audit events and re-indexing events
