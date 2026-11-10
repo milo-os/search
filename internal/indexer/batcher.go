@@ -167,6 +167,8 @@ type Batcher struct {
 
 	ackProgressInterval time.Duration
 
+	wait func(ctx context.Context, wg *sync.WaitGroup) bool
+
 	mu       sync.Mutex
 	sem      chan struct{} // Global semaphore to limit concurrent Meilisearch requests
 	flushSem chan struct{} // Bounds the number of flushes (and their message batches) in flight
@@ -212,6 +214,7 @@ func NewBatcher(client SearchClient, batchConfig BatchConfig) *Batcher {
 		batchConfig:         batchConfig,
 		ackProgressInterval: ackProgressInterval,
 		lastEnqueue:         lastEnqueue,
+		wait:                waitOrDone,
 		pending:             make(map[string]pendingOp),
 		msgs:                make([]jetstream.Msg, 0, batchConfig.BatchSize),
 		msgSeqs:             make(map[uint64]struct{}),
@@ -640,11 +643,11 @@ func (b *Batcher) performFlush(bt batch) {
 		run(func() ([]*meilisearch.Task, error) { return b.client.DeleteDocumentsAsync(indexUID, docIDs) })
 	}
 
-	if !waitOrDone(ctx, &enqueueWG) {
+	if !b.wait(ctx, &enqueueWG) {
 		addErr(fmt.Errorf("flush exceeded %s while enqueueing", b.batchConfig.FlushTimeout))
 	}
 	close(bt.turn.done)
-	if !waitOrDone(ctx, &wg) {
+	if !b.wait(ctx, &wg) {
 		addErr(fmt.Errorf("flush exceeded %s", b.batchConfig.FlushTimeout))
 	}
 	stopAckProgress()
