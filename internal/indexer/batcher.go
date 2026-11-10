@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -65,6 +66,10 @@ type BatchConfig struct {
 	// messages are still being worked on, extending ackWait for as long as the
 	// flush is genuinely progressing.
 	AckProgressInterval time.Duration
+	// DocState is the store that orders writes to one document across every
+	// batcher and replica that shares it. Nil uses a store private to this
+	// process, which is only suitable for tests and single-replica setups.
+	DocState DocStateStore
 }
 
 // SearchClient abstracts the search backend interactions.
@@ -74,7 +79,8 @@ type SearchClient interface {
 	WaitForTasks(tasks []*meilisearch.Task) (*meilisearch.Task, error)
 }
 
-// UpsertOp is a single document upsert destined for one index.
+// UpsertOp is a single document upsert destined for one index. The document's
+// metadata.resourceVersion orders it against other writes to the same object.
 type UpsertOp struct {
 	IndexUID string
 	Doc      any
@@ -84,39 +90,60 @@ type UpsertOp struct {
 type DeleteOp struct {
 	IndexUID string
 	DocID    string
-}
-
-type upsertItem struct {
-	indexUID string
-	doc      any
-}
-
-type deleteItem struct {
-	indexUID string
-	docID    string
+	// ResourceVersion orders the removal against other writes to the same
+	// object. It is zero when the event carried no object, as a Status
+	// response does.
+	ResourceVersion uint64
+	// ObjectDeleted marks the object itself as gone. Such a removal wins over
+	// any write that flushes after it, whatever its resourceVersion, because
+	// nothing written for a deleted uid can be current. Without it the
+	// removal only means the object no longer belongs in this index, and a
+	// newer write brings it back.
+	ObjectDeleted bool
 }
 
 // pendingOp is the latest operation buffered for one document in one index.
 type pendingOp struct {
-	isDelete bool
-	upsert   upsertItem
-	delete   deleteItem
+	indexUID string
+	docID    string
+	rv       uint64
+	state    docState
+	doc      any
+}
+
+func (op pendingOp) record() docRecord {
+	return docRecord{RV: op.rv, State: op.state}
+}
+
+func (op pendingOp) isUpsert() bool {
+	return op.state == docIndexed
 }
 
 // batch is one flush's worth of operations and the messages they came from.
 type batch struct {
-	upserts []upsertItem
-	deletes []deleteItem
-	msgs    []jetstream.Msg
-	turn    enqueueTurn
+	ops  []pendingOp
+	msgs []jetstream.Msg
+	turn enqueueTurn
+}
+
+func (bt *batch) counts() (upserts, deletes int) {
+	for _, op := range bt.ops {
+		if op.isUpsert() {
+			upserts++
+		} else {
+			deletes++
+		}
+	}
+	return upserts, deletes
 }
 
 // flushType labels the batch's metrics and logs by the operations it carries.
 func (bt *batch) flushType() string {
+	upserts, deletes := bt.counts()
 	switch {
-	case len(bt.upserts) > 0 && len(bt.deletes) > 0:
+	case upserts > 0 && deletes > 0:
 		return flushTypeMixed
-	case len(bt.deletes) > 0:
+	case deletes > 0:
 		return flushTypeDelete
 	default:
 		return flushTypeUpsert
@@ -135,10 +162,12 @@ type enqueueTurn struct {
 type Batcher struct {
 	client      SearchClient
 	batchConfig BatchConfig
+	docState    DocStateStore
 
-	// pending holds the latest operation per index/docID, so an upsert and a
-	// delete for the same document can never both be buffered: whichever came
-	// last is the one flushed. pendingUpserts counts the upserts among them.
+	// pending holds the newest operation per index/docID, so an upsert and a
+	// delete for the same document can never both be buffered: whichever is
+	// newest by resourceVersion, or latest to arrive at the same version, is
+	// the one flushed. pendingUpserts counts the upserts among them.
 	pending        map[string]pendingOp
 	pendingUpserts int
 
@@ -187,12 +216,18 @@ func NewBatcher(client SearchClient, batchConfig BatchConfig) *Batcher {
 		ackProgressInterval = DefaultAckProgressInterval
 	}
 
+	docState := batchConfig.DocState
+	if docState == nil {
+		docState = NewMemoryDocStateStore()
+	}
+
 	lastEnqueue := make(chan struct{})
 	close(lastEnqueue)
 
 	return &Batcher{
 		client:              client,
 		batchConfig:         batchConfig,
+		docState:            docState,
 		ackProgressInterval: ackProgressInterval,
 		lastEnqueue:         lastEnqueue,
 		pending:             make(map[string]pendingOp),
@@ -246,9 +281,15 @@ func (b *Batcher) Submit(msg *jetstream.Msg, upserts []UpsertOp, deletes []Delet
 	// Deletes are buffered before upserts so that, within one message, a policy
 	// that matches wins over one that does not for the same index.
 	for _, op := range deletes {
-		b.setPending(op.IndexUID, op.DocID, pendingOp{
-			isDelete: true,
-			delete:   deleteItem{indexUID: op.IndexUID, docID: op.DocID},
+		state := docUnindexed
+		if op.ObjectDeleted {
+			state = docDeleted
+		}
+		b.setPending(pendingOp{
+			indexUID: op.IndexUID,
+			docID:    op.DocID,
+			rv:       op.ResourceVersion,
+			state:    state,
 		})
 	}
 
@@ -261,8 +302,12 @@ func (b *Batcher) Submit(msg *jetstream.Msg, upserts []UpsertOp, deletes []Delet
 			}
 		}
 
-		b.setPending(op.IndexUID, docID, pendingOp{
-			upsert: upsertItem{indexUID: op.IndexUID, doc: op.Doc},
+		b.setPending(pendingOp{
+			indexUID: op.IndexUID,
+			docID:    docID,
+			rv:       resourceVersionOf(op.Doc),
+			state:    docIndexed,
+			doc:      op.Doc,
 		})
 	}
 
@@ -297,22 +342,34 @@ func (b *Batcher) Submit(msg *jetstream.Msg, upserts []UpsertOp, deletes []Delet
 	b.mu.Unlock()
 
 	if due {
-		klog.Infof("Batch size reached, flushing %d upserts and %d deletes from %d unique messages", len(bt.upserts), len(bt.deletes), len(bt.msgs))
+		upserts, deletes := bt.counts()
+		klog.Infof("Batch size reached, flushing %d upserts and %d deletes from %d unique messages", upserts, deletes, len(bt.msgs))
 		b.launchFlush(bt)
 	}
 }
 
-// setPending records op as the latest operation for docID in indexUID,
-// replacing whatever was buffered for it. MUST hold lock.
-func (b *Batcher) setPending(indexUID, docID string, op pendingOp) {
-	key := indexUID + "/" + docID
-	if prev, ok := b.pending[key]; ok && !prev.isDelete {
-		b.pendingUpserts--
+// setPending records op as the buffered operation for its document unless
+// something at least as new is already buffered, in which case op is dropped:
+// a redelivered or late-arriving older event must not displace a newer one
+// that is waiting in the same window. MUST hold lock.
+func (b *Batcher) setPending(op pendingOp) {
+	key := pendingKey(op.indexUID, op.docID)
+	if prev, ok := b.pending[key]; ok {
+		if !op.record().supersedes(prev.record()) {
+			return
+		}
+		if prev.isUpsert() {
+			b.pendingUpserts--
+		}
 	}
-	if !op.isDelete {
+	if op.isUpsert() {
 		b.pendingUpserts++
 	}
 	b.pending[key] = op
+}
+
+func pendingKey(indexUID, docID string) string {
+	return indexUID + "/" + docID
 }
 
 // setPendingMetrics publishes the buffered operation counts. MUST hold lock.
@@ -329,9 +386,9 @@ func (b *Batcher) QueueUpsert(indexUID string, doc any, msg *jetstream.Msg) {
 	b.Submit(msg, []UpsertOp{{IndexUID: indexUID, Doc: doc}}, nil)
 }
 
-// QueueDelete adds a document ID to the pending map and triggers an asynchronous
-// flush if the batch size is reached. It is shorthand for a single-operation
-// Submit; see QueueUpsert.
+// QueueDelete removes a document from an index without ordering information,
+// as for a document that no longer belongs there. It is shorthand for a
+// single-operation Submit; see QueueUpsert.
 func (b *Batcher) QueueDelete(indexUID string, docID string, msg *jetstream.Msg) {
 	b.Submit(msg, nil, []DeleteOp{{IndexUID: indexUID, DocID: docID}})
 }
@@ -468,17 +525,12 @@ func (b *Batcher) warnFlushBackpressure(flushType string, blocked time.Duration)
 // place in the enqueue order. MUST hold lock.
 func (b *Batcher) takeBatch() batch {
 	bt := batch{
-		upserts: make([]upsertItem, 0, b.pendingUpserts),
-		deletes: make([]deleteItem, 0, len(b.pending)-b.pendingUpserts),
-		msgs:    b.msgs,
-		turn:    enqueueTurn{prev: b.lastEnqueue, done: make(chan struct{})},
+		ops:  make([]pendingOp, 0, len(b.pending)),
+		msgs: b.msgs,
+		turn: enqueueTurn{prev: b.lastEnqueue, done: make(chan struct{})},
 	}
 	for _, op := range b.pending {
-		if op.isDelete {
-			bt.deletes = append(bt.deletes, op.delete)
-		} else {
-			bt.upserts = append(bt.upserts, op.upsert)
-		}
+		bt.ops = append(bt.ops, op)
 	}
 	b.lastEnqueue = bt.turn.done
 
@@ -547,9 +599,35 @@ func (b *Batcher) startAckProgress(msgs []jetstream.Msg, flushType string) (stop
 	}
 }
 
+// flushErrors collects the failures of one flush from its goroutines.
+type flushErrors struct {
+	mu   sync.Mutex
+	errs []error
+}
+
+func (f *flushErrors) add(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.errs = append(f.errs, err)
+}
+
+func (f *flushErrors) join() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return errors.Join(f.errs...)
+}
+
+// performFlush writes a batch to Meilisearch in three phases. First every
+// operation is claimed in the document state store, which replaces any that
+// an earlier flush anywhere has already superseded with the newer state. Then
+// the resulting states are enqueued. Finally each is recorded against the task
+// that carries it; where the store shows a newer state was enqueued before
+// this task, the newer state is enqueued again so it lands last. See
+// ordering.go for why each phase is needed.
 func (b *Batcher) performFlush(bt batch) {
 	flushType := bt.flushType()
-	klog.Infof("Flushing batch of %d upserts and %d deletes to Meilisearch...", len(bt.upserts), len(bt.deletes))
+	upserts, deletes := bt.counts()
+	klog.Infof("Flushing batch of %d upserts and %d deletes to Meilisearch...", upserts, deletes)
 
 	searchmetrics.IndexerInFlightFlushes.Inc()
 	defer searchmetrics.IndexerInFlightFlushes.Dec()
@@ -558,78 +636,116 @@ func (b *Batcher) performFlush(bt batch) {
 		searchmetrics.IndexerFlushDuration.WithLabelValues(flushType).Observe(time.Since(start).Seconds())
 	}()
 
-	upsertGroups := make(map[string][]any)
-	for _, item := range bt.upserts {
-		upsertGroups[item.indexUID] = append(upsertGroups[item.indexUID], item.doc)
-	}
-	deleteGroups := make(map[string][]string)
-	for _, item := range bt.deletes {
-		deleteGroups[item.indexUID] = append(deleteGroups[item.indexUID], item.docID)
-	}
-
-	var wg, enqueueWG sync.WaitGroup
-	var errs []error
-	var errMu sync.Mutex
-
 	// Heartbeat the batch for the whole time its tasks are outstanding.
 	stopAckProgress := b.startAckProgress(bt.msgs, flushType)
 
-	// run enqueues one Meilisearch task and then waits for it. The keys in a
-	// batch are unique, so the order of its tasks relative to each other does
-	// not matter; only the enqueue barrier against the next batch does.
-	run := func(enqueue func() ([]*meilisearch.Task, error)) {
-		wg.Add(1)
-		enqueueWG.Add(1)
-		go func() {
-			defer wg.Done()
+	// Flushes outlive a shutdown of the batcher on purpose (see
+	// acquireFlushSlot), so the store calls get their own lifetime.
+	ctx := context.Background()
 
-			// 1. Enqueue - Limited by semaphore
-			b.sem <- struct{}{}
-			tasks, err := enqueue()
-			<-b.sem
-			enqueueWG.Done()
+	var wg sync.WaitGroup
+	var errs flushErrors
 
-			if err != nil {
-				errMu.Lock()
-				errs = append(errs, err)
-				errMu.Unlock()
-				return
-			}
-
-			// 2. Wait (Polling) - NOT limited by semaphore
-			_, err = b.client.WaitForTasks(tasks)
-			if err != nil {
-				errMu.Lock()
-				errs = append(errs, err)
-				errMu.Unlock()
-			}
-		}()
+	claims, err := b.claimBatch(ctx, bt.ops)
+	if err != nil {
+		errs.add(fmt.Errorf("claiming document state: %w", err))
 	}
 
-	for indexUID, docs := range upsertGroups {
-		run(func() ([]*meilisearch.Task, error) { return b.client.AddDocumentsAsync(indexUID, docs) })
+	var groups []*flushGroup
+	if err == nil {
+		groups = groupClaims(claims)
+		b.enqueueGroups(groups, &wg, &errs)
 	}
-	for indexUID, docIDs := range deleteGroups {
-		run(func() ([]*meilisearch.Task, error) { return b.client.DeleteDocumentsAsync(indexUID, docIDs) })
-	}
-	enqueueWG.Wait()
 	close(bt.turn.done)
+
+	for round := 0; err == nil && len(groups) > 0; round++ {
+		repairs, recordErr := b.recordBatch(ctx, groups)
+		if recordErr != nil {
+			errs.add(fmt.Errorf("recording document state: %w", recordErr))
+			break
+		}
+		if len(repairs) == 0 {
+			break
+		}
+		if round >= maxRepairRounds {
+			errs.add(fmt.Errorf("%d documents still carry a superseded state after %d repair rounds", len(repairs), maxRepairRounds))
+			break
+		}
+		searchmetrics.IndexerOrderRepairs.Add(float64(len(repairs)))
+		klog.Infof("Re-enqueueing %d documents whose newer state was enqueued before this batch's", len(repairs))
+		groups = groupClaims(repairs)
+		b.enqueueGroups(groups, &wg, &errs)
+	}
+
 	wg.Wait()
 	stopAckProgress()
 
-	if len(errs) > 0 {
+	if err := errs.join(); err != nil {
 		searchmetrics.IndexerFlushTotal.WithLabelValues(flushType, flushStatusFailure).Inc()
 		klog.Errorf("Failed to flush %d upserts and %d deletes from %d messages, nacking for redelivery in %s: %v",
-			len(bt.upserts), len(bt.deletes), len(bt.msgs), nakDelay, errors.Join(errs...))
+			upserts, deletes, len(bt.msgs), nakDelay, err)
 		b.nakBatch(bt.msgs, flushType)
 		return
 	}
 
 	searchmetrics.IndexerFlushTotal.WithLabelValues(flushType, flushStatusSuccess).Inc()
-	klog.Infof("Successfully flushed %d upserts and %d deletes", len(bt.upserts), len(bt.deletes))
+	klog.Infof("Successfully flushed %d upserts and %d deletes", upserts, deletes)
 	for _, msg := range bt.msgs {
 		msg.Ack()
 	}
+}
+
+// enqueueGroups sends each group to Meilisearch and returns once every group
+// has been enqueued, with the task uids recorded on the groups. Waiting for
+// the tasks to finish continues in the background under wg. The keys in a
+// group are unique, so the order of its tasks relative to each other does not
+// matter; only the enqueue barrier against the next batch does.
+func (b *Batcher) enqueueGroups(groups []*flushGroup, wg *sync.WaitGroup, errs *flushErrors) {
+	var enqueueWG sync.WaitGroup
+	for _, g := range groups {
+		wg.Add(1)
+		enqueueWG.Add(1)
+		go func(g *flushGroup) {
+			defer wg.Done()
+
+			// 1. Enqueue - Limited by semaphore
+			b.sem <- struct{}{}
+			tasks, err := g.enqueue(b.client)
+			<-b.sem
+			if err == nil {
+				g.task = firstTaskUID(tasks)
+			}
+			enqueueWG.Done()
+
+			if err != nil {
+				errs.add(err)
+				return
+			}
+
+			// 2. Wait (Polling) - NOT limited by semaphore
+			if _, err := b.client.WaitForTasks(tasks); err != nil {
+				errs.add(err)
+			}
+		}(g)
+	}
+	enqueueWG.Wait()
+}
+
+// firstTaskUID is the uid of the earliest task among those a group was
+// enqueued as. A group spanning several chunks applies across a range of
+// uids; claiming the lowest is conservative, since any task later than it is
+// treated as able to land after the group.
+func firstTaskUID(tasks []*meilisearch.Task) int64 {
+	var uid int64
+	for _, t := range tasks {
+		if t == nil {
+			continue
+		}
+		if uid == 0 || t.TaskUID < uid {
+			uid = t.TaskUID
+		}
+	}
+	return uid
 }
 
 // nakBatch returns a failed batch to JetStream for redelivery. Without it the

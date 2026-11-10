@@ -126,6 +126,32 @@ var (
 		},
 		[]string{"type"},
 	)
+
+	// IndexerStaleWritesSuperseded counts operations the document state store
+	// showed to be older than a state already recorded by an earlier flush,
+	// possibly on another replica. The recorded state is applied instead.
+	IndexerStaleWritesSuperseded = metrics.NewCounter(
+		&metrics.CounterOpts{
+			Namespace:      namespace,
+			Subsystem:      indexerSubsystem,
+			Name:           "stale_writes_superseded_total",
+			Help:           "Total number of indexer operations replaced by a newer recorded state for the same document",
+			StabilityLevel: metrics.ALPHA,
+		},
+	)
+
+	// IndexerOrderRepairs counts documents a flush enqueued a second time
+	// because a newer state had been enqueued before the flush's own task and
+	// would otherwise have been overwritten by it.
+	IndexerOrderRepairs = metrics.NewCounter(
+		&metrics.CounterOpts{
+			Namespace:      namespace,
+			Subsystem:      indexerSubsystem,
+			Name:           "order_repairs_total",
+			Help:           "Total number of documents re-enqueued so their newest state lands after an older task",
+			StabilityLevel: metrics.ALPHA,
+		},
+	)
 )
 
 // init registers all custom metrics with the legacy registry
@@ -141,5 +167,7 @@ func init() {
 		IndexerFlushSlotWait,
 		IndexerAckProgress,
 		IndexerMessagesNacked,
+		IndexerStaleWritesSuperseded,
+		IndexerOrderRepairs,
 	)
 }

@@ -245,7 +245,41 @@ the buffer reaches its size or time threshold:
 
 Meilisearch applies an index's tasks in the order they are enqueued, so each
 batch enqueues its tasks only after the batch taken before it has enqueued.
-This ordering holds within one indexer replica only.
+That holds within one replica only; across replicas, which share one JetStream
+queue group, the events for one object are spread out and an older event's
+batch can be enqueued after a newer one's.
+
+A document state bucket (JetStream KV, created by the indexer) is the arbiter
+across replicas. It records, per index and document, the newest state any
+replica has accepted — its `resourceVersion`, whether it is indexed, removed
+from the index or deleted, and a copy of the document — plus the latest
+Meilisearch task known to carry a state for it. Reading the current document
+from Meilisearch cannot play that role: writes are queued tasks that take
+longer to apply than a flush interval under load, so a read misses exactly the
+newer write it needs to see. Every flush:
+
+1. Claims each operation with a compare-and-set. An operation older than the
+   recorded state is replaced by that state, so a late create re-applies the
+   newest update instead of the create response.
+2. Enqueues the claimed states and learns the task uid that carries them.
+3. Records that task. If the bucket already names a newer state, it was
+   enqueued before this task and is about to be overwritten, so the flush
+   enqueues it again behind its own task. Only the flush holding the latest
+   recorded task repairs; a flush that fails between steps is nacked and the
+   redelivery runs the protocol from the newest recorded state.
+
+Within one buffer, an operation older than the one already buffered for its
+document is dropped rather than replacing it.
+
+A deletion of the object itself (a `delete` verb, or a write with a
+`deletionTimestamp`) is recorded as a tombstone that wins over every later
+flushed write regardless of `resourceVersion`, since an object's uid is never
+reused. Removal because the object stopped matching a policy is an ordinary
+versioned state, so a newer matching write brings the document back.
+
+Dry-run writes are audited like real ones but persist nothing; the indexer
+skips any event whose request URI carries `dryRun`, and any write whose
+response lacks a `resourceVersion`.
 
 Create events that don't match any policy can be acknowledged immediately since
 the resource was never indexed. Update and delete events that don't match should
