@@ -71,6 +71,7 @@ type ResourceIndexerOptions struct {
 	MeilisearchTaskWaitTimeout  time.Duration
 	MeilisearchTaskPollInterval time.Duration
 	MeilisearchHTTPTimeout      time.Duration
+	BatchFlushTimeout           time.Duration
 	MeilisearchDomain           string
 	MeilisearchChunkSize        int
 	MeilisearchMaxRetries       int
@@ -84,7 +85,9 @@ type ResourceIndexerOptions struct {
 	BatchAckProgressInterval  time.Duration
 
 	// Observability
-	MetricsBindAddress string
+	MetricsBindAddress     string
+	HealthProbeBindAddress string
+	LivenessStallThreshold time.Duration
 
 	// Multi-tenancy settings.
 	EnableMultiTenancy bool
@@ -101,6 +104,7 @@ func NewResourceIndexerOptions() *ResourceIndexerOptions {
 		MeilisearchTaskWaitTimeout:  10 * time.Minute,
 		MeilisearchTaskPollInterval: 500 * time.Millisecond,
 		MeilisearchHTTPTimeout:      60 * time.Second,
+		BatchFlushTimeout:           indexer.DefaultFlushTimeout,
 		MeilisearchDomain:           "http://meilisearch.meilisearch-system.svc.cluster.local:7700",
 		MeilisearchChunkSize:        1000,
 		BatchSize:                   1000,
@@ -111,6 +115,8 @@ func NewResourceIndexerOptions() *ResourceIndexerOptions {
 		BatchMaxInFlightFlushes:     indexer.DefaultMaxInFlightFlushes,
 		BatchAckProgressInterval:    indexer.DefaultAckProgressInterval,
 		MetricsBindAddress:          ":8080",
+		HealthProbeBindAddress:      ":8081",
+		LivenessStallThreshold:      30 * time.Minute,
 		EnableMultiTenancy:          false,
 	}
 }
@@ -130,6 +136,7 @@ func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.MeilisearchDomain, "meilisearch-domain", o.MeilisearchDomain, "Domain of the Meilisearch instance.")
 	fs.DurationVar(&o.MeilisearchTaskWaitTimeout, "meilisearch-task-wait-timeout", o.MeilisearchTaskWaitTimeout, "Maximum time to wait for a Meilisearch task to complete before the batch is nacked and redelivered. This is a backstop against a wedged Meilisearch, not a throughput knob: a running flush heartbeats its messages every batch-ack-progress-interval, so the batch stays alive for as long as it waits and this no longer needs to sit under the consumer ackWait.")
 	fs.DurationVar(&o.MeilisearchTaskPollInterval, "meilisearch-task-poll-interval", o.MeilisearchTaskPollInterval, "How often to poll Meilisearch for task completion while waiting.")
+	fs.DurationVar(&o.BatchFlushTimeout, "batch-flush-timeout", o.BatchFlushTimeout, "Maximum time one flush may run, enqueue and task wait together, before it frees its slot and its batch is nacked and redelivered. It bounds how long a slow Meilisearch can hold the flush slots, and so what /healthz must tolerate.")
 	fs.DurationVar(&o.MeilisearchHTTPTimeout, "meilisearch-http-timeout", o.MeilisearchHTTPTimeout, "Timeout for HTTP requests to Meilisearch.")
 	fs.IntVar(&o.MeilisearchChunkSize, "meilisearch-chunk-size", o.MeilisearchChunkSize, "The number of documents to process in a single chunk.")
 	fs.IntVar(&o.BatchSize, "batch-size", o.BatchSize, "The batch size for upserts and deletes.")
@@ -146,6 +153,8 @@ func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.DurationVar(&o.BatchAckProgressInterval, "batch-ack-progress-interval", o.BatchAckProgressInterval, "How often a running flush tells JetStream its messages are still in progress, extending ackWait. Must stay comfortably under the consumer ackWait so a heartbeat always lands inside the window.")
 
 	fs.StringVar(&o.MetricsBindAddress, "metrics-bind-address", o.MetricsBindAddress, "The address the metrics endpoint binds to. Set to an empty string to disable metrics serving.")
+	fs.StringVar(&o.HealthProbeBindAddress, "health-probe-bind-address", o.HealthProbeBindAddress, "The address the /readyz and /healthz probe endpoints bind to. Set to an empty string to disable them.")
+	fs.DurationVar(&o.LivenessStallThreshold, "liveness-stall-threshold", o.LivenessStallThreshold, "How long a batcher's flush loop may go without completing a turn before /healthz fails. The loop turns every flush-interval whether or not messages arrive, and blocks only while every flush slot is held, so this must exceed the longest a flush can legitimately take.")
 
 	// Multi-tenancy
 	fs.BoolVar(&o.EnableMultiTenancy, "enable-multi-tenancy", o.EnableMultiTenancy, "Enable multi-tenant mode to index resources from all project control planes.")
@@ -229,8 +238,18 @@ func (o *ResourceIndexerOptions) Validate() error {
 	if budget := heartbeatMargin * o.BatchAckProgressInterval; budget > consumerAckWait {
 		return fmt.Errorf("%d * batch-ack-progress-interval is %s, which exceeds the consumer ackWait of %s: lower batch-ack-progress-interval", heartbeatMargin, budget, consumerAckWait)
 	}
+	if o.BatchFlushTimeout < o.MeilisearchTaskWaitTimeout {
+		return fmt.Errorf("batch-flush-timeout %s must be at least meilisearch-task-wait-timeout %s", o.BatchFlushTimeout, o.MeilisearchTaskWaitTimeout)
+	}
+	if floor := o.livenessStallFloor(); o.LivenessStallThreshold < floor {
+		return fmt.Errorf("liveness-stall-threshold %s must be at least %s, twice the longest a flush can hold the loop (batch-flush-timeout + flush-interval)", o.LivenessStallThreshold, floor)
+	}
 
 	return nil
+}
+
+func (o *ResourceIndexerOptions) livenessStallFloor() time.Duration {
+	return 2 * (o.BatchFlushTimeout + o.FlushInterval)
 }
 
 func (o *ResourceIndexerOptions) Complete() error {
@@ -265,8 +284,12 @@ func NewIndexerCommand() *cobra.Command {
 func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 	ctrllog.SetLogger(klog.NewKlogr())
 
-	// Serve the batcher and search metrics; the indexer has no other HTTP surface.
 	if err := serveMetrics(ctx, o.MetricsBindAddress); err != nil {
+		return err
+	}
+
+	health := newProbes(o.LivenessStallThreshold)
+	if err := serveHTTP(ctx, "health probe", o.HealthProbeBindAddress, health.mux()); err != nil {
 		return err
 	}
 
@@ -320,6 +343,7 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 		return fmt.Errorf("failed to sync Kubernetes cache")
 	}
 	klog.Info("Cache synced successfully")
+	health.cacheSynced.Store(true)
 
 	// Connect to NATS
 	klog.Infof("Connecting to NATS at %s...", o.NatsURL)
@@ -333,6 +357,8 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 		klog.Infof("Using NATS TLS cert from %s and key from %s", o.NatsTLSCert, o.NatsTLSKey)
 		natsOpts = append(natsOpts, nats.ClientCert(o.NatsTLSCert, o.NatsTLSKey))
 	}
+
+	natsOpts = append(natsOpts, nats.MaxReconnects(-1))
 
 	nc, err := nats.Connect(o.NatsURL, natsOpts...)
 	if err != nil {
@@ -406,6 +432,7 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 		MaxConcurrentUploads: o.BatchMaxConcurrentUploads,
 		MaxInFlightFlushes:   o.BatchMaxInFlightFlushes,
 		AckProgressInterval:  o.BatchAckProgressInterval,
+		FlushTimeout:         o.BatchFlushTimeout,
 	}
 
 	// Create separate batchers for audit events and re-indexing events
@@ -416,6 +443,8 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 	// Start both batchers
 	auditBatcher.Start(ctx)
 	reindexBatcher.Start(ctx)
+	health.watch("audit", auditBatcher)
+	health.watch("reindex", reindexBatcher)
 
 	auditIdx := indexer.NewIndexer(auditConsumer, indexPolicyCache, auditBatcher, o.EnableMultiTenancy)
 	reindexIdx := indexer.NewReindexConsumer(reindexJSConsumer, reindexPolicyCache, reindexBatcher)
@@ -441,6 +470,18 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 		} else {
 			errCh <- nil
 		}
+	}()
+
+	go func() {
+		for _, attached := range []<-chan struct{}{auditIdx.Attached(), reindexIdx.Attached()} {
+			select {
+			case <-attached:
+			case <-consumerCtx.Done():
+				return
+			}
+		}
+		klog.Info("JetStream consumers attached; indexer is ready")
+		health.consumersAttached.Store(true)
 	}()
 
 	select {
@@ -481,33 +522,34 @@ func checkAckWait(name string, ackWait time.Duration, progress time.Duration) er
 	return nil
 }
 
-// serveMetrics starts the Prometheus endpoint and shuts it down when ctx is
-// cancelled. An empty address disables metrics serving. The listener is bound
-// synchronously so a port clash fails startup instead of leaving the process
-// running without metrics.
 func serveMetrics(ctx context.Context, addr string) error {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", legacyregistry.Handler())
+	return serveHTTP(ctx, "metrics", addr, mux)
+}
+
+// serveHTTP binds addr synchronously, so a port clash fails startup, and shuts
+// the server down when ctx is cancelled. An empty address disables it.
+func serveHTTP(ctx context.Context, name, addr string, handler http.Handler) error {
 	if addr == "" {
-		klog.Info("Metrics endpoint disabled")
+		klog.Infof("The %s endpoint is disabled", name)
 		return nil
 	}
 
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
-		return fmt.Errorf("failed to bind metrics endpoint on %s: %w", addr, err)
+		return fmt.Errorf("failed to bind %s endpoint on %s: %w", name, addr, err)
 	}
 
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", legacyregistry.Handler())
-
 	server := &http.Server{
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	go func() {
-		klog.Infof("Serving metrics on %s/metrics", listener.Addr())
+		klog.Infof("Serving %s on %s", name, listener.Addr())
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			klog.Errorf("Metrics server failed: %v", err)
+			klog.Errorf("The %s server failed: %v", name, err)
 		}
 	}()
 
@@ -516,7 +558,7 @@ func serveMetrics(ctx context.Context, addr string) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
-			klog.Errorf("Failed to shut down metrics server: %v", err)
+			klog.Errorf("Failed to shut down the %s server: %v", name, err)
 		}
 	}()
 
