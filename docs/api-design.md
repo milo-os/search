@@ -160,6 +160,41 @@ satisfies any condition (e.g., it transitions from Ready to NotReady), it will
 be removed from the search index. Similarly, resources that begin satisfying
 a condition after an update will be added to the index.
 
+#### Visibility
+
+A query made in a user, organization or project context only finds documents
+written in that same context: each index is filtered on the document's
+`_tenant_type` and `_tenant`. A query at the platform root isn't filtered.
+
+Some resources are written once at the platform root but are meant to be found
+from every context, such as public feedback posts. Set `visibility:
+AllContexts` on their policy to search that index unfiltered from any context:
+
+```yaml
+apiVersion: search.miloapis.com/v1alpha1
+kind: ResourceIndexPolicy
+metadata:
+  name: feedback-posts
+spec:
+  targetResource:
+    group: feedback.miloapis.com
+    version: v1alpha1
+    kind: Post
+  # Tenant (the default) or AllContexts.
+  visibility: AllContexts
+  fields:
+    - path: .spec.title
+      searchable: true
+```
+
+The setting applies per index. In a query that spans several indexes, every
+index whose policy keeps the default `Tenant` is still filtered to the caller's
+context, and `targetResources` still chooses which indexes are searched.
+Results report the tenant each document was written in.
+
+`AllContexts` doesn't check that the caller may read the resource kind. Only set
+it for kinds every signed-in user is allowed to read.
+
 ### Resource search queries
 
 > [!NOTE]

@@ -3,6 +3,7 @@ package resourcesearchquery
 import (
 	policyevaluation "go.miloapis.net/search/internal/policy/evaluation"
 	searchv1alpha1 "go.miloapis.net/search/pkg/apis/search/v1alpha1"
+	"go.miloapis.net/search/pkg/meilisearch"
 )
 
 // classifyTargets partitions the requested target resources into two groups:
@@ -62,20 +63,22 @@ func classifyTargets(
 	return allowed, denied
 }
 
-// indexUIDsFor extracts the Meilisearch index UIDs for a slice of allowed
-// target resources. It looks up each target against the policy list and
-// returns the corresponding Status.IndexName values in the same order as
-// allowed. Targets with no matching ready policy are silently skipped (this
-// should not happen in practice because classifyTargets already filtered them,
-// but the function is defensive).
-func indexUIDsFor(
+// indexSearchesFor returns the Meilisearch index and filter to search for
+// each allowed target resource, in the same order as allowed. scopeFilter is
+// the caller's tenant filter ("" for a platform-root query). It applies to
+// every index except those whose policy has AllContexts visibility, which a
+// query from any context searches unfiltered. Targets with no matching ready
+// policy are silently skipped (this should not happen in practice because
+// classifyTargets already filtered them, but the function is defensive).
+func indexSearchesFor(
 	allowed []searchv1alpha1.TargetResource,
 	policies []*policyevaluation.CachedPolicy,
-) []string {
+	scopeFilter string,
+) []meilisearch.IndexSearch {
 	if len(allowed) == 0 {
 		return nil
 	}
-	uids := make([]string, 0, len(allowed))
+	searches := make([]meilisearch.IndexSearch, 0, len(allowed))
 	for _, t := range allowed {
 		for _, cp := range policies {
 			p := cp.Policy
@@ -83,10 +86,14 @@ func indexUIDsFor(
 				p.Spec.TargetResource.Version == t.Version &&
 				p.Spec.TargetResource.Kind == t.Kind &&
 				p.Status.IndexName != "" {
-				uids = append(uids, p.Status.IndexName)
+				filter := scopeFilter
+				if p.Spec.Visibility == searchv1alpha1.IndexVisibilityAllContexts {
+					filter = ""
+				}
+				searches = append(searches, meilisearch.IndexSearch{IndexUID: p.Status.IndexName, Filter: filter})
 				break
 			}
 		}
 	}
-	return uids
+	return searches
 }

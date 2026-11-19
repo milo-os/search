@@ -13,6 +13,7 @@ import (
 
 	policyevaluation "go.miloapis.net/search/internal/policy/evaluation"
 	searchv1alpha1 "go.miloapis.net/search/pkg/apis/search/v1alpha1"
+	"go.miloapis.net/search/pkg/meilisearch"
 )
 
 // ---------------------------------------------------------------------------
@@ -21,26 +22,34 @@ import (
 
 // fakeMeiliClient is a test double for the multiSearcher interface.
 type fakeMeiliClient struct {
-	calls      int
-	lastUIDs   []string
-	lastQuery  string
-	lastLimit  int64
-	lastOffset int64
-	lastFilter string
-	resp       *meiliapi.MultiSearchResponse
+	calls        int
+	lastSearches []meilisearch.IndexSearch
+	lastUIDs     []string
+	lastQuery    string
+	lastLimit    int64
+	lastOffset   int64
+	lastFilter   string // the first index's filter
+	resp         *meiliapi.MultiSearchResponse
 }
 
 func newFakeMeili() *fakeMeiliClient {
 	return &fakeMeiliClient{resp: &meiliapi.MultiSearchResponse{}}
 }
 
-func (f *fakeMeiliClient) MultiSearch(uids []string, q string, limit, offset int64, filter string) (*meiliapi.MultiSearchResponse, error) {
+func (f *fakeMeiliClient) MultiSearch(searches []meilisearch.IndexSearch, q string, limit, offset int64) (*meiliapi.MultiSearchResponse, error) {
 	f.calls++
-	f.lastUIDs = uids
+	f.lastSearches = searches
+	f.lastUIDs = nil
+	for _, s := range searches {
+		f.lastUIDs = append(f.lastUIDs, s.IndexUID)
+	}
+	f.lastFilter = ""
+	if len(searches) > 0 {
+		f.lastFilter = searches[0].Filter
+	}
 	f.lastQuery = q
 	f.lastLimit = limit
 	f.lastOffset = offset
-	f.lastFilter = filter
 	return f.resp, nil
 }
 
@@ -115,7 +124,7 @@ func newTestProjectQuery() *searchv1alpha1.ResourceSearchQuery {
 }
 
 // testQuery builds a minimal ResourceSearchQuery with a single TargetResource
-// so that classifyTargets and indexUIDsFor both have something to act on.
+// so that classifyTargets and indexSearchesFor both have something to act on.
 func testQuery(group, version, kind string) *searchv1alpha1.ResourceSearchQuery {
 	return &searchv1alpha1.ResourceSearchQuery{
 		Spec: searchv1alpha1.ResourceSearchQuerySpec{
@@ -444,4 +453,123 @@ func TestCreate_NoTargets_ReturnsAllReadyPolicyResults_EmptyDenied(t *testing.T)
 	if len(result.Status.DeniedTargetResources) != 0 {
 		t.Fatalf("expected no denied targets, got %d: %v", len(result.Status.DeniedTargetResources), result.Status.DeniedTargetResources)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Index visibility
+// ---------------------------------------------------------------------------
+
+// visibilityPolicies returns a ready Project policy with the default
+// visibility and a ready Post policy visible from all contexts.
+func visibilityPolicies() *fakePolicyLister {
+	project := buildPolicy("resourcemanager.miloapis.com", "v1alpha1", "Project", "projects-idx")
+	post := buildPolicy("feedback.miloapis.com", "v1alpha1", "Post", "posts-idx")
+	post.Policy.Spec.Visibility = searchv1alpha1.IndexVisibilityAllContexts
+	return &fakePolicyLister{policies: []*policyevaluation.CachedPolicy{project, post}}
+}
+
+func scopedUser() *user.DefaultInfo {
+	return &user.DefaultInfo{
+		Name: "alice",
+		Extra: map[string][]string{
+			"iam.miloapis.com/parent-type": {"User"},
+			"iam.miloapis.com/parent-name": {"alice"},
+		},
+	}
+}
+
+func assertSearches(t *testing.T, got, want []meilisearch.IndexSearch) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("searches = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("search %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+const aliceFilter = `(_tenant_type = "user" AND _tenant = "alice")`
+
+// A scoped query filters each Tenant index to the caller's context and
+// searches each AllContexts index unfiltered, in one federated query.
+func TestCreate_ScopedQuery_FiltersOnlyTenantIndexes(t *testing.T) {
+	meili := newFakeMeili()
+	r := newTestREST(t, meili, visibilityPolicies())
+
+	q := &searchv1alpha1.ResourceSearchQuery{Spec: searchv1alpha1.ResourceSearchQuerySpec{Query: "dns"}}
+	if _, err := r.Create(ctxWithUser(scopedUser()), q, nil, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if meili.calls != 1 {
+		t.Fatalf("expected 1 Meilisearch call, got %d", meili.calls)
+	}
+	assertSearches(t, meili.lastSearches, []meilisearch.IndexSearch{
+		{IndexUID: "projects-idx", Filter: aliceFilter},
+		{IndexUID: "posts-idx", Filter: ""},
+	})
+}
+
+// A platform-root query is unchanged: no index is filtered.
+func TestCreate_RootQuery_FiltersNoIndex(t *testing.T) {
+	meili := newFakeMeili()
+	r := newTestREST(t, meili, visibilityPolicies())
+
+	q := &searchv1alpha1.ResourceSearchQuery{Spec: searchv1alpha1.ResourceSearchQuerySpec{Query: "dns"}}
+	if _, err := r.Create(ctxWithUser(&user.DefaultInfo{Name: "admin"}), q, nil, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertSearches(t, meili.lastSearches, []meilisearch.IndexSearch{
+		{IndexUID: "projects-idx", Filter: ""},
+		{IndexUID: "posts-idx", Filter: ""},
+	})
+}
+
+// targetResources still decides which indexes are searched: an AllContexts
+// index is only searched when it is targeted (or no targets are given).
+func TestCreate_ScopedQuery_TargetResourcesStillApply(t *testing.T) {
+	tests := []struct {
+		name   string
+		target searchv1alpha1.TargetResource
+		want   []meilisearch.IndexSearch
+	}{
+		{"TenantIndexOnly", tr("resourcemanager.miloapis.com", "v1alpha1", "Project"),
+			[]meilisearch.IndexSearch{{IndexUID: "projects-idx", Filter: aliceFilter}}},
+		{"AllContextsIndexOnly", tr("feedback.miloapis.com", "v1alpha1", "Post"),
+			[]meilisearch.IndexSearch{{IndexUID: "posts-idx", Filter: ""}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			meili := newFakeMeili()
+			r := newTestREST(t, meili, visibilityPolicies())
+			q := &searchv1alpha1.ResourceSearchQuery{Spec: searchv1alpha1.ResourceSearchQuerySpec{
+				Query: "dns", TargetResources: []searchv1alpha1.TargetResource{tt.target}}}
+			if _, err := r.Create(ctxWithUser(scopedUser()), q, nil, nil); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			assertSearches(t, meili.lastSearches, tt.want)
+		})
+	}
+}
+
+// Visibility is read from the policy cache on every query, so a policy set
+// back to Tenant is filtered again on the next query.
+func TestCreate_VisibilityChangeAppliesToNextQuery(t *testing.T) {
+	meili := newFakeMeili()
+	policies := visibilityPolicies()
+	r := newTestREST(t, meili, policies)
+	target := []searchv1alpha1.TargetResource{tr("feedback.miloapis.com", "v1alpha1", "Post")}
+	q := &searchv1alpha1.ResourceSearchQuery{Spec: searchv1alpha1.ResourceSearchQuerySpec{Query: "dns", TargetResources: target}}
+
+	if _, err := r.Create(ctxWithUser(scopedUser()), q, nil, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertSearches(t, meili.lastSearches, []meilisearch.IndexSearch{{IndexUID: "posts-idx", Filter: ""}})
+
+	policies.policies[1].Policy.Spec.Visibility = searchv1alpha1.IndexVisibilityTenant
+	if _, err := r.Create(ctxWithUser(scopedUser()), q, nil, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertSearches(t, meili.lastSearches, []meilisearch.IndexSearch{{IndexUID: "posts-idx", Filter: aliceFilter}})
 }

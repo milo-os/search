@@ -330,6 +330,7 @@ When a project control plane is deleted:
 - Project control planes cannot read search indexes directly (only platform cluster API server)
 - Audit events contain full resource data - ensure NATS transport is secured (TLS)
 - Meilisearch access restricted to indexer and API server components
+- Queries made in a user, organization or project context are filtered to that context, except on indexes whose ResourceIndexPolicy sets `visibility: AllContexts` (see [API Design](../api-design.md#visibility))
 
 ### Platform Capability Integrations
 

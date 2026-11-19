@@ -298,6 +298,13 @@ func schema_pkg_apis_search_v1alpha1_ResourceIndexPolicySpec(ref common.Referenc
 							},
 						},
 					},
+					"visibility": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Visibility sets which contexts can search this policy's index.\n\n- Tenant (the default): a query made in a user, organization or project\n  context only finds documents written in that same context. A query at\n  the platform root finds everything.\n- AllContexts: a query from any context finds every document in this\n  index, whatever context wrote it. Use it for resources written once at\n  the platform root that everyone is meant to find, such as public\n  feedback posts.\n\nAllContexts does not check that the caller may read the resource kind, so only set it for kinds every signed-in user is allowed to read. Search results still report the tenant each document was written in.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 				Required: []string{"targetResource", "fields"},
 			},
