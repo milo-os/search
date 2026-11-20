@@ -289,8 +289,8 @@ All indexed documents include tenant metadata fields:
 
 | Field | Description |
 |-------|-------------|
-| `_tenant` | Tenant name (`"platform"` or project name) |
-| `_tenant_type` | Tenant type (`"platform"` or `"project"`) |
+| `_tenant` | Tenant name: the scope name (organization, project or user name), or `"platform"` when there is none |
+| `_tenant_type` | Tenant type: `Global`, `Organization`, `Project` or `User`, or the `platform` fallback |
 
 ### Bootstrap and Re-indexing Flow
 
