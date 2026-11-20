@@ -19,6 +19,23 @@ func object(namespace string, labels map[string]string, refs ...metav1.OwnerRefe
 	return obj
 }
 
+func typed(apiVersion, kind, name, namespace string) *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{}
+	obj.SetAPIVersion(apiVersion)
+	obj.SetKind(kind)
+	obj.SetName(name)
+	obj.SetNamespace(namespace)
+	return obj
+}
+
+func contact(namespace, subjectGroup, subjectKind, subjectName string) *unstructured.Unstructured {
+	obj := typed("notification.miloapis.com/v1alpha1", "Contact", "c", namespace)
+	obj.Object["spec"] = map[string]any{
+		"subjectRef": map[string]any{"apiGroup": subjectGroup, "kind": subjectKind, "name": subjectName},
+	}
+	return obj
+}
+
 func ref(apiVersion, kind, name string) metav1.OwnerReference {
 	return metav1.OwnerReference{APIVersion: apiVersion, Kind: kind, Name: name, UID: types.UID("uid-" + name)}
 }
@@ -101,6 +118,51 @@ func TestFromObject(t *testing.T) {
 		{
 			name:   "no ownership marker",
 			obj:    object("default", map[string]string{"app": "x"}),
+			wantOK: false,
+		},
+		{
+			name:   "organization owns itself",
+			obj:    typed("resourcemanager.miloapis.com/v1alpha1", "Organization", "acme", ""),
+			want:   Owner{Type: TypeOrganization, Name: "acme"},
+			wantOK: true,
+		},
+		{
+			name:   "user owns itself",
+			obj:    typed("iam.miloapis.com/v1alpha1", "User", "alice", ""),
+			want:   Owner{Type: TypeUser, Name: "alice"},
+			wantOK: true,
+		},
+		{
+			name:   "organization namespace object is owned by its organization",
+			obj:    typed("v1", "Namespace", "organization-acme", ""),
+			want:   Owner{Type: TypeOrganization, Name: "acme"},
+			wantOK: true,
+		},
+		{
+			name:   "other namespace object has no owner",
+			obj:    typed("v1", "Namespace", "milo-system", ""),
+			wantOK: false,
+		},
+		{
+			name:   "organization kind in another group does not own itself",
+			obj:    typed("example.com/v1", "Organization", "acme", ""),
+			wantOK: false,
+		},
+		{
+			name:   "user contact is owned by its user",
+			obj:    contact("milo-system", "iam.miloapis.com", "User", "alice"),
+			want:   Owner{Type: TypeUser, Name: "alice"},
+			wantOK: true,
+		},
+		{
+			name:   "contact in an organization namespace is owned by the organization",
+			obj:    contact("organization-acme", "iam.miloapis.com", "User", "alice"),
+			want:   Owner{Type: TypeOrganization, Name: "acme"},
+			wantOK: true,
+		},
+		{
+			name:   "contact without a user subject has no owner",
+			obj:    contact("milo-system", "resourcemanager.miloapis.com", "Project", "p-one"),
 			wantOK: false,
 		},
 		{

@@ -19,6 +19,7 @@ const (
 
 	resourceManagerGroup = "resourcemanager.miloapis.com"
 	iamGroup             = "iam.miloapis.com"
+	notificationGroup    = "notification.miloapis.com"
 )
 
 type Owner struct {
@@ -31,8 +32,26 @@ func FromObject(obj *unstructured.Unstructured) (Owner, bool) {
 		return Owner{}, false
 	}
 
+	gvk := obj.GroupVersionKind()
+
+	if owner, ok := selfOwner(gvk.Group, gvk.Kind, obj.GetName()); ok {
+		return owner, true
+	}
+
+	if gvk.Group == "" && gvk.Kind == "Namespace" {
+		if name, ok := strings.CutPrefix(obj.GetName(), OrganizationNamespacePrefix); ok && name != "" {
+			return Owner{Type: TypeOrganization, Name: name}, true
+		}
+	}
+
 	if name, ok := strings.CutPrefix(obj.GetNamespace(), OrganizationNamespacePrefix); ok && name != "" {
 		return Owner{Type: TypeOrganization, Name: name}, true
+	}
+
+	if gvk.Group == notificationGroup && gvk.Kind == "Contact" {
+		if owner, ok := contactSubject(obj); ok {
+			return owner, true
+		}
 	}
 
 	var found []Owner
@@ -56,6 +75,29 @@ func FromObject(obj *unstructured.Unstructured) (Owner, bool) {
 	}
 
 	return Owner{}, false
+}
+
+func selfOwner(group, kind, name string) (Owner, bool) {
+	if name == "" {
+		return Owner{}, false
+	}
+	switch {
+	case group == resourceManagerGroup && kind == TypeOrganization:
+		return Owner{Type: TypeOrganization, Name: name}, true
+	case group == iamGroup && kind == TypeUser:
+		return Owner{Type: TypeUser, Name: name}, true
+	}
+	return Owner{}, false
+}
+
+func contactSubject(obj *unstructured.Unstructured) (Owner, bool) {
+	group, _, _ := unstructured.NestedString(obj.Object, "spec", "subjectRef", "apiGroup")
+	kind, _, _ := unstructured.NestedString(obj.Object, "spec", "subjectRef", "kind")
+	name, _, _ := unstructured.NestedString(obj.Object, "spec", "subjectRef", "name")
+	if group != iamGroup || kind != TypeUser || name == "" {
+		return Owner{}, false
+	}
+	return Owner{Type: TypeUser, Name: name}, true
 }
 
 func fromOwnerReference(apiVersion, kind, name string) (Owner, bool) {

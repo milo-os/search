@@ -16,15 +16,17 @@ type ReindexConsumer struct {
 	consumer    jetstream.Consumer
 	policyCache *PolicyCache
 	batcher     *Batcher
+	multiTenant bool
 	attached    startSignal
 }
 
 // NewReindexConsumer creates a new ReindexConsumer instance.
-func NewReindexConsumer(consumer jetstream.Consumer, policyCache *PolicyCache, batcher *Batcher) *ReindexConsumer {
+func NewReindexConsumer(consumer jetstream.Consumer, policyCache *PolicyCache, batcher *Batcher, multiTenant bool) *ReindexConsumer {
 	return &ReindexConsumer{
 		consumer:    consumer,
 		policyCache: policyCache,
 		batcher:     batcher,
+		multiTenant: multiTenant,
 	}
 }
 
@@ -130,13 +132,9 @@ func (r *ReindexConsumer) processTargetedEvent(msg jetstream.Msg, event ReindexE
 		klog.V(4).Infof("ReindexConsumer: match policy=%s resource=%s/%s (id=%s)",
 			event.PolicyName, obj.GetNamespace(), obj.GetName(), event.ID)
 
-		// Propagate the tenant identity carried in the reindex event.
-		// If the event has no tenant set, EvalResult defaults to "platform"
-		// in Transform(), preserving single-tenant behaviour.
-		if event.Tenant != "" {
-			evalResult.Tenant = event.Tenant
-			evalResult.TenantType = event.TenantType
-		}
+		evalResult.Tenant = event.Tenant
+		evalResult.TenantType = event.TenantType
+		evalResult.MultiTenant = r.multiTenant
 
 		doc := evalResult.Transform()
 		ensureUID(doc, resourceUID)

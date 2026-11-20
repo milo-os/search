@@ -85,6 +85,9 @@ func tenantForEvent(event *auditEvent, obj *unstructured.Unstructured, multiTena
 
 	scoped := event.Annotations[ScopeTypeAnnotationKey] != ""
 	if scoped && tenantType != tenantTypeGlobal && tenantType != tenantTypePlatform {
+		if event.Annotations[ScopeNameAnnotationKey] == "" {
+			return ownership.Unscoped, ownership.Unscoped
+		}
 		return tenantName, tenantType
 	}
 	if owner, ok := ownership.FromObject(obj); ok {
@@ -210,6 +213,7 @@ func (i *Indexer) Start(ctx context.Context) error {
 				// Attach the already-extracted tenant context to the eval result.
 				evalResult.Tenant = tenantName
 				evalResult.TenantType = tenantType
+				evalResult.MultiTenant = i.enableMultiTenancy
 
 				// Transform the matching resource into an indexable document
 				doc := evalResult.Transform()

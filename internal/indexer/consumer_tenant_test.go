@@ -91,6 +91,22 @@ func TestTenantForEvent(t *testing.T) {
 			wantType:    "User",
 		},
 		{
+			name:        "project scope without a name is unscoped",
+			annotations: scopeAnnotations("Project", ""),
+			obj:         tenantTestObject("default"),
+			multiTenant: true,
+			wantName:    ownership.Unscoped,
+			wantType:    ownership.Unscoped,
+		},
+		{
+			name:        "organization scope without a name is unscoped, even in an organization namespace",
+			annotations: scopeAnnotations("Organization", ""),
+			obj:         tenantTestObject("organization-acme"),
+			multiTenant: true,
+			wantName:    ownership.Unscoped,
+			wantType:    ownership.Unscoped,
+		},
+		{
 			name:        "single-tenant mode keeps the platform fallback",
 			obj:         tenantTestObject("organization-acme"),
 			multiTenant: false,
