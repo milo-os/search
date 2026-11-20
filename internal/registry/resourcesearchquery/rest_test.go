@@ -230,6 +230,84 @@ func TestCreate_WithParentContext_AppliesScopedFilter(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestCreate_RefusedParentContext_Returns403
+// ---------------------------------------------------------------------------
+
+// A request whose parent context is incomplete or of an unsupported type is
+// refused with 403 before Meilisearch is contacted, instead of running
+// without a tenant filter.
+func TestCreate_RefusedParentContext_Returns403(t *testing.T) {
+	const (
+		group   = "resourcemanager.miloapis.com"
+		version = "v1alpha1"
+		kind    = "Project"
+		index   = "projects-idx"
+	)
+	tests := []struct {
+		name  string
+		extra map[string][]string
+	}{
+		{"OnlyParentType", map[string][]string{
+			"iam.miloapis.com/parent-type": {"Project"},
+		}},
+		{"OnlyParentName", map[string][]string{
+			"iam.miloapis.com/parent-name": {"acme-prod"},
+		}},
+		{"EmptyType", map[string][]string{
+			"iam.miloapis.com/parent-type": {""},
+			"iam.miloapis.com/parent-name": {"acme-prod"},
+		}},
+		{"EmptyName", map[string][]string{
+			"iam.miloapis.com/parent-type": {"Project"},
+			"iam.miloapis.com/parent-name": {""},
+		}},
+		{"OrganizationType", map[string][]string{
+			"iam.miloapis.com/parent-type": {"Organization"},
+			"iam.miloapis.com/parent-name": {"datum"},
+		}},
+		{"LowercaseUserType", map[string][]string{
+			"iam.miloapis.com/parent-type": {"user"},
+			"iam.miloapis.com/parent-name": {"alice"},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			meili := newFakeMeili()
+			r := newTestREST(t, meili, newPolicyListerWithIndex(group, version, kind, index))
+			u := &user.DefaultInfo{Name: "alice", Extra: tt.extra}
+
+			_, err := r.Create(ctxWithUser(u), testQuery(group, version, kind), nil, nil)
+			if !apierrors.IsForbidden(err) {
+				t.Fatalf("expected Forbidden, got %v", err)
+			}
+			if meili.calls != 0 {
+				t.Fatalf("Meilisearch should not be called; calls=%d", meili.calls)
+			}
+		})
+	}
+
+	// An AllContexts index doesn't make a refused request searchable: it is
+	// still refused before Meilisearch is contacted.
+	t.Run("AllContextsIndex", func(t *testing.T) {
+		meili := newFakeMeili()
+		r := newTestREST(t, meili, visibilityPolicies())
+		u := &user.DefaultInfo{Name: "alice", Extra: map[string][]string{
+			"iam.miloapis.com/parent-type": {"Organization"},
+			"iam.miloapis.com/parent-name": {"datum"},
+		}}
+		q := &searchv1alpha1.ResourceSearchQuery{Spec: searchv1alpha1.ResourceSearchQuerySpec{Query: "dns"}}
+
+		_, err := r.Create(ctxWithUser(u), q, nil, nil)
+		if !apierrors.IsForbidden(err) {
+			t.Fatalf("expected Forbidden, got %v", err)
+		}
+		if meili.calls != 0 {
+			t.Fatalf("Meilisearch should not be called; calls=%d", meili.calls)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
 // TestCreate_EmptyTargets_NoFilter
 // ---------------------------------------------------------------------------
 

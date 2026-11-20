@@ -115,13 +115,20 @@ func (r *REST) Create(ctx context.Context, obj runtime.Object, createValidation 
 		return nil, apierrors.NewUnauthorized("missing user in request context")
 	}
 
+	// Tenant scope. Fails closed: a request with an incomplete parent context,
+	// or one of a type search isn't served in, is refused rather than run
+	// without a tenant filter.
+	parent, err := extractParentContext(userInfo)
+	if err != nil {
+		return nil, apierrors.NewForbidden(searchv1alpha1.Resource("resourcesearchqueries"), "", err)
+	}
+
 	// Classify targets against registered policies (no SAR — activity pattern).
 	policies := r.policyCache.GetPolicies()
 	allowed, denied := classifyTargets(query.Spec.TargetResources, policies)
 
 	// Tenant scope filter: applied to each index unless its policy makes it
 	// visible from all contexts.
-	parent := extractParentContext(userInfo)
 	searches := indexSearchesFor(allowed, policies, buildScopedFilter(parent))
 
 	// Short-circuit: nothing to search. Return 200 with empty results and the
@@ -240,7 +247,6 @@ func (r *REST) validateAndGetPagination(query *searchv1alpha1.ResourceSearchQuer
 
 	return limit, offset, nil
 }
-
 
 // calculateNextContinueToken determines the next continue token for pagination.
 // If the number of hits on the current page is equal to or greater than the limit,

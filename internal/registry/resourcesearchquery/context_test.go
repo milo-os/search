@@ -8,88 +8,128 @@ import (
 )
 
 func TestExtractParentContext(t *testing.T) {
+	const (
+		typeKey = "iam.miloapis.com/parent-type"
+		nameKey = "iam.miloapis.com/parent-name"
+	)
+	extra := func(kv map[string][]string) *user.DefaultInfo {
+		return &user.DefaultInfo{Name: "alice", Extra: kv}
+	}
 	tests := []struct {
-		name string
-		u    user.Info
-		want *parentContext
+		name    string
+		u       user.Info
+		want    *parentContext
+		wantErr string // substring of the error; "" means no error
 	}{
 		{
-			name: "nil user returns nil",
+			name: "nil user is a root request",
 			u:    nil,
-			want: nil,
 		},
 		{
-			name: "both keys present returns context",
-			u: &user.DefaultInfo{
-				Name: "alice",
-				Extra: map[string][]string{
-					"iam.miloapis.com/parent-type": {"Project"},
-					"iam.miloapis.com/parent-name": {"acme-prod"},
-				},
-			},
+			name: "no extras is a root request",
+			u:    &user.DefaultInfo{Name: "alice"},
+		},
+		{
+			name: "User context",
+			u:    extra(map[string][]string{typeKey: {"User"}, nameKey: {"alice"}}),
+			want: &parentContext{Type: "User", Name: "alice"},
+		},
+		{
+			name: "Project context",
+			u:    extra(map[string][]string{typeKey: {"Project"}, nameKey: {"acme-prod"}}),
 			want: &parentContext{Type: "Project", Name: "acme-prod"},
 		},
 		{
-			name: "only type present returns nil",
-			u: &user.DefaultInfo{
-				Extra: map[string][]string{
-					"iam.miloapis.com/parent-type": {"Project"},
-				},
-			},
-			want: nil,
+			name:    "only parent-type is refused",
+			u:       extra(map[string][]string{typeKey: {"Project"}}),
+			wantErr: "has iam.miloapis.com/parent-type but no iam.miloapis.com/parent-name",
 		},
 		{
-			name: "only name present returns nil",
-			u: &user.DefaultInfo{
-				Extra: map[string][]string{
-					"iam.miloapis.com/parent-name": {"acme-prod"},
-				},
-			},
-			want: nil,
+			name:    "only parent-name is refused",
+			u:       extra(map[string][]string{nameKey: {"acme-prod"}}),
+			wantErr: "has iam.miloapis.com/parent-name but no iam.miloapis.com/parent-type",
 		},
 		{
-			name: "empty type slice returns nil",
-			u: &user.DefaultInfo{
-				Extra: map[string][]string{
-					"iam.miloapis.com/parent-type": {},
-					"iam.miloapis.com/parent-name": {"acme-prod"},
-				},
-			},
-			want: nil,
+			name:    "empty type slice is refused",
+			u:       extra(map[string][]string{typeKey: {}, nameKey: {"acme-prod"}}),
+			wantErr: "but no iam.miloapis.com/parent-type",
 		},
 		{
-			name: "empty name slice returns nil",
-			u: &user.DefaultInfo{
-				Extra: map[string][]string{
-					"iam.miloapis.com/parent-type": {"Project"},
-					"iam.miloapis.com/parent-name": {},
-				},
-			},
-			want: nil,
+			name:    "empty name slice is refused",
+			u:       extra(map[string][]string{typeKey: {"Project"}, nameKey: {}}),
+			wantErr: "but no iam.miloapis.com/parent-name",
 		},
 		{
-			name: "no extras at all returns nil",
-			u:    &user.DefaultInfo{Name: "alice"},
-			want: nil,
+			name:    "empty-string type is refused",
+			u:       extra(map[string][]string{typeKey: {""}, nameKey: {"acme-prod"}}),
+			wantErr: "but no iam.miloapis.com/parent-type",
+		},
+		{
+			name:    "empty-string name is refused",
+			u:       extra(map[string][]string{typeKey: {"Project"}, nameKey: {""}}),
+			wantErr: "but no iam.miloapis.com/parent-name",
+		},
+		{
+			name:    "only parent-name with empty value is refused",
+			u:       extra(map[string][]string{nameKey: {""}}),
+			wantErr: "must set both iam.miloapis.com/parent-type and iam.miloapis.com/parent-name",
+		},
+		{
+			name:    "both keys with empty values are refused",
+			u:       extra(map[string][]string{typeKey: {""}, nameKey: {""}}),
+			wantErr: "must set both iam.miloapis.com/parent-type and iam.miloapis.com/parent-name",
+		},
+		{
+			name:    "whitespace-only name is refused",
+			u:       extra(map[string][]string{typeKey: {"Project"}, nameKey: {"  "}}),
+			wantErr: "has iam.miloapis.com/parent-type but no iam.miloapis.com/parent-name",
+		},
+		{
+			name:    "whitespace-only type is refused",
+			u:       extra(map[string][]string{typeKey: {" \t"}, nameKey: {"acme-prod"}}),
+			wantErr: "has iam.miloapis.com/parent-name but no iam.miloapis.com/parent-type",
+		},
+		{
+			name:    "Organization context is refused",
+			u:       extra(map[string][]string{typeKey: {"Organization"}, nameKey: {"datum"}}),
+			wantErr: "not served in Organization contexts",
+		},
+		{
+			name:    "type is matched case-sensitively",
+			u:       extra(map[string][]string{typeKey: {"user"}, nameKey: {"alice"}}),
+			wantErr: "not served in user contexts",
 		},
 		{
 			name: "multi-valued keys take first value",
-			u: &user.DefaultInfo{
-				Extra: map[string][]string{
-					"iam.miloapis.com/parent-type": {"Organization", "Project"},
-					"iam.miloapis.com/parent-name": {"primary", "secondary"},
-				},
-			},
-			want: &parentContext{Type: "Organization", Name: "primary"},
+			u: extra(map[string][]string{
+				typeKey: {"Project", "Organization"},
+				nameKey: {"primary", "secondary"},
+			}),
+			want: &parentContext{Type: "Project", Name: "primary"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := extractParentContext(tt.u)
+			got, err := extractParentContext(tt.u)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got context %#v", tt.wantErr, got)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error %q does not contain %q", err, tt.wantErr)
+				}
+				if got != nil {
+					t.Fatalf("expected nil context with error, got %#v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 			if (got == nil) != (tt.want == nil) {
 				t.Fatalf("nilness mismatch: got %#v want %#v", got, tt.want)
 			}
-			if got != nil && (got.Type != tt.want.Type || got.Name != tt.want.Name) {
+			if got != nil && *got != *tt.want {
 				t.Fatalf("got %#v want %#v", got, tt.want)
 			}
 		})
