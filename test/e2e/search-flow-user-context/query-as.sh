@@ -11,10 +11,11 @@
 # UserContextAuthorizationDecorator sets in a user context:
 #   iam.miloapis.com/parent-type: User
 #   iam.miloapis.com/parent-name: <user>
-# The script fails unless the response is HTTP 200, has no denied targets, and
-# its result names are exactly the expected names (same count, same members).
-# A Job that fails or doesn't finish, or a status other than 200, is retried up
-# to five times; a wrong result set never is.
+# The script fails unless the response is HTTP 200 or 201 (the apiserver
+# answers a create with 201 Created), has no denied targets, and its result
+# names are exactly the expected names (same count, same members). A Job that
+# fails or doesn't finish, or a status other than 200 or 201, is retried up to
+# five times; a wrong result set or denied targets never are.
 set -eu
 
 JOB=$1
@@ -50,8 +51,8 @@ EOF
 )
 
 # Runs the query once. Returns 0 with $RESPONSE set when the Job completes and
-# the apiserver answers HTTP 200; returns 1 otherwise (Job failed or didn't
-# finish in time, or another HTTP status), so the caller can retry.
+# the apiserver answers HTTP 200 or 201; returns 1 otherwise (Job failed or
+# didn't finish in time, or another HTTP status), so the caller can retry.
 run_query() {
   kubectl delete job "$JOB" -n "$NS" --ignore-not-found=true --wait=true >/dev/null
   jq -n --arg job "$JOB" --arg ns "$NS" --arg user "$AS_USER" --arg body "$QUERY_BODY" --arg request "$REQUEST" '{
@@ -102,22 +103,22 @@ run_query() {
   echo "$LOG"
   RESPONSE=$(printf '%s\n' "$LOG" | sed '/^HTTP_CODE:/,$d')
   HTTP_CODE=$(printf '%s\n' "$LOG" | sed -n 's/^HTTP_CODE://p')
-  if [ "$HTTP_CODE" != "200" ]; then
-    echo "--- expected HTTP 200 for $AS_USER querying $KINDS, got $HTTP_CODE ---"
-    return 1
-  fi
-  return 0
+  case "$HTTP_CODE" in
+    200|201) return 0 ;;
+  esac
+  echo "--- expected HTTP 200 or 201 for $AS_USER querying $KINDS, got $HTTP_CODE ---"
+  return 1
 }
 
-# Retry only transport-level failures. A wrong result set is never retried:
-# the indexes are already complete (T0 checked), so a mismatch is a real leak
-# or a real miss.
+# Retry only transport-level failures. A wrong result set or denied targets
+# are never retried: the indexes are already complete (T0 checked), so a
+# mismatch is a real leak or a real miss.
 ATTEMPTS=5
 RESPONSE=""
 attempt=1
 while ! run_query; do
   if [ "$attempt" -ge "$ATTEMPTS" ]; then
-    echo "FAIL: no HTTP 200 response for $AS_USER querying $KINDS after $ATTEMPTS attempts"
+    echo "FAIL: no HTTP 200 or 201 response for $AS_USER querying $KINDS after $ATTEMPTS attempts"
     exit 1
   fi
   attempt=$((attempt + 1))
