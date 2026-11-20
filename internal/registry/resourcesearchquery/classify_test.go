@@ -8,6 +8,7 @@ import (
 
 	policyevaluation "go.miloapis.net/search/internal/policy/evaluation"
 	searchv1alpha1 "go.miloapis.net/search/pkg/apis/search/v1alpha1"
+	"go.miloapis.net/search/pkg/meilisearch"
 )
 
 // buildPolicy constructs a ready CachedPolicy for a single target resource.
@@ -154,15 +155,29 @@ func TestClassifyTargets_EmptyTargets_OrderMatchesPolicySlice(t *testing.T) {
 	}
 }
 
-func TestIndexUIDsFor(t *testing.T) {
+func TestIndexSearchesFor(t *testing.T) {
 	projectPolicy := buildPolicy("resourcemanager.miloapis.com", "v1alpha1", "Project", "projects-idx")
 	domainPolicy := buildPolicy("networking.miloapis.com", "v1alpha1", "Domain", "domains-idx")
+	postPolicy := buildPolicy("feedback.miloapis.com", "v1alpha1", "Post", "posts-idx")
+	postPolicy.Policy.Spec.Visibility = searchv1alpha1.IndexVisibilityAllContexts
+	explicitTenant := buildPolicy("networking.miloapis.com", "v1alpha1", "Zone", "zones-idx")
+	explicitTenant.Policy.Spec.Visibility = searchv1alpha1.IndexVisibilityTenant
+	const scope = `(_tenant_type = "user" AND _tenant = "alice")`
+	const scopeOrRoot = scope + ` OR _tenant_type IN ["platform", "Global"]`
+	// Two cached policies for one kind, as while a duplicate is being
+	// replaced: the index is only widened if both are AllContexts.
+	issueTenant := buildPolicy("feedback.miloapis.com", "v1alpha1", "Issue", "issues-idx")
+	issueAll := buildPolicy("feedback.miloapis.com", "v1alpha1", "Issue", "issues-idx")
+	issueAll.Policy.Spec.Visibility = searchv1alpha1.IndexVisibilityAllContexts
+	issueAll2 := buildPolicy("feedback.miloapis.com", "v1alpha1", "Issue", "issues-idx")
+	issueAll2.Policy.Spec.Visibility = searchv1alpha1.IndexVisibilityAllContexts
 
 	tests := []struct {
 		name     string
 		allowed  []searchv1alpha1.TargetResource
 		policies []*policyevaluation.CachedPolicy
-		want     []string
+		scope    string
+		want     []meilisearch.IndexSearch
 	}{
 		{
 			name:     "EmptyAllowed_ReturnsNil",
@@ -174,7 +189,7 @@ func TestIndexUIDsFor(t *testing.T) {
 			name:     "OneAllowed_ReturnsItsIndexUID",
 			allowed:  []searchv1alpha1.TargetResource{tr("resourcemanager.miloapis.com", "v1alpha1", "Project")},
 			policies: []*policyevaluation.CachedPolicy{projectPolicy},
-			want:     []string{"projects-idx"},
+			want:     []meilisearch.IndexSearch{{IndexUID: "projects-idx"}},
 		},
 		{
 			name: "MultipleAllowed_ReturnsAllIndexUIDs_OrderPreserved",
@@ -183,12 +198,12 @@ func TestIndexUIDsFor(t *testing.T) {
 				tr("networking.miloapis.com", "v1alpha1", "Domain"),
 			},
 			policies: []*policyevaluation.CachedPolicy{projectPolicy, domainPolicy},
-			want:     []string{"projects-idx", "domains-idx"},
+			want:     []meilisearch.IndexSearch{{IndexUID: "projects-idx"}, {IndexUID: "domains-idx"}},
 		},
 		{
 			name: "AllowedWithEmptyIndexName_Skipped",
 			// Should not happen in practice (classifyTargets filters these), but
-			// indexUIDsFor is defensive: a policy whose IndexName is empty is skipped.
+			// indexSearchesFor is defensive: a policy whose IndexName is empty is skipped.
 			allowed: []searchv1alpha1.TargetResource{
 				tr("resourcemanager.miloapis.com", "v1alpha1", "Org"),
 			},
@@ -197,17 +212,60 @@ func TestIndexUIDsFor(t *testing.T) {
 			},
 			want: nil,
 		},
+		{
+			name: "Scoped_AllContextsIndexAlsoMatchesRoot",
+			allowed: []searchv1alpha1.TargetResource{
+				tr("resourcemanager.miloapis.com", "v1alpha1", "Project"),
+				tr("feedback.miloapis.com", "v1alpha1", "Post"),
+				tr("networking.miloapis.com", "v1alpha1", "Zone"),
+			},
+			policies: []*policyevaluation.CachedPolicy{projectPolicy, postPolicy, explicitTenant},
+			scope:    scope,
+			want: []meilisearch.IndexSearch{
+				{IndexUID: "projects-idx", Filter: scope},
+				{IndexUID: "posts-idx", Filter: scopeOrRoot},
+				{IndexUID: "zones-idx", Filter: scope},
+			},
+		},
+		{
+			name:     "Root_AllContextsIndexUnfiltered",
+			allowed:  []searchv1alpha1.TargetResource{tr("feedback.miloapis.com", "v1alpha1", "Post")},
+			policies: []*policyevaluation.CachedPolicy{postPolicy},
+			scope:    "",
+			want:     []meilisearch.IndexSearch{{IndexUID: "posts-idx"}},
+		},
+		{
+			name:     "SameKind_TenantThenAllContexts_KeepsTenantFilter",
+			allowed:  []searchv1alpha1.TargetResource{tr("feedback.miloapis.com", "v1alpha1", "Issue")},
+			policies: []*policyevaluation.CachedPolicy{issueTenant, issueAll},
+			scope:    scope,
+			want:     []meilisearch.IndexSearch{{IndexUID: "issues-idx", Filter: scope}},
+		},
+		{
+			name:     "SameKind_AllContextsThenTenant_KeepsTenantFilter",
+			allowed:  []searchv1alpha1.TargetResource{tr("feedback.miloapis.com", "v1alpha1", "Issue")},
+			policies: []*policyevaluation.CachedPolicy{issueAll, issueTenant},
+			scope:    scope,
+			want:     []meilisearch.IndexSearch{{IndexUID: "issues-idx", Filter: scope}},
+		},
+		{
+			name:     "SameKind_AllAllContexts_Widened",
+			allowed:  []searchv1alpha1.TargetResource{tr("feedback.miloapis.com", "v1alpha1", "Issue")},
+			policies: []*policyevaluation.CachedPolicy{issueAll, issueAll2},
+			scope:    scope,
+			want:     []meilisearch.IndexSearch{{IndexUID: "issues-idx", Filter: scopeOrRoot}},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := indexUIDsFor(tt.allowed, tt.policies)
+			got := indexSearchesFor(tt.allowed, tt.policies, tt.scope)
 			if len(got) != len(tt.want) {
-				t.Fatalf("indexUIDsFor len: got %d (%v), want %d (%v)", len(got), got, len(tt.want), tt.want)
+				t.Fatalf("indexSearchesFor len: got %d (%v), want %d (%v)", len(got), got, len(tt.want), tt.want)
 			}
 			for i := range got {
 				if got[i] != tt.want[i] {
-					t.Errorf("index %d: got %q, want %q", i, got[i], tt.want[i])
+					t.Errorf("index %d: got %+v, want %+v", i, got[i], tt.want[i])
 				}
 			}
 		})

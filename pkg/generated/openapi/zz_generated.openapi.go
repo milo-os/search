@@ -298,6 +298,13 @@ func schema_pkg_apis_search_v1alpha1_ResourceIndexPolicySpec(ref common.Referenc
 							},
 						},
 					},
+					"visibility": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Visibility sets which documents in this policy's index a query made in a user, organization or project context can find.\n\n- Tenant (the default): only documents stored under the caller's own\n  tenant. A query at the platform root finds everything.\n- AllContexts: documents stored under the caller's own tenant plus\n  those stored under the platform root (platform or Global). Use it for\n  resources written once at the platform root that everyone is meant to\n  find, such as public feedback posts. Documents stored under other\n  users', organizations' or projects' tenants stay hidden.\n\nOnly set AllContexts for kinds where any signed-in user may read every indexed instance, and use conditions to leave out instances that aren't public. The filter matches documents by their stored tenant, and that isn't always where they were written: reindexing stores every core-control-plane object as platform, and an audit event without a scope falls back to platform. The filter is a second line of defence, not the guarantee. Search results still report each document's stored tenant.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 				Required: []string{"targetResource", "fields"},
 			},

@@ -62,7 +62,44 @@ type ResourceIndexPolicySpec struct {
 	// +listType=map
 	// +listMapKey=path
 	Fields []FieldPolicy `json:"fields"`
+
+	// Visibility sets which documents in this policy's index a query made in
+	// a user, organization or project context can find.
+	//
+	// - Tenant (the default): only documents stored under the caller's own
+	//   tenant. A query at the platform root finds everything.
+	// - AllContexts: documents stored under the caller's own tenant plus
+	//   those stored under the platform root (platform or Global). Use it for
+	//   resources written once at the platform root that everyone is meant to
+	//   find, such as public feedback posts. Documents stored under other
+	//   users', organizations' or projects' tenants stay hidden.
+	//
+	// Only set AllContexts for kinds where any signed-in user may read every
+	// indexed instance, and use conditions to leave out instances that aren't
+	// public. The filter matches documents by their stored tenant, and that
+	// isn't always where they were written: reindexing stores every
+	// core-control-plane object as platform, and an audit event without a
+	// scope falls back to platform. The filter is a second line of defence,
+	// not the guarantee. Search results still report each document's stored
+	// tenant.
+	// +kubebuilder:validation:Enum=Tenant;AllContexts
+	// +kubebuilder:default=Tenant
+	// +optional
+	Visibility IndexVisibility `json:"visibility,omitempty"`
 }
+
+// IndexVisibility sets which contexts can search an index.
+// +kubebuilder:validation:Enum=Tenant;AllContexts
+type IndexVisibility string
+
+const (
+	// IndexVisibilityTenant limits a scoped query to documents stored under
+	// the caller's own tenant.
+	IndexVisibilityTenant IndexVisibility = "Tenant"
+	// IndexVisibilityAllContexts lets a query from any context also find
+	// documents stored under the platform root.
+	IndexVisibilityAllContexts IndexVisibility = "AllContexts"
+)
 
 // TargetResource identifies a specific Kubernetes resource type.
 // Uses a versioned reference since field paths may differ between API versions.
