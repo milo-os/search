@@ -1,0 +1,87 @@
+package ownership
+
+import (
+	"strings"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+)
+
+const (
+	TypeOrganization = "Organization"
+	TypeProject      = "Project"
+	TypeUser         = "User"
+
+	Unscoped = "unscoped"
+
+	OrganizationNamespacePrefix = "organization-"
+	OrganizationNameLabel       = "resourcemanager.miloapis.com/organization-name"
+
+	resourceManagerGroup = "resourcemanager.miloapis.com"
+	iamGroup             = "iam.miloapis.com"
+)
+
+type Owner struct {
+	Type string
+	Name string
+}
+
+func FromObject(obj *unstructured.Unstructured) (Owner, bool) {
+	if obj == nil {
+		return Owner{}, false
+	}
+
+	if name, ok := strings.CutPrefix(obj.GetNamespace(), OrganizationNamespacePrefix); ok && name != "" {
+		return Owner{Type: TypeOrganization, Name: name}, true
+	}
+
+	var found []Owner
+	for _, ref := range obj.GetOwnerReferences() {
+		owner, ok := fromOwnerReference(ref.APIVersion, ref.Kind, ref.Name)
+		if !ok || contains(found, owner) {
+			continue
+		}
+		found = append(found, owner)
+	}
+	switch len(found) {
+	case 1:
+		return found[0], true
+	case 0:
+	default:
+		return Owner{}, false
+	}
+
+	if name := obj.GetLabels()[OrganizationNameLabel]; name != "" {
+		return Owner{Type: TypeOrganization, Name: name}, true
+	}
+
+	return Owner{}, false
+}
+
+func fromOwnerReference(apiVersion, kind, name string) (Owner, bool) {
+	if name == "" {
+		return Owner{}, false
+	}
+	gv, err := schema.ParseGroupVersion(apiVersion)
+	if err != nil {
+		return Owner{}, false
+	}
+	switch {
+	case gv.Group == resourceManagerGroup && kind == TypeOrganization:
+		return Owner{Type: TypeOrganization, Name: name}, true
+	case gv.Group == resourceManagerGroup && kind == TypeProject:
+		return Owner{Type: TypeProject, Name: name}, true
+	case gv.Group == iamGroup && kind == TypeUser:
+		return Owner{Type: TypeUser, Name: name}, true
+	}
+	return Owner{}, false
+}
+
+func contains(owners []Owner, o Owner) bool {
+	for _, existing := range owners {
+		if existing == o {
+			return true
+		}
+	}
+	return false
+}

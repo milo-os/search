@@ -296,14 +296,15 @@ func Run(o *ControllerManagerOptions, ctx context.Context) error {
 	}
 
 	if err = (&policycontroller.ResourceIndexPolicyReconciler{
-		Client:           mgr.GetClient(),
-		Scheme:           mgr.GetScheme(),
-		CelValidator:     celValidator,
-		SearchSDK:        searchSDK,
-		DynamicClient:    dynamicClient,
-		RESTMapper:       mgr.GetRESTMapper(),
-		ReindexPublisher: reindexPub,
-		TenantRegistry:   registry,
+		Client:             mgr.GetClient(),
+		Scheme:             mgr.GetScheme(),
+		CelValidator:       celValidator,
+		SearchSDK:          searchSDK,
+		DynamicClient:      dynamicClient,
+		RESTMapper:         mgr.GetRESTMapper(),
+		ReindexPublisher:   reindexPub,
+		TenantRegistry:     registry,
+		EnableMultiTenancy: o.EnableMultiTenancy,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ResourceIndexPolicy")
 		os.Exit(1)
