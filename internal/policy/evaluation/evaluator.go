@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/google/cel-go/cel"
+	"go.miloapis.net/search/internal/ownership"
 	"go.miloapis.net/search/pkg/apis/search/v1alpha1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -30,6 +31,7 @@ type EvalResult struct {
 	// TenantType is the tenant type for the indexed document (e.g. "platform" or "project").
 	// When empty, Transform() defaults to "platform".
 	TenantType string
+	MultiTenant bool
 }
 
 // PolicyEvaluator evaluates whether a Kubernetes resource matches a policy
@@ -144,10 +146,13 @@ func (r *EvalResult) Transform() map[string]any {
 	// Add tenant metadata fields. Default to "platform" when not set so that
 	// single-tenant deployments produce consistent filterable attribute values.
 	tenant := r.Tenant
+	tenantType := r.TenantType
+	if r.MultiTenant && (tenant == "" || tenantType == "") {
+		tenant, tenantType = ownership.Unscoped, ownership.Unscoped
+	}
 	if tenant == "" {
 		tenant = "platform"
 	}
-	tenantType := r.TenantType
 	if tenantType == "" {
 		tenantType = "platform"
 	}

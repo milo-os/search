@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -20,6 +21,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"go.miloapis.net/search/internal/cel"
+	"go.miloapis.net/search/internal/ownership"
 	"go.miloapis.net/search/internal/policy/evaluation"
 	"go.miloapis.net/search/internal/policy/validation"
 	"go.miloapis.net/search/internal/tenant"
@@ -63,6 +65,8 @@ type ResourceIndexPolicyReconciler struct {
 	// clients. When nil, the reconciler falls back to single-tenant mode using
 	// DynamicClient directly with "platform" as the tenant identity.
 	TenantRegistry tenant.TenantRegistry
+
+	EnableMultiTenancy bool
 
 	RetryBaseDelay time.Duration
 	RetryMaxDelay  time.Duration
@@ -676,7 +680,8 @@ func (r *ResourceIndexPolicyReconciler) publishReindexMessagesForTenant(
 			// Use "reindex/<policyName>/<tenant>/<uid>" as the resourceID so that
 			// duplicate messages from rapid policy updates are deduplicated by NATS.
 			resourceID := fmt.Sprintf("reindex/%s/%s/%s", policy.Name, tenantInfo.Name, obj.GetUID())
-			if err := r.ReindexPublisher.PublishResource(ctx, obj.Object, resourceID, policy.Name, indexName, specHash, tenantInfo.Name, tenantInfo.Type); err != nil {
+			ownerName, ownerType := r.reindexOwner(tenantInfo, obj)
+			if err := r.ReindexPublisher.PublishResource(ctx, obj.Object, resourceID, policy.Name, indexName, specHash, ownerName, ownerType); err != nil {
 				logger.Error(err, "Failed to publish re-index message",
 					"resource", obj.GetName(), "namespace", obj.GetNamespace())
 				continue
@@ -692,6 +697,16 @@ func (r *ResourceIndexPolicyReconciler) publishReindexMessagesForTenant(
 
 	logger.Info("Published re-index messages for tenant", "policy", policy.Name, "tenant", tenantInfo.Name, "count", published)
 	return published, nil
+}
+
+func (r *ResourceIndexPolicyReconciler) reindexOwner(tenantInfo tenant.TenantInfo, obj *unstructured.Unstructured) (name, tenantType string) {
+	if !r.EnableMultiTenancy || tenantInfo.Type != tenant.TenantTypePlatform {
+		return tenantInfo.Name, tenantInfo.Type
+	}
+	if owner, ok := ownership.FromObject(obj); ok {
+		return owner.Name, owner.Type
+	}
+	return ownership.Unscoped, ownership.Unscoped
 }
 
 // resourceIndexPolicyFinalizer handles Meilisearch cleanup when a

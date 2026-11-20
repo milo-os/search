@@ -83,7 +83,7 @@ func TestReindexConsumer_TerminatingResource_QueuesDelete(t *testing.T) {
 	})).Return(nil, nil).Once()
 	mockSearch.On("WaitForTasks", mock.Anything).Return(nil, nil).Once()
 
-	consumer := NewReindexConsumer(mockConsumer, policyCache, batcher)
+	consumer := NewReindexConsumer(mockConsumer, policyCache, batcher, false)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go consumer.Start(ctx)
@@ -131,7 +131,7 @@ func TestReindexConsumer_MatchedResource_Upserts(t *testing.T) {
 	mockSearch.On("AddDocumentsAsync", "pod-index", mock.Anything).Return(nil, nil).Once()
 	mockSearch.On("WaitForTasks", mock.Anything).Return(nil, nil).Once()
 
-	consumer := NewReindexConsumer(mockConsumer, policyCache, batcher)
+	consumer := NewReindexConsumer(mockConsumer, policyCache, batcher, false)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go consumer.Start(ctx)

@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/nats-io/nats.go/jetstream"
+	"go.miloapis.net/search/internal/ownership"
 	policyevaluation "go.miloapis.net/search/internal/policy/evaluation"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -76,6 +77,28 @@ func extractTenantFromAuditEvent(event *auditEvent) (tenantName string, tenantTy
 	return
 }
 
+func tenantForEvent(event *auditEvent, obj *unstructured.Unstructured, multiTenant bool) (tenantName string, tenantType string) {
+	tenantName, tenantType = extractTenantFromAuditEvent(event)
+	if !multiTenant {
+		return tenantName, tenantType
+	}
+
+	scoped := event.Annotations[ScopeTypeAnnotationKey] != ""
+	if scoped && tenantType != tenantTypeGlobal && tenantType != tenantTypePlatform {
+		if event.Annotations[ScopeNameAnnotationKey] == "" {
+			return ownership.Unscoped, ownership.Unscoped
+		}
+		return tenantName, tenantType
+	}
+	if owner, ok := ownership.FromObject(obj); ok {
+		return owner.Name, owner.Type
+	}
+	if scoped {
+		return tenantName, tenantType
+	}
+	return ownership.Unscoped, ownership.Unscoped
+}
+
 // NewIndexer creates a new Indexer instance.
 func NewIndexer(consumer jetstream.Consumer, policyCache *PolicyCache, batcher *Batcher, multiTenant bool) *Indexer {
 	return &Indexer{
@@ -94,6 +117,7 @@ const (
 	// to avoid an import cycle: internal/tenant/project_watcher.go already
 	// imports internal/indexer, so internal/indexer cannot import internal/tenant.
 	tenantTypePlatform = "platform"
+	tenantTypeGlobal   = "Global"
 
 	// Scope annotation keys from resource metadata. Tenant identity is derived
 	// exclusively from these annotations on the ResponseObject.
@@ -153,7 +177,7 @@ func (i *Indexer) Start(ctx context.Context) error {
 
 		// In single-tenant mode, skip non-platform
 		// events entirely so that no policy can accidentally queue them.
-		tenantName, tenantType := extractTenantFromAuditEvent(&event)
+		tenantName, tenantType := tenantForEvent(&event, obj, i.enableMultiTenancy)
 		if !i.enableMultiTenancy && tenantType != tenantTypePlatform {
 			msg.Ack()
 			return
@@ -189,6 +213,7 @@ func (i *Indexer) Start(ctx context.Context) error {
 				// Attach the already-extracted tenant context to the eval result.
 				evalResult.Tenant = tenantName
 				evalResult.TenantType = tenantType
+				evalResult.MultiTenant = i.enableMultiTenancy
 
 				// Transform the matching resource into an indexable document
 				doc := evalResult.Transform()

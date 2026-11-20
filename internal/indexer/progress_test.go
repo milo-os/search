@@ -106,7 +106,7 @@ func TestReindexConsumer_Attached_ClosesOnlyOnceConsuming(t *testing.T) {
 		mockContext := new(MockConsumeContext)
 		mockContext.On("Stop").Return()
 		mockConsumer.On("Consume", mock.Anything).Return(mockContext, nil)
-		r := NewReindexConsumer(mockConsumer, &PolicyCache{}, nil)
+		r := NewReindexConsumer(mockConsumer, &PolicyCache{}, nil, false)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -122,7 +122,7 @@ func TestReindexConsumer_Attached_ClosesOnlyOnceConsuming(t *testing.T) {
 	t.Run("consume fails", func(t *testing.T) {
 		mockConsumer := new(MockConsumer)
 		mockConsumer.On("Consume", mock.Anything).Return(nil, errors.New("consumer not found"))
-		r := NewReindexConsumer(mockConsumer, &PolicyCache{}, nil)
+		r := NewReindexConsumer(mockConsumer, &PolicyCache{}, nil, false)
 		require.Error(t, r.Start(context.Background()))
 
 		select {
