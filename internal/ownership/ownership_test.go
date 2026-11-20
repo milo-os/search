@@ -149,10 +149,9 @@ func TestFromObject(t *testing.T) {
 			wantOK: false,
 		},
 		{
-			name:   "user contact is owned by its user",
+			name:   "user-subject contact outside an organization namespace is unscoped",
 			obj:    contact("milo-system", "iam.miloapis.com", "User", "alice"),
-			want:   Owner{Type: TypeUser, Name: "alice"},
-			wantOK: true,
+			wantOK: false,
 		},
 		{
 			name:   "contact in an organization namespace is owned by the organization",

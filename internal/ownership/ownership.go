@@ -19,7 +19,6 @@ const (
 
 	resourceManagerGroup = "resourcemanager.miloapis.com"
 	iamGroup             = "iam.miloapis.com"
-	notificationGroup    = "notification.miloapis.com"
 )
 
 type Owner struct {
@@ -46,12 +45,6 @@ func FromObject(obj *unstructured.Unstructured) (Owner, bool) {
 
 	if name, ok := strings.CutPrefix(obj.GetNamespace(), OrganizationNamespacePrefix); ok && name != "" {
 		return Owner{Type: TypeOrganization, Name: name}, true
-	}
-
-	if gvk.Group == notificationGroup && gvk.Kind == "Contact" {
-		if owner, ok := contactSubject(obj); ok {
-			return owner, true
-		}
 	}
 
 	var found []Owner
@@ -88,16 +81,6 @@ func selfOwner(group, kind, name string) (Owner, bool) {
 		return Owner{Type: TypeUser, Name: name}, true
 	}
 	return Owner{}, false
-}
-
-func contactSubject(obj *unstructured.Unstructured) (Owner, bool) {
-	group, _, _ := unstructured.NestedString(obj.Object, "spec", "subjectRef", "apiGroup")
-	kind, _, _ := unstructured.NestedString(obj.Object, "spec", "subjectRef", "kind")
-	name, _, _ := unstructured.NestedString(obj.Object, "spec", "subjectRef", "name")
-	if group != iamGroup || kind != TypeUser || name == "" {
-		return Owner{}, false
-	}
-	return Owner{Type: TypeUser, Name: name}, true
 }
 
 func fromOwnerReference(apiVersion, kind, name string) (Owner, bool) {
