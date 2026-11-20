@@ -168,7 +168,8 @@ written in that same context: each index is filtered on the document's
 
 Some resources are written once at the platform root but are meant to be found
 from every context, such as public feedback posts. Set `visibility:
-AllContexts` on their policy to search that index unfiltered from any context:
+AllContexts` on their policy so a query from any context also finds that
+index's documents written at the platform root:
 
 ```yaml
 apiVersion: search.miloapis.com/v1alpha1
@@ -187,10 +188,23 @@ spec:
       searchable: true
 ```
 
+For an `AllContexts` index, a query made in a user, organization or project
+context is filtered to its own documents or those written at the platform root:
+
+```
+(_tenant_type = "user" AND _tenant = "alice") OR _tenant_type IN ["platform", "Global"]
+```
+
+`Global` is the tenant type of a write at Milo's root scope and `platform` the
+type reindexing uses. Documents written in other users', organizations' or
+projects' contexts stay hidden, and a platform-root query is still unfiltered.
+
 The setting applies per index. In a query that spans several indexes, every
 index whose policy keeps the default `Tenant` is still filtered to the caller's
-context, and `targetResources` still chooses which indexes are searched.
-Results report the tenant each document was written in.
+context only, and `targetResources` still chooses which indexes are searched.
+If more than one policy targets the same kind, the index is only opened up
+when all of them set `AllContexts`. Results report the tenant each document
+was written in.
 
 `AllContexts` doesn't check that the caller may read the resource kind. Only set
 it for kinds every signed-in user is allowed to read.

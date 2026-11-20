@@ -28,7 +28,7 @@ type fakeMeiliClient struct {
 	lastQuery    string
 	lastLimit    int64
 	lastOffset   int64
-	lastFilter   string // the first index's filter
+	lastFilters  []string // one per index, in order
 	resp         *meiliapi.MultiSearchResponse
 }
 
@@ -43,9 +43,9 @@ func (f *fakeMeiliClient) MultiSearch(searches []meilisearch.IndexSearch, q stri
 	for _, s := range searches {
 		f.lastUIDs = append(f.lastUIDs, s.IndexUID)
 	}
-	f.lastFilter = ""
-	if len(searches) > 0 {
-		f.lastFilter = searches[0].Filter
+	f.lastFilters = nil
+	for _, s := range searches {
+		f.lastFilters = append(f.lastFilters, s.Filter)
 	}
 	f.lastQuery = q
 	f.lastLimit = limit
@@ -191,8 +191,8 @@ func TestCreate_NoParentContext_PassesEmptyFilter(t *testing.T) {
 	if meili.calls != 1 {
 		t.Fatalf("expected 1 Meilisearch call, got %d", meili.calls)
 	}
-	if meili.lastFilter != "" {
-		t.Fatalf("expected empty filter, got %q", meili.lastFilter)
+	if len(meili.lastFilters) != 1 || meili.lastFilters[0] != "" {
+		t.Fatalf("expected one empty filter, got %q", meili.lastFilters)
 	}
 }
 
@@ -224,8 +224,8 @@ func TestCreate_WithParentContext_AppliesScopedFilter(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	want := `(_tenant_type = "project" AND _tenant = "acme-prod")`
-	if meili.lastFilter != want {
-		t.Fatalf("filter = %q, want %q", meili.lastFilter, want)
+	if len(meili.lastFilters) != 1 || meili.lastFilters[0] != want {
+		t.Fatalf("filters = %q, want [%q]", meili.lastFilters, want)
 	}
 }
 
@@ -251,8 +251,8 @@ func TestCreate_EmptyTargets_NoFilter(t *testing.T) {
 	if meili.calls != 1 {
 		t.Fatalf("expected 1 Meilisearch call, got %d", meili.calls)
 	}
-	if meili.lastFilter != "" {
-		t.Fatalf("expected empty filter for unscoped user, got %q", meili.lastFilter)
+	if len(meili.lastFilters) != 1 || meili.lastFilters[0] != "" {
+		t.Fatalf("expected one empty filter for unscoped user, got %q", meili.lastFilters)
 	}
 }
 
@@ -490,11 +490,15 @@ func assertSearches(t *testing.T, got, want []meilisearch.IndexSearch) {
 	}
 }
 
-const aliceFilter = `(_tenant_type = "user" AND _tenant = "alice")`
+const (
+	aliceFilter       = `(_tenant_type = "user" AND _tenant = "alice")`
+	aliceOrRootFilter = `(_tenant_type = "user" AND _tenant = "alice") OR _tenant_type IN ["platform", "Global"]`
+)
 
-// A scoped query filters each Tenant index to the caller's context and
-// searches each AllContexts index unfiltered, in one federated query.
-func TestCreate_ScopedQuery_FiltersOnlyTenantIndexes(t *testing.T) {
+// A scoped query filters each Tenant index to the caller's context, and each
+// AllContexts index to the caller's context or the platform root, in one
+// federated query.
+func TestCreate_ScopedQuery_AllContextsIndexAlsoMatchesRoot(t *testing.T) {
 	meili := newFakeMeili()
 	r := newTestREST(t, meili, visibilityPolicies())
 
@@ -507,7 +511,7 @@ func TestCreate_ScopedQuery_FiltersOnlyTenantIndexes(t *testing.T) {
 	}
 	assertSearches(t, meili.lastSearches, []meilisearch.IndexSearch{
 		{IndexUID: "projects-idx", Filter: aliceFilter},
-		{IndexUID: "posts-idx", Filter: ""},
+		{IndexUID: "posts-idx", Filter: aliceOrRootFilter},
 	})
 }
 
@@ -537,7 +541,7 @@ func TestCreate_ScopedQuery_TargetResourcesStillApply(t *testing.T) {
 		{"TenantIndexOnly", tr("resourcemanager.miloapis.com", "v1alpha1", "Project"),
 			[]meilisearch.IndexSearch{{IndexUID: "projects-idx", Filter: aliceFilter}}},
 		{"AllContextsIndexOnly", tr("feedback.miloapis.com", "v1alpha1", "Post"),
-			[]meilisearch.IndexSearch{{IndexUID: "posts-idx", Filter: ""}}},
+			[]meilisearch.IndexSearch{{IndexUID: "posts-idx", Filter: aliceOrRootFilter}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -565,7 +569,7 @@ func TestCreate_VisibilityChangeAppliesToNextQuery(t *testing.T) {
 	if _, err := r.Create(ctxWithUser(scopedUser()), q, nil, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	assertSearches(t, meili.lastSearches, []meilisearch.IndexSearch{{IndexUID: "posts-idx", Filter: ""}})
+	assertSearches(t, meili.lastSearches, []meilisearch.IndexSearch{{IndexUID: "posts-idx", Filter: aliceOrRootFilter}})
 
 	policies.policies[1].Policy.Spec.Visibility = searchv1alpha1.IndexVisibilityTenant
 	if _, err := r.Create(ctxWithUser(scopedUser()), q, nil, nil); err != nil {

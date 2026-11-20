@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"k8s.io/apiserver/pkg/authentication/user"
+
+	"go.miloapis.net/search/internal/tenant"
 )
 
 // Canonical extra keys that Milo's URL-pattern middleware sets when a request
@@ -49,4 +51,28 @@ func buildScopedFilter(p *parentContext) string {
 	}
 	return fmt.Sprintf(`(_tenant_type = %q AND _tenant = %q)`,
 		strings.ToLower(p.Type), p.Name)
+}
+
+// tenantTypeGlobal is the tenant type the indexer stores for a write at
+// Milo's root "global" scope (it title-cases every scope type except
+// "platform").
+const tenantTypeGlobal = "Global"
+
+// rootTenantTypes are the tenant types of documents written at the platform
+// root: "Global" from audit events and "platform" from reindexing.
+var rootTenantTypes = []string{tenant.TenantTypePlatform, tenantTypeGlobal}
+
+// buildRootVisibleFilter extends a scoped filter to also match documents
+// written at the platform root, for indexes visible from all contexts.
+// Documents written in any other tenant still don't match. Returns "" when
+// scopeFilter is "" (no scoping).
+func buildRootVisibleFilter(scopeFilter string) string {
+	if scopeFilter == "" {
+		return ""
+	}
+	quoted := make([]string, len(rootTenantTypes))
+	for i, t := range rootTenantTypes {
+		quoted[i] = fmt.Sprintf("%q", t)
+	}
+	return fmt.Sprintf(`%s OR _tenant_type IN [%s]`, scopeFilter, strings.Join(quoted, ", "))
 }

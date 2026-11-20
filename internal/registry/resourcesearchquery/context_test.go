@@ -150,3 +150,14 @@ func TestBuildScopedFilter(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildRootVisibleFilter(t *testing.T) {
+	scope := buildScopedFilter(&parentContext{Type: "Organization", Name: "acme"})
+	want := `(_tenant_type = "organization" AND _tenant = "acme") OR _tenant_type IN ["platform", "Global"]`
+	if got := buildRootVisibleFilter(scope); got != want {
+		t.Errorf("buildRootVisibleFilter = %q, want %q", got, want)
+	}
+	if got := buildRootVisibleFilter(""); got != "" {
+		t.Errorf("unscoped: got %q, want empty", got)
+	}
+}

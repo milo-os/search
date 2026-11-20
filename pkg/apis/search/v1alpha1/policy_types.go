@@ -63,15 +63,16 @@ type ResourceIndexPolicySpec struct {
 	// +listMapKey=path
 	Fields []FieldPolicy `json:"fields"`
 
-	// Visibility sets which contexts can search this policy's index.
+	// Visibility sets which documents in this policy's index a query made in
+	// a user, organization or project context can find.
 	//
-	// - Tenant (the default): a query made in a user, organization or project
-	//   context only finds documents written in that same context. A query at
-	//   the platform root finds everything.
-	// - AllContexts: a query from any context finds every document in this
-	//   index, whatever context wrote it. Use it for resources written once at
-	//   the platform root that everyone is meant to find, such as public
-	//   feedback posts.
+	// - Tenant (the default): only documents written in the caller's own
+	//   context. A query at the platform root finds everything.
+	// - AllContexts: the caller's own documents plus those written at the
+	//   platform root. Use it for resources written once at the platform
+	//   root that everyone is meant to find, such as public feedback posts.
+	//   Documents written in other users', organizations' or projects'
+	//   contexts stay hidden.
 	//
 	// AllContexts does not check that the caller may read the resource kind,
 	// so only set it for kinds every signed-in user is allowed to read. Search
@@ -90,8 +91,8 @@ const (
 	// IndexVisibilityTenant limits a scoped query to documents written in the
 	// caller's own context.
 	IndexVisibilityTenant IndexVisibility = "Tenant"
-	// IndexVisibilityAllContexts lets a query from any context find every
-	// document in the index.
+	// IndexVisibilityAllContexts lets a query from any context also find
+	// documents written at the platform root.
 	IndexVisibilityAllContexts IndexVisibility = "AllContexts"
 )
 

@@ -163,6 +163,14 @@ func TestIndexSearchesFor(t *testing.T) {
 	explicitTenant := buildPolicy("networking.miloapis.com", "v1alpha1", "Zone", "zones-idx")
 	explicitTenant.Policy.Spec.Visibility = searchv1alpha1.IndexVisibilityTenant
 	const scope = `(_tenant_type = "user" AND _tenant = "alice")`
+	const scopeOrRoot = scope + ` OR _tenant_type IN ["platform", "Global"]`
+	// Two cached policies for one kind, as while a duplicate is being
+	// replaced: the index is only widened if both are AllContexts.
+	issueTenant := buildPolicy("feedback.miloapis.com", "v1alpha1", "Issue", "issues-idx")
+	issueAll := buildPolicy("feedback.miloapis.com", "v1alpha1", "Issue", "issues-idx")
+	issueAll.Policy.Spec.Visibility = searchv1alpha1.IndexVisibilityAllContexts
+	issueAll2 := buildPolicy("feedback.miloapis.com", "v1alpha1", "Issue", "issues-idx")
+	issueAll2.Policy.Spec.Visibility = searchv1alpha1.IndexVisibilityAllContexts
 
 	tests := []struct {
 		name     string
@@ -205,7 +213,7 @@ func TestIndexSearchesFor(t *testing.T) {
 			want: nil,
 		},
 		{
-			name: "Scoped_TenantIndexesFiltered_AllContextsIndexUnfiltered",
+			name: "Scoped_AllContextsIndexAlsoMatchesRoot",
 			allowed: []searchv1alpha1.TargetResource{
 				tr("resourcemanager.miloapis.com", "v1alpha1", "Project"),
 				tr("feedback.miloapis.com", "v1alpha1", "Post"),
@@ -215,9 +223,37 @@ func TestIndexSearchesFor(t *testing.T) {
 			scope:    scope,
 			want: []meilisearch.IndexSearch{
 				{IndexUID: "projects-idx", Filter: scope},
-				{IndexUID: "posts-idx"},
+				{IndexUID: "posts-idx", Filter: scopeOrRoot},
 				{IndexUID: "zones-idx", Filter: scope},
 			},
+		},
+		{
+			name:     "Root_AllContextsIndexUnfiltered",
+			allowed:  []searchv1alpha1.TargetResource{tr("feedback.miloapis.com", "v1alpha1", "Post")},
+			policies: []*policyevaluation.CachedPolicy{postPolicy},
+			scope:    "",
+			want:     []meilisearch.IndexSearch{{IndexUID: "posts-idx"}},
+		},
+		{
+			name:     "SameKind_TenantThenAllContexts_KeepsTenantFilter",
+			allowed:  []searchv1alpha1.TargetResource{tr("feedback.miloapis.com", "v1alpha1", "Issue")},
+			policies: []*policyevaluation.CachedPolicy{issueTenant, issueAll},
+			scope:    scope,
+			want:     []meilisearch.IndexSearch{{IndexUID: "issues-idx", Filter: scope}},
+		},
+		{
+			name:     "SameKind_AllContextsThenTenant_KeepsTenantFilter",
+			allowed:  []searchv1alpha1.TargetResource{tr("feedback.miloapis.com", "v1alpha1", "Issue")},
+			policies: []*policyevaluation.CachedPolicy{issueAll, issueTenant},
+			scope:    scope,
+			want:     []meilisearch.IndexSearch{{IndexUID: "issues-idx", Filter: scope}},
+		},
+		{
+			name:     "SameKind_AllAllContexts_Widened",
+			allowed:  []searchv1alpha1.TargetResource{tr("feedback.miloapis.com", "v1alpha1", "Issue")},
+			policies: []*policyevaluation.CachedPolicy{issueAll, issueAll2},
+			scope:    scope,
+			want:     []meilisearch.IndexSearch{{IndexUID: "issues-idx", Filter: scopeOrRoot}},
 		},
 	}
 

@@ -65,11 +65,14 @@ func classifyTargets(
 
 // indexSearchesFor returns the Meilisearch index and filter to search for
 // each allowed target resource, in the same order as allowed. scopeFilter is
-// the caller's tenant filter ("" for a platform-root query). It applies to
-// every index except those whose policy has AllContexts visibility, which a
-// query from any context searches unfiltered. Targets with no matching ready
-// policy are silently skipped (this should not happen in practice because
-// classifyTargets already filtered them, but the function is defensive).
+// the caller's tenant filter ("" for a platform-root query, which is never
+// filtered). An index whose policy has AllContexts visibility also matches
+// documents written at the platform root; documents written in other
+// tenants stay hidden. If several cached policies match one target, the
+// index is only widened when every one of them is AllContexts. Targets with
+// no matching ready policy are silently skipped (this should not happen in
+// practice because classifyTargets already filtered them, but the function
+// is defensive).
 func indexSearchesFor(
 	allowed []searchv1alpha1.TargetResource,
 	policies []*policyevaluation.CachedPolicy,
@@ -80,20 +83,31 @@ func indexSearchesFor(
 	}
 	searches := make([]meilisearch.IndexSearch, 0, len(allowed))
 	for _, t := range allowed {
+		indexName := ""
+		allContexts := true
 		for _, cp := range policies {
 			p := cp.Policy
-			if p.Spec.TargetResource.Group == t.Group &&
-				p.Spec.TargetResource.Version == t.Version &&
-				p.Spec.TargetResource.Kind == t.Kind &&
-				p.Status.IndexName != "" {
-				filter := scopeFilter
-				if p.Spec.Visibility == searchv1alpha1.IndexVisibilityAllContexts {
-					filter = ""
-				}
-				searches = append(searches, meilisearch.IndexSearch{IndexUID: p.Status.IndexName, Filter: filter})
-				break
+			if p.Spec.TargetResource.Group != t.Group ||
+				p.Spec.TargetResource.Version != t.Version ||
+				p.Spec.TargetResource.Kind != t.Kind ||
+				p.Status.IndexName == "" {
+				continue
+			}
+			if indexName == "" {
+				indexName = p.Status.IndexName
+			}
+			if p.Spec.Visibility != searchv1alpha1.IndexVisibilityAllContexts {
+				allContexts = false
 			}
 		}
+		if indexName == "" {
+			continue
+		}
+		filter := scopeFilter
+		if allContexts {
+			filter = buildRootVisibleFilter(scopeFilter)
+		}
+		searches = append(searches, meilisearch.IndexSearch{IndexUID: indexName, Filter: filter})
 	}
 	return searches
 }
