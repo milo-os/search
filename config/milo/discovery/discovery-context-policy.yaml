@@ -4,6 +4,20 @@ metadata:
   name: search-service
 spec:
   rules:
+    # Search queries are served at the platform root and in each user's own
+    # context. In a user context the results are limited to that user's own
+    # documents plus the platform-root documents of indexes whose
+    # ResourceIndexPolicy has visibility AllContexts.
     - group: search.miloapis.com
-      resources: ["*"]
-      contexts: ["Platform"]
+      resources:
+        - resourcesearchqueries
+      contexts:
+        - Platform
+        - User
+    # Everything else in the group (index policies) is platform
+    # administration.
+    - group: search.miloapis.com
+      resources:
+        - "*"
+      contexts:
+        - Platform

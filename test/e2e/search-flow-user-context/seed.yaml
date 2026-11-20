@@ -1,0 +1,40 @@
+---
+# Two policies over kinds of a group no other test uses and nothing in the
+# cluster serves. Each policy gets an index of its own that only this test's
+# seeded documents land in: the controller skips reindexing a kind the cluster
+# doesn't serve, and no other test's cleanup deletes these indexes.
+#
+# Tenant visibility (the default, left unset here): a user-context query sees
+# only documents stored under that user.
+apiVersion: search.miloapis.com/v1alpha1
+kind: ResourceIndexPolicy
+metadata:
+  name: e2e-user-ctx-tenant-policy
+spec:
+  targetResource:
+    group: "e2e-user-ctx.miloapis.com"
+    version: v1alpha1
+    kind: Note
+  fields:
+    - path: ".metadata.name"
+      searchable: true
+    - path: ".metadata.annotations['e2e.search.test/marker']"
+      searchable: true
+---
+# AllContexts visibility: a user-context query also sees documents stored at
+# the platform root (platform and Global).
+apiVersion: search.miloapis.com/v1alpha1
+kind: ResourceIndexPolicy
+metadata:
+  name: e2e-user-ctx-allcontexts-policy
+spec:
+  targetResource:
+    group: "e2e-user-ctx.miloapis.com"
+    version: v1alpha1
+    kind: Announcement
+  visibility: AllContexts
+  fields:
+    - path: ".metadata.name"
+      searchable: true
+    - path: ".metadata.annotations['e2e.search.test/marker']"
+      searchable: true

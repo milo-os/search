@@ -162,9 +162,21 @@ a condition after an update will be added to the index.
 
 #### Visibility
 
-A query made in a user, organization or project context only finds documents
+Search queries are served at the platform root, in each user's own context
+(`/apis/iam.miloapis.com/v1alpha1/users/<id>/control-plane`) and in project
+contexts. A query made in a user or project context only finds documents
 written in that same context: each index is filtered on the document's
 `_tenant_type` and `_tenant`. A query at the platform root isn't filtered.
+A request whose parent context is incomplete (only one of
+`iam.miloapis.com/parent-type` and `iam.miloapis.com/parent-name` set, or
+either empty) is refused with 403 rather than run unfiltered. A request in
+another type of context, such as an organization, is also refused with 403,
+because search isn't served there.
+
+`User` is a parent resource of ResourceSearchQuery's ProtectedResource, so
+granting `search.miloapis.com-searcher` kind-wide at the platform root, rather
+than bound to one user, also lets the holder search in every user's context.
+That is intended for staff, but whoever grants the role should know it.
 
 Some resources are written once at the platform root but are meant to be found
 from every context, such as public feedback posts. Set `visibility:
@@ -188,9 +200,8 @@ spec:
       searchable: true
 ```
 
-For an `AllContexts` index, a query made in a user, organization or project
-context is filtered to its own documents or those stored under the platform
-root:
+For an `AllContexts` index, a query made in a user or project context is
+filtered to its own documents or those stored under the platform root:
 
 ```
 (_tenant_type = "user" AND _tenant = "alice") OR _tenant_type IN ["platform", "Global"]
