@@ -74,9 +74,14 @@ type ResourceIndexPolicySpec struct {
 	//   Documents written in other users', organizations' or projects'
 	//   contexts stay hidden.
 	//
-	// AllContexts does not check that the caller may read the resource kind,
-	// so only set it for kinds every signed-in user is allowed to read. Search
-	// results still report the tenant each document was written in.
+	// Only set AllContexts for kinds where any signed-in user may read every
+	// indexed instance, and use conditions to leave out instances that aren't
+	// public. The filter matches documents by their stored tenant, and that
+	// isn't always where they were written: reindexing stores every
+	// core-control-plane object as platform, and an audit event without a
+	// scope falls back to platform. The filter is a second line of defence,
+	// not the guarantee. Search results still report each document's stored
+	// tenant.
 	// +kubebuilder:validation:Enum=Tenant;AllContexts
 	// +kubebuilder:default=Tenant
 	// +optional

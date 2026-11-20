@@ -22,8 +22,13 @@ const reindexSeed = "2026-05-19"
 // Used by both the controller (to detect spec changes) and the re-index
 // consumer (to verify cache freshness before evaluating).
 // Bump reindexSeed to force a full re-index of all policies.
+//
+// Visibility is left out: it only changes how queries are filtered, not what
+// is indexed, so setting or defaulting it must not trigger a re-index.
 func ComputeSpecHash(spec *searchv1alpha1.ResourceIndexPolicySpec) string {
-	b, err := json.Marshal(spec)
+	hashed := *spec
+	hashed.Visibility = ""
+	b, err := json.Marshal(&hashed)
 	if err != nil {
 		return ""
 	}

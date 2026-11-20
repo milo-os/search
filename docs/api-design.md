@@ -169,7 +169,7 @@ written in that same context: each index is filtered on the document's
 Some resources are written once at the platform root but are meant to be found
 from every context, such as public feedback posts. Set `visibility:
 AllContexts` on their policy so a query from any context also finds that
-index's documents written at the platform root:
+index's documents stored under the platform root:
 
 ```yaml
 apiVersion: search.miloapis.com/v1alpha1
@@ -189,25 +189,33 @@ spec:
 ```
 
 For an `AllContexts` index, a query made in a user, organization or project
-context is filtered to its own documents or those written at the platform root:
+context is filtered to its own documents or those stored under the platform
+root:
 
 ```
 (_tenant_type = "user" AND _tenant = "alice") OR _tenant_type IN ["platform", "Global"]
 ```
 
 `Global` is the tenant type of a write at Milo's root scope and `platform` the
-type reindexing uses. Documents written in other users', organizations' or
-projects' contexts stay hidden, and a platform-root query is still unfiltered.
+type reindexing and unscoped audit events use. Documents stored under other
+users', organizations' or projects' tenants stay hidden, and a platform-root
+query is still unfiltered.
 
 The setting applies per index. In a query that spans several indexes, every
 index whose policy keeps the default `Tenant` is still filtered to the caller's
 context only, and `targetResources` still chooses which indexes are searched.
 If more than one policy targets the same kind, the index is only opened up
-when all of them set `AllContexts`. Results report the tenant each document
-was written in.
+when all of them set `AllContexts`. Changing `visibility` doesn't re-index:
+it only changes how queries are filtered. Results report each document's stored
+tenant.
 
-`AllContexts` doesn't check that the caller may read the resource kind. Only set
-it for kinds every signed-in user is allowed to read.
+Only set `AllContexts` for kinds where any signed-in user may read every indexed
+instance, and use the policy's `conditions` to leave out instances that aren't
+public. The filter matches documents by their stored tenant, which isn't always
+where they were written: reindexing stores every core-control-plane object as
+`platform`, including organization- and user-scoped ones, and an audit event
+without a scope falls back to `platform`. So the filter is a second line of
+defence, not the guarantee, and no per-caller access check is made.
 
 ### Resource search queries
 
