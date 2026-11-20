@@ -1,0 +1,69 @@
+---
+# ServiceAccount the query Jobs run as. It impersonates alice and bob with the
+# user extras Milo sets in a user's own context, which kubectl can't send.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: search-user-ctx-tester
+  namespace: search-system
+---
+# Impersonation of users alice and bob only, with exactly the parent-type and
+# parent-name extras Milo's UserContextAuthorizationDecorator sets for them.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: search-user-ctx-impersonator
+rules:
+- apiGroups: [""]
+  resources: ["users"]
+  resourceNames: ["alice", "bob"]
+  verbs: ["impersonate"]
+- apiGroups: ["authentication.k8s.io"]
+  resources: ["userextras/iam.miloapis.com/parent-type"]
+  resourceNames: ["User"]
+  verbs: ["impersonate"]
+- apiGroups: ["authentication.k8s.io"]
+  resources: ["userextras/iam.miloapis.com/parent-name"]
+  resourceNames: ["alice", "bob"]
+  verbs: ["impersonate"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: search-user-ctx-impersonator
+subjects:
+- kind: ServiceAccount
+  name: search-user-ctx-tester
+  namespace: search-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: search-user-ctx-impersonator
+---
+# alice and bob may run search queries. Nothing else is granted: the search
+# apiserver does no per-kind access check, so visibility comes only from the
+# tenant filter under test.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: search-user-ctx-searcher
+rules:
+- apiGroups: ["search.miloapis.com"]
+  resources: ["resourcesearchqueries"]
+  verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: search-user-ctx-searcher
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: User
+  name: alice
+- apiGroup: rbac.authorization.k8s.io
+  kind: User
+  name: bob
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: search-user-ctx-searcher

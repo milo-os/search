@@ -43,8 +43,11 @@ func extractParentContext(u user.Info) *parentContext {
 
 // buildScopedFilter formats a Meilisearch filter clause that restricts results
 // to a single tenant. Returns "" when p is nil (no scoping). Uses %q quoting
-// to handle names containing quotes or backslashes safely. Type is lowercased
-// because stored _tenant_type values are conventionally lowercase.
+// to handle names containing quotes or backslashes safely. Type is lowercased,
+// but stored _tenant_type values are often title case: reindexing and the
+// audit indexer store "Project", "User" and "Global". They still match because
+// Meilisearch compares filter strings case-insensitively;
+// test/e2e/search-flow-user-context pins this.
 func buildScopedFilter(p *parentContext) string {
 	if p == nil {
 		return ""
