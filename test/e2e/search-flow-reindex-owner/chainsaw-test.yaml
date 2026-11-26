@@ -1,0 +1,212 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: search-flow-reindex-owner
+spec:
+  description: |
+    Verifies that a reindex of the core control plane stores each object under the
+    owner the object itself names, and never as platform-owned.
+
+    Two PodDisruptionBudgets exist before their ResourceIndexPolicy does, so the
+    policy's reindex is what indexes them:
+      - one in the organization-e2e-reindex-acme namespace, which must be stored as
+        tenant.type=Organization, tenant.name=e2e-reindex-acme;
+      - one in the default namespace with no owner, which must be stored as
+        tenant.type=unscoped, tenant.name=unscoped.
+
+    PodDisruptionBudgets are used because no other suite indexes them, so no other
+    policy shares the index.
+
+  namespace: default
+
+  steps:
+    - name: pre-cleanup
+      description: "Removes leftover resources to ensure idempotent test execution"
+      try:
+        - script:
+            timeout: 90s
+            content: |
+              kubectl delete resourceindexpolicy e2e-reindex-owner-pdb-policy --ignore-not-found=true || true
+              kubectl delete poddisruptionbudget e2e-reindex-unowned-pdb -n default --ignore-not-found=true || true
+              kubectl delete namespace organization-e2e-reindex-acme --ignore-not-found=true --wait=true || true
+              sleep 5
+            check:
+              ($error): ~
+
+    - name: create-organization-namespace
+      description: "Creates the organization namespace the organization-owned object lives in"
+      try:
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: organization-e2e-reindex-acme
+
+    - name: create-objects-before-policy
+      description: "Creates one organization-owned and one unowned PodDisruptionBudget before any policy indexes them"
+      try:
+        - apply:
+            resource:
+              apiVersion: policy/v1
+              kind: PodDisruptionBudget
+              metadata:
+                name: e2e-reindex-org-pdb
+                namespace: organization-e2e-reindex-acme
+                labels:
+                  e2e-reindex-owner: "true"
+                annotations:
+                  e2e.search.test/reindex-tag: "reindex-owner-org-k7m"
+              spec:
+                minAvailable: 0
+                selector:
+                  matchLabels:
+                    app: e2e-reindex-owner-none
+        - apply:
+            resource:
+              apiVersion: policy/v1
+              kind: PodDisruptionBudget
+              metadata:
+                name: e2e-reindex-unowned-pdb
+                namespace: default
+                labels:
+                  e2e-reindex-owner: "true"
+                annotations:
+                  e2e.search.test/reindex-tag: "reindex-owner-unowned-k7m"
+              spec:
+                minAvailable: 0
+                selector:
+                  matchLabels:
+                    app: e2e-reindex-owner-none
+
+    - name: create-policy
+      description: "Creates the policy, whose reconcile reindexes both existing objects"
+      try:
+        - apply:
+            resource:
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceIndexPolicy
+              metadata:
+                name: e2e-reindex-owner-pdb-policy
+              spec:
+                targetResource:
+                  group: "policy"
+                  version: v1
+                  kind: PodDisruptionBudget
+                conditions:
+                  - name: is-e2e-reindex-owner
+                    expression: "'e2e-reindex-owner' in metadata.labels"
+                fields:
+                  - path: ".metadata.name"
+                    searchable: true
+                  - path: ".metadata.annotations['e2e.search.test/reindex-tag']"
+                    searchable: true
+
+    - name: wait-for-policy-ready
+      description: "Waits for the policy to reach Ready=True"
+      try:
+        - wait:
+            apiVersion: search.miloapis.com/v1alpha1
+            kind: ResourceIndexPolicy
+            name: e2e-reindex-owner-pdb-policy
+            timeout: 60s
+            for:
+              condition:
+                name: Ready
+                value: "True"
+
+    - name: wait-for-reindexing
+      description: "Waits for the reindex to be processed and indexed"
+      try:
+        - script:
+            timeout: 35s
+            content: sleep 30
+            check:
+              ($error): ~
+
+    - name: R1-organization-object-stored-under-organization
+      description: "R1: The PodDisruptionBudget in organization-e2e-reindex-acme must be stored as Organization/e2e-reindex-acme"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: r1-reindex-owner-org
+              spec:
+                targetResources:
+                  - group: "policy"
+                    version: v1
+                    kind: PodDisruptionBudget
+                query: "reindex-owner-org-k7m"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-reindex-org-pdb")] | length > 0' && \
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-reindex-org-pdb") | select(.tenant.type == "Organization") | select(.tenant.name == "e2e-reindex-acme")] | length > 0'
+            check:
+              ($error): ~
+
+    - name: R2-unowned-object-stored-unscoped
+      description: "R2: The unowned PodDisruptionBudget must be stored as unscoped, not platform"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: r2-reindex-owner-unowned
+              spec:
+                targetResources:
+                  - group: "policy"
+                    version: v1
+                    kind: PodDisruptionBudget
+                query: "reindex-owner-unowned-k7m"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-reindex-unowned-pdb")] | length > 0' && \
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.resource.metadata.name == "e2e-reindex-unowned-pdb") | select(.tenant.type == "unscoped") | select(.tenant.name == "unscoped")] | length > 0'
+            check:
+              ($error): ~
+
+    - name: R3-no-platform-owned-documents
+      description: "R3: Neither reindexed object is stored as platform-owned"
+      try:
+        - script:
+            timeout: 30s
+            content: |
+              RESULT=$(cat <<EOF | kubectl create -f - -o json
+              apiVersion: search.miloapis.com/v1alpha1
+              kind: ResourceSearchQuery
+              metadata:
+                name: r3-reindex-owner-none-platform
+              spec:
+                targetResources:
+                  - group: "policy"
+                    version: v1
+                    kind: PodDisruptionBudget
+                query: "k7m"
+                limit: 10
+              EOF
+              )
+              echo "$RESULT" | jq -e '[.status.results[]?] | length >= 2' && \
+              echo "$RESULT" | jq -e '[.status.results[]? | select(.tenant.type == "platform")] | length == 0'
+            check:
+              ($error): ~
+
+    - name: cleanup
+      description: "Removes all resources created by this test suite"
+      try:
+        - script:
+            timeout: 90s
+            content: |
+              kubectl delete resourceindexpolicy e2e-reindex-owner-pdb-policy --ignore-not-found=true || true
+              kubectl delete poddisruptionbudget e2e-reindex-unowned-pdb -n default --ignore-not-found=true || true
+              kubectl delete namespace organization-e2e-reindex-acme --ignore-not-found=true || true
+            check:
+              ($error): ~

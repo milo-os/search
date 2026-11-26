@@ -447,7 +447,7 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 	health.watch("reindex", reindexBatcher)
 
 	auditIdx := indexer.NewIndexer(auditConsumer, indexPolicyCache, auditBatcher, o.EnableMultiTenancy)
-	reindexIdx := indexer.NewReindexConsumer(reindexJSConsumer, reindexPolicyCache, reindexBatcher)
+	reindexIdx := indexer.NewReindexConsumer(reindexJSConsumer, reindexPolicyCache, reindexBatcher, o.EnableMultiTenancy)
 
 	klog.Info("Starting audit indexer and re-index consumer...")
 
