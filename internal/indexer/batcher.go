@@ -300,39 +300,44 @@ func (b *Batcher) Submit(msg *jetstream.Msg, upserts []UpsertOp, deletes []Delet
 		return
 	}
 
-	b.mu.Lock()
-
 	// Deletes are buffered before upserts so that, within one message, a policy
 	// that matches wins over one that does not for the same index.
+	ops := make([]pendingOp, 0, len(deletes)+len(upserts))
 	for _, op := range deletes {
 		state := docUnindexed
 		if op.ObjectDeleted {
 			state = docDeleted
 		}
-		b.setPending(pendingOp{
+		ops = append(ops, pendingOp{
 			indexUID: op.IndexUID,
 			docID:    op.DocID,
 			rv:       op.ResourceVersion,
 			state:    state,
 		})
 	}
-
 	for _, op := range upserts {
-		// Extract UID for deduplication key
-		var docID string
-		if m, ok := op.Doc.(map[string]any); ok {
-			if uid, ok := m["uid"].(string); ok {
-				docID = uid
-			}
-		}
-
-		b.setPending(pendingOp{
+		ops = append(ops, pendingOp{
 			indexUID: op.IndexUID,
-			docID:    docID,
+			docID:    upsertDocID(op.Doc),
 			rv:       resourceVersionOf(op.Doc),
 			state:    docIndexed,
 			doc:      op.Doc,
 		})
+	}
+
+	b.mu.Lock()
+
+	// An operation without a document id cannot be ordered or applied: every
+	// such operation for an index would share one document state record, and
+	// Meilisearch rejects the document anyway. It is dropped here. Its message
+	// is still tracked, so it is acked with the batch rather than redelivered
+	// forever.
+	for _, op := range ops {
+		if op.docID == "" {
+			klog.Warningf("Skipping %s for index %s: it has no document id; a document's uid must be a non-empty string", opVerb(op), op.indexUID)
+			continue
+		}
+		b.setPending(op)
 	}
 
 	if msg != nil {
@@ -390,6 +395,26 @@ func (b *Batcher) setPending(op pendingOp) {
 		b.pendingUpserts++
 	}
 	b.pending[key] = op
+}
+
+// upsertDocID is the id of a document to upsert: its uid field, which is the
+// index's primary key. It is empty when the field is missing or not a string,
+// as when a policy's transform replaces it with another type.
+func upsertDocID(doc any) string {
+	m, ok := doc.(map[string]any)
+	if !ok {
+		return ""
+	}
+	uid, _ := m["uid"].(string)
+	return uid
+}
+
+// opVerb names what op does to its document, for logs.
+func opVerb(op pendingOp) string {
+	if op.isUpsert() {
+		return flushTypeUpsert
+	}
+	return flushTypeDelete
 }
 
 func pendingKey(indexUID, docID string) string {
