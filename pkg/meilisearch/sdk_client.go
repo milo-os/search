@@ -533,28 +533,35 @@ func (s *SDKClient) GetSettingsUpdateTask(indexUID string) (*meilisearch.Task, e
 	return &resp.Results[0], nil
 }
 
-// MultiSearch performs a search query across multiple indices.
-// If filter is non-empty, it's applied identically to every per-index query
-// as a Meilisearch filter expression. Pass "" to skip filtering.
+// IndexSearch is one index in a MultiSearch and the filter applied to it.
+type IndexSearch struct {
+	IndexUID string
+	// Filter is a Meilisearch filter expression applied to this index only.
+	// Empty skips filtering.
+	Filter string
+}
+
+// MultiSearch performs one federated search query across several indices.
+// Each index gets its own filter, so indices can be scoped differently in the
+// same query.
 func (s *SDKClient) MultiSearch(
-	indexUIDs []string,
+	searches []IndexSearch,
 	query string,
 	limit, offset int64,
-	filter string,
 ) (*meilisearch.MultiSearchResponse, error) {
-	if len(indexUIDs) == 0 {
+	if len(searches) == 0 {
 		return nil, fmt.Errorf("no index UIDs provided")
 	}
 
-	queries := make([]*meilisearch.SearchRequest, 0, len(indexUIDs))
-	for _, uid := range indexUIDs {
+	queries := make([]*meilisearch.SearchRequest, 0, len(searches))
+	for _, search := range searches {
 		req := &meilisearch.SearchRequest{
-			IndexUID:         uid,
+			IndexUID:         search.IndexUID,
 			Query:            query,
 			ShowRankingScore: true,
 		}
-		if filter != "" {
-			req.Filter = filter
+		if search.Filter != "" {
+			req.Filter = search.Filter
 		}
 		queries = append(queries, req)
 	}
@@ -567,11 +574,11 @@ func (s *SDKClient) MultiSearch(
 		},
 	}
 
-	klog.V(6).Infof("MultiSearch across indices %v with query %q, limit %d, offset %d, filter %q",
-		indexUIDs, query, limit, offset, filter)
+	klog.V(6).Infof("MultiSearch across %+v with query %q, limit %d, offset %d",
+		searches, query, limit, offset)
 	resp, err := s.client.MultiSearch(req)
 	if err != nil {
-		klog.Errorf("MultiSearch failed across indices %v with filter %q: %v", indexUIDs, filter, err)
+		klog.Errorf("MultiSearch failed across %+v: %v", searches, err)
 		return nil, fmt.Errorf("multi-search failed: %w", err)
 	}
 	return resp, nil

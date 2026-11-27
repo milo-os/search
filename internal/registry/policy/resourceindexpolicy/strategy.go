@@ -68,22 +68,30 @@ func (strategy) NamespaceScoped() bool {
 }
 
 func (strategy) PrepareForCreate(ctx context.Context, obj runtime.Object) {
-	// No modification needed
+	setDefaults(obj.(*searchv1alpha1.ResourceIndexPolicy))
 }
 
 func (strategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Object) {
-	// No modification needed
+	setDefaults(obj.(*searchv1alpha1.ResourceIndexPolicy))
+}
+
+// setDefaults fills in optional spec fields. This API server doesn't apply
+// OpenAPI defaults, so the kubebuilder default markers are applied here.
+func setDefaults(p *searchv1alpha1.ResourceIndexPolicy) {
+	if p.Spec.Visibility == "" {
+		p.Spec.Visibility = searchv1alpha1.IndexVisibilityTenant
+	}
 }
 
 func (s strategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
 	return s.validate(ctx, obj)
 }
 
-func (strategy) AllowCreateOnUpdate() bool {
+func (strategy) AllowCreateOnUpdate(context.Context) bool {
 	return false
 }
 
-func (strategy) AllowUnconditionalUpdate() bool {
+func (strategy) AllowUnconditionalUpdate(context.Context) bool {
 	return false
 }
 

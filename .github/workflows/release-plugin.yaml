@@ -26,7 +26,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -34,12 +34,12 @@ jobs:
         run: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sudo sh -s -- -b /usr/local/bin
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: "~> v2"
@@ -68,7 +68,7 @@ jobs:
     steps:
       - name: Mint catalog token from the milo-os GitHub App
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.PLUGIN_INDEX_APP_ID }}
           private-key: ${{ secrets.PLUGIN_INDEX_APP_PRIVATE_KEY }}
@@ -76,7 +76,7 @@ jobs:
           repositories: cli-plugins
 
       - name: Open the catalog PR
-        uses: datum-cloud/actions/update-plugin-index@v1.18.0
+        uses: datum-cloud/actions/update-plugin-index@v1.31.0
         with:
           index-repo: milo-os/cli-plugins
           plugin-name: search

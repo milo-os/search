@@ -273,9 +273,13 @@ The existing Activity system already provides the infrastructure Search needs fo
 
 | Activity Scope Type | Search `_tenant_type` | Search `_tenant` |
 |---------------------|----------------------|------------------|
-| `global` | `platform` | `"platform"` |
-| `organization` | `organization` | Organization name |
-| `project` | `project` | Project name |
+| `global` | `Global` | Scope name, or `"platform"` if the event has none |
+| `organization` | `Organization` | Organization name |
+| `project` | `Project` | Project name |
+| `user` | `User` | User name |
+| No scope annotation | `platform` | `"platform"` |
+
+The indexer title-cases every scope type except the `platform` fallback (`extractTenantFromAuditEvent` in `internal/indexer/consumer.go`).
 
 Search consumes from the existing NATS stream and extracts tenant metadata from these annotations—no separate audit sink deployment required.
 
@@ -285,8 +289,8 @@ All indexed documents include tenant metadata fields:
 
 | Field | Description |
 |-------|-------------|
-| `_tenant` | Tenant name (`"platform"` or project name) |
-| `_tenant_type` | Tenant type (`"platform"` or `"project"`) |
+| `_tenant` | Tenant name: the scope name (organization, project or user name), or `"platform"` when there is none |
+| `_tenant_type` | Tenant type: `Global`, `Organization`, `Project` or `User`, or the `platform` fallback |
 
 ### Bootstrap and Re-indexing Flow
 
@@ -330,6 +334,7 @@ When a project control plane is deleted:
 - Project control planes cannot read search indexes directly (only platform cluster API server)
 - Audit events contain full resource data - ensure NATS transport is secured (TLS)
 - Meilisearch access restricted to indexer and API server components
+- Queries made in a user or project context are filtered to that context. Queries in other contexts (such as an organization) or with an incomplete parent context are refused with 403. On indexes whose ResourceIndexPolicy sets `visibility: AllContexts`, they also find documents stored under the platform root (`_tenant_type` `platform` or `Global`), but not documents stored under other tenants. Stored tenants aren't always where a document was written: reindexing stores every core-control-plane object as `platform`, and an audit event without a scope falls back to `platform`. So only set `AllContexts` for kinds where any signed-in user may read every indexed instance, and use the policy's conditions to leave out instances that aren't public (see [API Design](../api-design.md#visibility))
 
 ### Platform Capability Integrations
 

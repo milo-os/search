@@ -13,6 +13,7 @@ import (
 // 1. CEL expressions in conditions
 // 2. JSONPath syntax in fields
 // 3. Uniqueness of TargetResource across existing policies (if provided)
+// 4. Visibility is a supported value
 func ValidateResourceIndexPolicy(
 	policy *searchv1alpha1.ResourceIndexPolicy,
 	otherPolicies []*searchv1alpha1.ResourceIndexPolicy,
@@ -56,6 +57,17 @@ func ValidateResourceIndexPolicy(
 				err,
 			))
 		}
+	}
+
+	// Validate visibility. Empty means the default, Tenant.
+	switch policy.Spec.Visibility {
+	case "", searchv1alpha1.IndexVisibilityTenant, searchv1alpha1.IndexVisibilityAllContexts:
+	default:
+		allErrs = append(allErrs, field.NotSupported(
+			field.NewPath("spec", "visibility"),
+			policy.Spec.Visibility,
+			[]string{string(searchv1alpha1.IndexVisibilityTenant), string(searchv1alpha1.IndexVisibilityAllContexts)},
+		))
 	}
 
 	// Validate repeated field names

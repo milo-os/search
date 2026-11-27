@@ -38,6 +38,10 @@ const (
 	// rather than assuming 16 still holds.
 	DefaultMaxInFlightFlushes = 16
 
+	// DefaultFlushTimeout is the longest one flush may run before it is
+	// abandoned and its messages are nacked.
+	DefaultFlushTimeout = 11 * time.Minute
+
 	// DefaultAckProgressInterval is how often an in-progress flush heartbeats its
 	// messages to keep JetStream from redelivering them.
 	DefaultAckProgressInterval = 60 * time.Second
@@ -66,6 +70,11 @@ type BatchConfig struct {
 	// messages are still being worked on, extending ackWait for as long as the
 	// flush is genuinely progressing.
 	AckProgressInterval time.Duration
+	// FlushTimeout caps one whole flush, enqueue and task wait together. A flush
+	// that exceeds it frees its slot and nacks its messages for redelivery, so a
+	// slow Meilisearch cannot hold every slot indefinitely. Zero selects
+	// DefaultFlushTimeout.
+	FlushTimeout time.Duration
 	// DocState is the store that orders writes to one document across every
 	// batcher and replica that shares it. Nil uses a store private to this
 	// process, which is only suitable for tests and single-replica setups.
@@ -186,6 +195,8 @@ type Batcher struct {
 
 	ackProgressInterval time.Duration
 
+	wait func(ctx context.Context, wg *sync.WaitGroup) bool
+
 	mu       sync.Mutex
 	sem      chan struct{} // Global semaphore to limit concurrent Meilisearch requests
 	flushSem chan struct{} // Bounds the number of flushes (and their message batches) in flight
@@ -197,6 +208,9 @@ type Batcher struct {
 
 	warnMu       sync.Mutex
 	lastSlotWarn time.Time
+
+	progressMu   sync.Mutex
+	lastProgress time.Time
 }
 
 // NewBatcher creates a new Batcher instance.
@@ -216,6 +230,10 @@ func NewBatcher(client SearchClient, batchConfig BatchConfig) *Batcher {
 		ackProgressInterval = DefaultAckProgressInterval
 	}
 
+	if batchConfig.FlushTimeout <= 0 {
+		batchConfig.FlushTimeout = DefaultFlushTimeout
+	}
+
 	docState := batchConfig.DocState
 	if docState == nil {
 		docState = NewMemoryDocStateStore()
@@ -230,6 +248,7 @@ func NewBatcher(client SearchClient, batchConfig BatchConfig) *Batcher {
 		docState:            docState,
 		ackProgressInterval: ackProgressInterval,
 		lastEnqueue:         lastEnqueue,
+		wait:                waitOrDone,
 		pending:             make(map[string]pendingOp),
 		msgs:                make([]jetstream.Msg, 0, batchConfig.BatchSize),
 		msgSeqs:             make(map[uint64]struct{}),
@@ -416,6 +435,7 @@ func (b *Batcher) runBatcher(ctx context.Context) {
 	defer ticker.Stop()
 
 	for {
+		b.markProgress()
 		select {
 		case <-ctx.Done():
 			return
@@ -624,6 +644,10 @@ func (f *flushErrors) join() error {
 // that carries it; where the store shows a newer state was enqueued before
 // this task, the newer state is enqueued again so it lands last. See
 // ordering.go for why each phase is needed.
+//
+// FlushTimeout bounds all three phases together. A flush that exceeds it
+// stops where it is and nacks its messages; the redelivery runs the protocol
+// again from the newest recorded state.
 func (b *Batcher) performFlush(bt batch) {
 	flushType := bt.flushType()
 	upserts, deletes := bt.counts()
@@ -636,12 +660,14 @@ func (b *Batcher) performFlush(bt batch) {
 		searchmetrics.IndexerFlushDuration.WithLabelValues(flushType).Observe(time.Since(start).Seconds())
 	}()
 
+	// Flushes outlive a shutdown of the batcher on purpose (see
+	// acquireFlushSlot), so the flush gets its own lifetime rather than the
+	// batcher's, capped by FlushTimeout. The store calls share it.
+	ctx, cancel := context.WithTimeout(context.Background(), b.batchConfig.FlushTimeout)
+	defer cancel()
+
 	// Heartbeat the batch for the whole time its tasks are outstanding.
 	stopAckProgress := b.startAckProgress(bt.msgs, flushType)
-
-	// Flushes outlive a shutdown of the batcher on purpose (see
-	// acquireFlushSlot), so the store calls get their own lifetime.
-	ctx := context.Background()
 
 	var wg sync.WaitGroup
 	var errs flushErrors
@@ -652,13 +678,18 @@ func (b *Batcher) performFlush(bt batch) {
 	}
 
 	var groups []*flushGroup
+	enqueued := false
 	if err == nil {
 		groups = groupClaims(claims)
-		b.enqueueGroups(groups, &wg, &errs)
+		if enqueued = b.enqueueGroups(ctx, groups, &wg, &errs); !enqueued {
+			errs.add(fmt.Errorf("flush exceeded %s while enqueueing", b.batchConfig.FlushTimeout))
+		}
 	}
 	close(bt.turn.done)
 
-	for round := 0; err == nil && len(groups) > 0; round++ {
+	// A group whose enqueue was abandoned may still set its task uid, so the
+	// record step only runs once every enqueue of the round has returned.
+	for round := 0; enqueued && len(groups) > 0; round++ {
 		repairs, recordErr := b.recordBatch(ctx, groups)
 		if recordErr != nil {
 			errs.add(fmt.Errorf("recording document state: %w", recordErr))
@@ -674,11 +705,19 @@ func (b *Batcher) performFlush(bt batch) {
 		searchmetrics.IndexerOrderRepairs.Add(float64(len(repairs)))
 		klog.Infof("Re-enqueueing %d documents whose newer state was enqueued before this batch's", len(repairs))
 		groups = groupClaims(repairs)
-		b.enqueueGroups(groups, &wg, &errs)
+		if enqueued = b.enqueueGroups(ctx, groups, &wg, &errs); !enqueued {
+			errs.add(fmt.Errorf("flush exceeded %s while re-enqueueing", b.batchConfig.FlushTimeout))
+		}
 	}
 
-	wg.Wait()
+	if !b.wait(ctx, &wg) {
+		errs.add(fmt.Errorf("flush exceeded %s", b.batchConfig.FlushTimeout))
+	}
 	stopAckProgress()
+
+	if err := ctx.Err(); err != nil {
+		errs.add(err)
+	}
 
 	if err := errs.join(); err != nil {
 		searchmetrics.IndexerFlushTotal.WithLabelValues(flushType, flushStatusFailure).Inc()
@@ -695,12 +734,13 @@ func (b *Batcher) performFlush(bt batch) {
 	}
 }
 
-// enqueueGroups sends each group to Meilisearch and returns once every group
-// has been enqueued, with the task uids recorded on the groups. Waiting for
-// the tasks to finish continues in the background under wg. The keys in a
-// group are unique, so the order of its tasks relative to each other does not
-// matter; only the enqueue barrier against the next batch does.
-func (b *Batcher) enqueueGroups(groups []*flushGroup, wg *sync.WaitGroup, errs *flushErrors) {
+// enqueueGroups sends each group to Meilisearch and reports whether every
+// group was enqueued, or gave up, before ctx ended; when it returns true the
+// task uids are recorded on the groups. Waiting for the tasks to finish
+// continues in the background under wg. The keys in a group are unique, so
+// the order of its tasks relative to each other does not matter; only the
+// enqueue barrier against the next batch does.
+func (b *Batcher) enqueueGroups(ctx context.Context, groups []*flushGroup, wg *sync.WaitGroup, errs *flushErrors) bool {
 	var enqueueWG sync.WaitGroup
 	for _, g := range groups {
 		wg.Add(1)
@@ -709,7 +749,13 @@ func (b *Batcher) enqueueGroups(groups []*flushGroup, wg *sync.WaitGroup, errs *
 			defer wg.Done()
 
 			// 1. Enqueue - Limited by semaphore
-			b.sem <- struct{}{}
+			select {
+			case b.sem <- struct{}{}:
+			case <-ctx.Done():
+				errs.add(ctx.Err())
+				enqueueWG.Done()
+				return
+			}
 			tasks, err := g.enqueue(b.client)
 			<-b.sem
 			if err == nil {
@@ -728,7 +774,7 @@ func (b *Batcher) enqueueGroups(groups []*flushGroup, wg *sync.WaitGroup, errs *
 			}
 		}(g)
 	}
-	enqueueWG.Wait()
+	return b.wait(ctx, &enqueueWG)
 }
 
 // firstTaskUID is the uid of the earliest task among those a group was
@@ -746,6 +792,22 @@ func firstTaskUID(tasks []*meilisearch.Task) int64 {
 		}
 	}
 	return uid
+}
+
+// waitOrDone waits for wg and reports whether it finished before ctx ended.
+// The goroutines still running when ctx ends are left to finish on their own.
+func waitOrDone(ctx context.Context, wg *sync.WaitGroup) bool {
+	finished := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // nakBatch returns a failed batch to JetStream for redelivery. Without it the

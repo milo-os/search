@@ -35,6 +35,23 @@ spec:
         - name: metrics
           containerPort: 8080
           protocol: TCP
+        - name: health
+          containerPort: 8081
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
         env:
         - name: NATS_URL
           value: "nats://nats.nats-system.svc.cluster.local:4222"

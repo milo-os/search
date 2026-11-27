@@ -28,7 +28,7 @@ import (
 // uses. Declaring it here lets tests substitute a fake without touching the
 // SDK client itself.
 type multiSearcher interface {
-	MultiSearch(indexUIDs []string, query string, limit, offset int64, filter string) (*meiliapi.MultiSearchResponse, error)
+	MultiSearch(searches []meilisearch.IndexSearch, query string, limit, offset int64) (*meiliapi.MultiSearchResponse, error)
 }
 
 // policyLister is the subset of indexer.PolicyCache that the REST handler
@@ -115,27 +115,34 @@ func (r *REST) Create(ctx context.Context, obj runtime.Object, createValidation 
 		return nil, apierrors.NewUnauthorized("missing user in request context")
 	}
 
+	// Tenant scope. Fails closed: a request with an incomplete parent context,
+	// or one of a type search isn't served in, is refused rather than run
+	// without a tenant filter.
+	parent, err := extractParentContext(userInfo)
+	if err != nil {
+		return nil, apierrors.NewForbidden(searchv1alpha1.Resource("resourcesearchqueries"), "", err)
+	}
+
 	// Classify targets against registered policies (no SAR — activity pattern).
 	policies := r.policyCache.GetPolicies()
 	allowed, denied := classifyTargets(query.Spec.TargetResources, policies)
-	indexUIDs := indexUIDsFor(allowed, policies)
+
+	// Tenant scope filter: applied to each index unless its policy makes it
+	// visible from all contexts.
+	searches := indexSearchesFor(allowed, policies, buildScopedFilter(parent))
 
 	// Short-circuit: nothing to search. Return 200 with empty results and the
 	// full denied list so callers can render a partial-permission notice.
-	if len(indexUIDs) == 0 {
+	if len(searches) == 0 {
 		return resultWithDenied(query, nil, denied, ""), nil
 	}
-
-	// Tenant scope filter (unchanged — extractParentContext + buildScopedFilter).
-	parent := extractParentContext(userInfo)
-	filter := buildScopedFilter(parent)
-	if filter != "" {
-		klog.V(2).Infof("ResourceSearchQuery applying tenant scope filter type=%q name=%q across %d indices",
-			parent.Type, parent.Name, len(indexUIDs))
+	if parent != nil {
+		klog.V(2).Infof("ResourceSearchQuery applying tenant scope type=%q name=%q across %+v",
+			parent.Type, parent.Name, searches)
 	}
 
 	// Dispatch to Meilisearch.
-	resp, err := r.meiliClient.MultiSearch(indexUIDs, query.Spec.Query, limit, offset, filter)
+	resp, err := r.meiliClient.MultiSearch(searches, query.Spec.Query, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search: %w", err)
 	}
@@ -240,7 +247,6 @@ func (r *REST) validateAndGetPagination(query *searchv1alpha1.ResourceSearchQuer
 
 	return limit, offset, nil
 }
-
 
 // calculateNextContinueToken determines the next continue token for pagination.
 // If the number of hits on the current page is equal to or greater than the limit,

@@ -228,3 +228,41 @@ func TestSDKClient_DeleteDocumentsAsync_DoesNotRetryOnHTTPTimeout(t *testing.T) 
 	assert.Less(t, elapsed, 2*httpTimeout, "DeleteDocumentsAsync appears to have retried instead of failing after one HTTP timeout")
 	assert.GreaterOrEqual(t, elapsed, httpTimeout-50*time.Millisecond)
 }
+
+// TestSDKClient_MultiSearch_FilterPerIndex checks each index in a federated
+// search gets its own filter, and an index with no filter is sent without one.
+func TestSDKClient_MultiSearch_FilterPerIndex(t *testing.T) {
+	var body struct {
+		Queries []map[string]any `json:"queries"`
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/multi-search", func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		_ = json.NewEncoder(w).Encode(map[string]any{"hits": []any{}})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client, err := NewSDKClient(SDKConfig{Domain: srv.URL, APIKey: "test"})
+	require.NoError(t, err)
+
+	scope := `(_tenant_type = "user" AND _tenant = "alice")`
+	_, err = client.MultiSearch([]IndexSearch{
+		{IndexUID: "projects", Filter: scope},
+		{IndexUID: "posts"},
+	}, "dns", 10, 0)
+	require.NoError(t, err)
+
+	require.Len(t, body.Queries, 2)
+	assert.Equal(t, "projects", body.Queries[0]["indexUid"])
+	assert.Equal(t, scope, body.Queries[0]["filter"])
+	assert.Equal(t, "posts", body.Queries[1]["indexUid"])
+	assert.NotContains(t, body.Queries[1], "filter")
+}
+
+func TestSDKClient_MultiSearch_NoIndexes(t *testing.T) {
+	client, err := NewSDKClient(SDKConfig{Domain: "http://127.0.0.1:1", APIKey: "test"})
+	require.NoError(t, err)
+	_, err = client.MultiSearch(nil, "dns", 10, 0)
+	require.Error(t, err)
+}
