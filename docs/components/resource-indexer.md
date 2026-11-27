@@ -305,13 +305,17 @@ then fails and is nacked, and indexing stops until the bucket is grown. Size
 document) and alert on `search_indexer_doc_state_bucket_bytes` well before it
 reaches the limit.
 
-The replica default of 1 suits single-node dev and kind clusters. Production
-and staging should set `--nats-doc-state-replicas=3`.
+The bucket defaults to 3 replicas. Every flush claims through it, so a bucket
+on one replica stops indexing on every indexer replica whenever its NATS
+server restarts. A single-node NATS cannot place 3 replicas, so the `dev` and
+`ci` overlays and `task dev:run-indexer`, which run against the single-node
+NATS of the kind test cluster, set `--nats-doc-state-replicas=1`. Staging and
+production deploy the `core-control-plane` overlay and use the default.
 
 | Flag | Default | Purpose |
 |------|---------|---------|
 | `--nats-doc-state-bucket` | `SEARCH_INDEXER_DOC_STATE` | Bucket name; every replica must share it |
-| `--nats-doc-state-replicas` | `1` | JetStream replicas for the bucket; use `3` in production and staging |
+| `--nats-doc-state-replicas` | `3` | JetStream replicas for the bucket; set `1` only against a single-node NATS |
 | `--nats-doc-state-max-bytes` | `10737418240` (10 GiB) | Byte limit of the bucket; must be greater than 0 |
 | `--nats-doc-state-manage-bucket` | `true` | Whether to update an existing bucket's replicas, TTL, byte limit, history and storage to match these flags; nothing else is changed |
 | `--doc-state-ttl` | `168h` | How long a record outlives its last write; must cover the audit stream's retention |

@@ -434,6 +434,7 @@ tasks:
           --nats-audit-consumer-name="search-indexer" \
           --nats-reindex-consumer-name="search-reindexer" \
           --nats-stream-name="AUDIT_EVENTS" \
+          --nats-doc-state-replicas=1 \
           --meilisearch-domain="http://127.0.0.1:7700"
     silent: true
 

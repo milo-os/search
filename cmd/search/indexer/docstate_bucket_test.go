@@ -323,8 +323,8 @@ func TestDocStateBucketConfig_Defaults(t *testing.T) {
 	if cfg.MaxBytes != 10737418240 {
 		t.Errorf("max bytes default is %d, want 10 GiB so the bucket is never unbounded", cfg.MaxBytes)
 	}
-	if cfg.Replicas != 1 {
-		t.Errorf("replicas default is %d, want 1 for single-node dev and kind clusters", cfg.Replicas)
+	if cfg.Replicas != 3 {
+		t.Errorf("replicas default is %d, want 3 so one NATS server restart cannot stop indexing", cfg.Replicas)
 	}
 	if cfg.Bucket != "SEARCH_INDEXER_DOC_STATE" || cfg.TTL != docStateTTLDefault || cfg.History != 1 || cfg.Storage != jetstream.FileStorage {
 		t.Errorf("unexpected bucket defaults %+v", cfg)

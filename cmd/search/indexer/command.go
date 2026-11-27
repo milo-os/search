@@ -123,7 +123,7 @@ func NewResourceIndexerOptions() *ResourceIndexerOptions {
 		NatsReindexStream:           "REINDEX_EVENTS",
 		NatsReindexConsumerName:     "search-reindexer",
 		NatsDocStateBucket:          "SEARCH_INDEXER_DOC_STATE",
-		NatsDocStateReplicas:        1,
+		NatsDocStateReplicas:        3,
 		NatsDocStateMaxBytes:        docStateMaxBytesDefault,
 		NatsDocStateManageBucket:    true,
 		NatsDocStateTimeout:         5 * time.Second,
@@ -157,7 +157,7 @@ func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.NatsReindexStream, "nats-reindex-stream", o.NatsReindexStream, "The JetStream stream name for re-index messages.")
 	fs.StringVar(&o.NatsReindexConsumerName, "nats-reindex-consumer-name", o.NatsReindexConsumerName, "The name of the re-index JetStream consumer (must match the manifest).")
 	fs.StringVar(&o.NatsDocStateBucket, "nats-doc-state-bucket", o.NatsDocStateBucket, "The JetStream KV bucket that records the newest indexed state of every document. It is created if missing and must be shared by all replicas.")
-	fs.IntVar(&o.NatsDocStateReplicas, "nats-doc-state-replicas", o.NatsDocStateReplicas, "The number of JetStream replicas for the document state bucket. Production and staging should use 3.")
+	fs.IntVar(&o.NatsDocStateReplicas, "nats-doc-state-replicas", o.NatsDocStateReplicas, "The number of JetStream replicas for the document state bucket. Every flush claims through the bucket, so with one replica a single NATS server restart stops indexing on every replica. Set it to 1 only against a single-node NATS, such as a dev or kind cluster, which cannot place more replicas than it has servers.")
 	fs.Int64Var(&o.NatsDocStateMaxBytes, "nats-doc-state-max-bytes", o.NatsDocStateMaxBytes, "The byte limit of the document state bucket. A full KV bucket discards new writes, which fails every flush and nacks its batch, so indexing stops until the bucket is grown: size it generously and alert on search_indexer_doc_state_bucket_bytes.")
 	fs.BoolVar(&o.NatsDocStateManageBucket, "nats-doc-state-manage-bucket", o.NatsDocStateManageBucket, "Whether to apply the configured replicas, TTL, byte limit, history and storage to an existing document state bucket. Only those five settings are ever changed; the bucket's other settings are kept. When false, an existing bucket is used as it is and differences are only logged; a missing bucket is created either way.")
 	fs.DurationVar(&o.NatsDocStateTimeout, "nats-doc-state-timeout", o.NatsDocStateTimeout, "How long one request to the document state bucket may take before it fails. A failed request nacks its batch for redelivery, and the readiness check on the bucket uses the same limit, so the readinessProbe timeoutSeconds must exceed it or the kubelet gives up before the check can report why.")
