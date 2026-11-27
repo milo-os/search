@@ -240,8 +240,15 @@ func (b *Batcher) recordOne(ctx context.Context, c *docClaim, task int64) (*docC
 			stored = docRecord{RV: c.rec.RV, State: c.rec.State, Doc: c.rec.Doc}
 			rev = 0
 		}
-		if task <= stored.Task {
+		// A later task is recorded, so it lands after this one and its flush
+		// made the repair decision this flush would make. Writing this older
+		// task over it would make the record name a task that does not land
+		// last, and would repair a document the later task already settles.
+		if task < stored.Task {
 			return nil, nil
+		}
+		if task == stored.Task {
+			return ownRecord(c, task, stored)
 		}
 
 		stored.Task, stored.TaskRV, stored.TaskState = task, c.rec.RV, c.rec.State
@@ -260,6 +267,37 @@ func (b *Batcher) recordOne(ctx context.Context, c *docClaim, task int64) (*docC
 		return claimFromRecord(c.indexUID, c.docID, stored)
 	}
 	return nil, fmt.Errorf("document %s: state changed under %d record attempts", key, maxClaimAttempts)
+}
+
+// ownRecord settles a record step that finds its own task already recorded.
+// That happens when an earlier attempt's write landed but was reported as
+// failed, as when the connection drops before the reply and the read-back
+// shows a changed revision, and the attempt is retried.
+//
+// Equal task uids can only come from this flush's own write. Meilisearch
+// gives every enqueue its own uid, and one enqueue carries a key at most
+// once; the documents of one group share a uid, but under different keys.
+// The claim step copies the task fields forward when it records a newer
+// state, so the record may since have moved to a newer state, but its task
+// fields still describe this task.
+//
+// The write that landed is this flush's, so no other flush took on its repair
+// decision: when the recorded state is not the one this task carries, the
+// newer state must be enqueued again here, or nothing would. Task fields that
+// name a different state for this task cannot arise from the protocol and are
+// left alone.
+func ownRecord(c *docClaim, task int64, stored docRecord) (*docClaim, error) {
+	if stored.TaskRV != c.rec.RV || stored.TaskState != c.rec.State {
+		klog.Warningf("Document %s/%s: task %d is recorded as carrying %s at resourceVersion %d, but this flush enqueued %s at %d with it, leaving the record as it is",
+			c.indexUID, c.docID, task, stored.TaskState, stored.TaskRV, c.rec.State, c.rec.RV)
+		return nil, nil
+	}
+	if stored.applied() {
+		return nil, nil
+	}
+	klog.V(2).Infof("Document %s/%s: task %d carries %s at resourceVersion %d but %s at %d was enqueued before it, enqueueing the newer state again",
+		c.indexUID, c.docID, task, c.rec.State, c.rec.RV, stored.State, stored.RV)
+	return claimFromRecord(c.indexUID, c.docID, stored)
 }
 
 // errJobFailed cancels the jobs forEachParallel still has running once one of

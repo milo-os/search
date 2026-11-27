@@ -215,6 +215,18 @@ func (k *landThenFailKV) Update(ctx context.Context, key string, value []byte, r
 	return rev, err
 }
 
+// failOnce reports true for the first update whose record matches match.
+func failOnce(match func(docRecord) bool) func(string, []byte) bool {
+	var done atomic.Bool
+	return func(_ string, value []byte) bool {
+		var rec docRecord
+		if json.Unmarshal(value, &rec) != nil || !match(rec) {
+			return false
+		}
+		return done.CompareAndSwap(false, true)
+	}
+}
+
 // TestNATSDocStateStore_LandedUpdateReportedAsFailed_IsAConflict pins how the
 // store reports an update that landed but failed for its caller: the
 // read-back sees a changed revision, so the caller is sent around its
@@ -268,6 +280,46 @@ func TestBatcher_NATS_ConcurrentFlushes_RepairsOverwrite(t *testing.T) {
 	require.True(t, found)
 	assert.Equal(t, uint64(20), rec.RV)
 	assert.True(t, rec.applied(), "the record must show the newest state as the one landing last: %+v", rec)
+}
+
+// TestBatcher_NATS_AmbiguousRecordWrite_StillRepairs covers a record write
+// that lands but is reported to the flush as failed. Replica A claims p1@5;
+// before A's task is given a uid, replica B claims, enqueues and records
+// p1@6. A's task carries p1@5 after B's, so A's record step must enqueue p1@6
+// again. A's record write lands, the flush is told it failed, and its retry
+// finds its own task already recorded: the repair is still A's to make, since
+// no other flush saw a later task.
+func TestBatcher_NATS_AmbiguousRecordWrite_StillRepairs(t *testing.T) {
+	kv := newDocStateKV(t, startJetStream(t))
+	shared := NewNATSDocStateStore(kv, 5*time.Second)
+	flaky := &landThenFailKV{KeyValue: kv, fail: failOnce(func(r docRecord) bool {
+		return r.Task != 0 && r.TaskRV == 5
+	})}
+
+	client := newRVSearchClient()
+	replicaA := newOrderingBatcher(client, NewNATSDocStateStore(flaky, 5*time.Second))
+	replicaB := newOrderingBatcher(client, shared)
+
+	var interleaved atomic.Bool
+	var mB *boundMsg
+	client.onTask = func(_ string, docs []any) {
+		if resourceVersionOf(docs[0]) == 5 && interleaved.CompareAndSwap(false, true) {
+			mB = flushNow(replicaB, 2, upsertOp("proxies", rvDoc("p1", 6, "newer")))
+		}
+	}
+
+	mA := flushNow(replicaA, 1, upsertOp("proxies", rvDoc("p1", 5, "older")))
+
+	require.True(t, interleaved.Load())
+	require.Equal(t, int32(1), flaky.landed.Load(), "replica A's record write must have landed and been reported as failed")
+	requireAcked(t, mA, mB)
+	assert.Equal(t, []string{"add proxies/p1@6", "add proxies/p1@5", "add proxies/p1@6"}, client.Log(),
+		"the flush whose record write landed must still enqueue the newer state behind its own task")
+	assert.Equal(t, "newer", hostnameOf(client.Doc("proxies", "p1")))
+
+	rec, _, _, err := shared.Get(context.Background(), pendingKey("proxies", "p1"))
+	require.NoError(t, err)
+	assert.True(t, rec.applied(), "%+v", rec)
 }
 
 // TestBatcher_RecordingAnOlderTask_KeepsTheLaterTasksRecord covers the record
