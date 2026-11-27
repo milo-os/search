@@ -116,6 +116,7 @@ func TestAttachment_OnConsumeError_StopsOnlyWhenTheConsumerIsGone(t *testing.T) 
 		"no responders while JetStream is unreachable": {err: nats.ErrNoResponders, infoErr: context.DeadlineExceeded},
 		"no responders while the consumer exists":      {err: nats.ErrNoResponders},
 		"no responders for a deleted consumer":         {err: nats.ErrNoResponders, infoErr: jetstream.ErrConsumerNotFound, wantStop: true},
+		"no responders for a deleted stream":           {err: nats.ErrNoResponders, infoErr: jetstream.ErrStreamNotFound, wantStop: true},
 		"consumer not found":                           {err: jetstream.ErrConsumerNotFound, infoErr: jetstream.ErrConsumerNotFound, wantStop: true},
 	}
 	for name, tc := range cases {

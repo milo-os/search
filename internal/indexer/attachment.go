@@ -48,7 +48,7 @@ func (a *attachment) onConsumeError(ctx context.Context, consumer jetstream.Cons
 		return
 	}
 	go func() {
-		if _, infoErr := consumer.Info(ctx); errors.Is(infoErr, jetstream.ErrConsumerNotFound) {
+		if _, infoErr := consumer.Info(ctx); errors.Is(infoErr, jetstream.ErrConsumerNotFound) || errors.Is(infoErr, jetstream.ErrStreamNotFound) {
 			cc.Stop()
 		}
 	}()
@@ -69,6 +69,9 @@ func (a *attachment) run(ctx context.Context, name string, consumer jetstream.Co
 			cc.Stop()
 			return nil
 		case <-cc.Closed():
+		}
+		if ctx.Err() != nil {
+			return nil
 		}
 
 		klog.Errorf("%s consumer stopped; re-attaching every %s", a.name, reattachInterval)
