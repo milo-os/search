@@ -21,7 +21,7 @@ type Indexer struct {
 	batcher            *Batcher
 	enableMultiTenancy bool
 	mu                 sync.Mutex
-	attached           startSignal
+	attached           attachment
 }
 
 type auditEvent struct {
@@ -108,7 +108,7 @@ const (
 func (i *Indexer) Start(ctx context.Context) error {
 
 	// Consume messages
-	cons, err := i.consumer.Consume(func(msg jetstream.Msg) {
+	err := i.attached.run(ctx, "audit", i.consumer, func(msg jetstream.Msg) {
 		// Parse the audit event
 		var event auditEvent
 
@@ -221,13 +221,6 @@ func (i *Indexer) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to start consumer: %w", err)
 	}
-	defer cons.Stop()
-	i.attached.fire()
-
-	klog.Info("Indexer started successfully")
-
-	// Wait for context cancellation
-	<-ctx.Done()
 	klog.Info("Shutting down indexer...")
 	return nil
 }

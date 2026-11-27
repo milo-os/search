@@ -14,23 +14,64 @@ type progressSource interface {
 	LastProgress() time.Time
 }
 
+type attachmentSource interface {
+	DetachedSince() time.Time
+}
+
 type probes struct {
 	stallThreshold time.Duration
+	detachGrace    time.Duration
 	now            func() time.Time
 
 	cacheSynced       atomic.Bool
 	consumersAttached atomic.Bool
 
-	mu      sync.RWMutex
-	sources map[string]progressSource
+	mu        sync.RWMutex
+	sources   map[string]progressSource
+	consumers map[string]attachmentSource
 }
 
-func newProbes(stallThreshold time.Duration) *probes {
+func newProbes(stallThreshold, detachGrace time.Duration) *probes {
 	return &probes{
 		stallThreshold: stallThreshold,
+		detachGrace:    detachGrace,
 		now:            time.Now,
 		sources:        make(map[string]progressSource),
+		consumers:      make(map[string]attachmentSource),
 	}
+}
+
+func (p *probes) watchConsumer(name string, source attachmentSource) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.consumers[name] = source
+}
+
+func (p *probes) detachedConsumers(longerThan func(time.Duration) bool) []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	now := p.now()
+	var failures []string
+	for _, name := range sortedKeys(p.consumers) {
+		since := p.consumers[name].DetachedSince()
+		if since.IsZero() {
+			continue
+		}
+		if detached := now.Sub(since); longerThan(detached) {
+			failures = append(failures, fmt.Sprintf("%s consumer has been detached for %s", name, detached.Truncate(time.Second)))
+		}
+	}
+	return failures
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func (p *probes) watch(name string, source progressSource) {
@@ -47,20 +88,15 @@ func (p *probes) readyz(w http.ResponseWriter, _ *http.Request) {
 	if !p.consumersAttached.Load() {
 		failures = append(failures, "JetStream consumers are not attached")
 	}
+	failures = append(failures, p.detachedConsumers(func(time.Duration) bool { return true })...)
 	respond(w, failures)
 }
 
 func (p *probes) healthz(w http.ResponseWriter, _ *http.Request) {
 	p.mu.RLock()
-	names := make([]string, 0, len(p.sources))
-	for name := range p.sources {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
 	now := p.now()
 	var failures []string
-	for _, name := range names {
+	for _, name := range sortedKeys(p.sources) {
 		last := p.sources[name].LastProgress()
 		if last.IsZero() {
 			continue
@@ -71,6 +107,7 @@ func (p *probes) healthz(w http.ResponseWriter, _ *http.Request) {
 	}
 	p.mu.RUnlock()
 
+	failures = append(failures, p.detachedConsumers(func(d time.Duration) bool { return d > p.detachGrace })...)
 	respond(w, failures)
 }
 
