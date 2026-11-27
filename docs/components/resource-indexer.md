@@ -374,15 +374,28 @@ cluster:
    `<indexName>/<uid>`; a part that contains anything other than letters,
    digits, `-` and `_` is written as `=` and its unpadded base64url encoding.
    `nats kv ls SEARCH_INDEXER_DOC_STATE` lists the keys.
-4. Scale the indexer back up.
-5. Re-index every affected `ResourceIndexPolicy`. A policy re-indexes when the
+4. Delete every document from each affected index, named in the policy's
+   `status.indexName`:
+   `curl -X DELETE "$MEILISEARCH_URL/indexes/<indexName>/documents" -H "Authorization: Bearer $MEILISEARCH_API_KEY"`.
+   Re-indexing only upserts, or removes from the index, objects that exist in
+   the restored cluster. A document for an object created after the backup
+   was taken has no object left to remove it, so without this step it stays in
+   the index for good. Searches return nothing from the index until step 6
+   finishes.
+5. Scale the indexer back up.
+6. Re-index every affected `ResourceIndexPolicy`. A policy re-indexes when the
    hash of its spec differs from `status.currentGeneration`, and the spec has
    no field that exists only to trigger it, so clear that status field:
    `kubectl patch resourceindexpolicy <name> --subresource=status --type=merge -p '{"status":{"currentGeneration":""}}'`.
    The controller then publishes a re-index event for every target resource at
-   its restored `resourceVersion`. Re-index events are deduplicated by
-   `reindex/<policyName>/<uid>` within the stream's duplicate window, so wait
-   for that window to pass before re-indexing the same policy twice.
+   its restored `resourceVersion`.
+
+The same purge, clear and re-index is needed if Meilisearch's task uids start
+again from a lower number, as with a new Meilisearch instance or one that
+lost its task store. Every task recorded in the bucket is then higher than any
+new task, so the record step takes each new task for an older one and
+returns without checking whether it overwrote a newer state. Repairs stop
+silently, and documents can again regress to older states.
 
 ### Duplicate Handling
 

@@ -78,7 +78,9 @@ type BatchConfig struct {
 	// ChunkSize is the most documents one Meilisearch call may carry. It must
 	// not exceed the search client's own chunk size, so that each call the
 	// batcher makes is enqueued as exactly one task and every document is
-	// recorded against the task that carries it. Zero leaves groups whole.
+	// recorded against the task that carries it. A call the client splits
+	// into several tasks fails its flush (see groupTaskUID). Zero leaves
+	// groups whole, which is only safe with a client that never splits.
 	ChunkSize int
 	// DocState is the store that orders writes to one document across every
 	// batcher and replica that shares it. Nil uses a store private to this
@@ -327,11 +329,12 @@ func (b *Batcher) Submit(msg *jetstream.Msg, upserts []UpsertOp, deletes []Delet
 
 	b.mu.Lock()
 
-	// An operation without a document id cannot be ordered or applied: every
-	// such operation for an index would share one document state record, and
-	// Meilisearch rejects the document anyway. It is dropped here. Its message
-	// is still tracked, so it is acked with the batch rather than redelivered
-	// forever.
+	// An operation without a document id cannot be ordered. The id is the
+	// document's top-level uid, so a resource whose own top-level uid is not
+	// a string, or a transform that sets one, leaves it empty, and every such
+	// document in an index would share one document state key and be ordered
+	// against unrelated objects. It is dropped here. Its message is still
+	// tracked, so it is acked with the batch rather than redelivered forever.
 	for _, op := range ops {
 		if op.docID == "" {
 			klog.Warningf("Skipping %s for index %s: it has no document id; a document's uid must be a non-empty string", opVerb(op), op.indexUID)
@@ -399,7 +402,7 @@ func (b *Batcher) setPending(op pendingOp) {
 
 // upsertDocID is the id of a document to upsert: its uid field, which is the
 // index's primary key. It is empty when the field is missing or not a string,
-// as when a policy's transform replaces it with another type.
+// as when the resource has a top-level uid of its own that is not a string.
 func upsertDocID(doc any) string {
 	m, ok := doc.(map[string]any)
 	if !ok {
@@ -789,7 +792,7 @@ func (b *Batcher) enqueueGroups(ctx context.Context, groups []*flushGroup, wg *s
 			tasks, err := g.enqueue(b.client)
 			<-b.sem
 			if err == nil {
-				g.task = groupTaskUID(g, tasks)
+				g.task, err = groupTaskUID(g, tasks)
 			}
 			enqueueWG.Done()
 
@@ -807,33 +810,37 @@ func (b *Batcher) enqueueGroups(ctx context.Context, groups []*flushGroup, wg *s
 	return b.wait(ctx, &enqueueWG)
 }
 
-// groupTaskUID is the uid to record against every document in g.
+// groupTaskUID is the uid to record against every document in g, which is
+// the uid of the one task the group was enqueued as.
 //
-// The batcher sizes groups to the client's chunk size, so a group is normally
-// enqueued as one task. Should the client still split it, each chunk is its
-// own task and a document lands with whichever chunk carried it, which the
-// returned tasks do not say. The highest uid is the safe one to record: it is
-// at or after every chunk, so a newer state recorded by another flush between
-// the chunks is seen as about to be overwritten and enqueued again. The worst
-// a document in an earlier chunk suffers is a redundant repair. The lowest uid
-// would instead leave that repair to a flush that may already have finished.
-func groupTaskUID(g *flushGroup, tasks []*meilisearch.Task) int64 {
-	var uid int64
-	n := 0
+// A group enqueued as several tasks cannot be recorded at all. Each document
+// lands with whichever chunk carried it, and the returned tasks do not say
+// which. No single uid is safe for all of them: the lowest makes a document in
+// a later chunk look older than a state another flush enqueued between the
+// chunks, so the repair is left to a flush that may have finished; the highest
+// makes a document in an earlier chunk look newer than such a state, so the
+// record reads as applied and the other flush skips the repair it owes. The
+// group is reported as an error instead, which fails the flush; its batch is
+// nacked and the redelivery claims and enqueues again.
+//
+// The batcher sizes groups to BatchConfig.ChunkSize, so this only happens when
+// that exceeds the search client's own chunk size.
+func groupTaskUID(g *flushGroup, tasks []*meilisearch.Task) (int64, error) {
+	var uids []int64
 	for _, t := range tasks {
-		if t == nil {
-			continue
-		}
-		n++
-		if t.TaskUID > uid {
-			uid = t.TaskUID
+		if t != nil {
+			uids = append(uids, t.TaskUID)
 		}
 	}
-	if n > 1 {
-		klog.V(2).Infof("Index %s: a group of %d documents was enqueued as %d tasks, recording them against the latest, task %d",
-			g.indexUID, len(g.claims), n, uid)
+	switch len(uids) {
+	case 0:
+		return 0, nil
+	case 1:
+		return uids[0], nil
+	default:
+		return 0, fmt.Errorf("index %s: a group of %d documents was enqueued as %d tasks %v, so the task carrying each document is unknown; the batcher's chunk size must not exceed the search client's chunk size",
+			g.indexUID, len(g.claims), len(uids), uids)
 	}
-	return uid
 }
 
 // waitOrDone waits for wg and reports whether it finished before ctx ended.
