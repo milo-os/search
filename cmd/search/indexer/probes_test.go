@@ -19,6 +19,10 @@ type fixedProgress struct{ at time.Time }
 
 func (f fixedProgress) LastProgress() time.Time { return f.at }
 
+type fixedAttachment struct{ since time.Time }
+
+func (f fixedAttachment) DetachedSince() time.Time { return f.since }
+
 func probe(t *testing.T, p *probes, path string) (int, string) {
 	t.Helper()
 	rec := httptest.NewRecorder()
@@ -27,7 +31,7 @@ func probe(t *testing.T, p *probes, path string) (int, string) {
 }
 
 func TestReadyz_PassesOnlyOnceCacheSyncedAndConsumersAttached(t *testing.T) {
-	p := newProbes(time.Minute)
+	p := newProbes(time.Minute, time.Minute)
 
 	code, body := probe(t, p, "/readyz")
 	if code != http.StatusServiceUnavailable || !strings.Contains(body, "cache") || !strings.Contains(body, "consumers") {
@@ -48,7 +52,7 @@ func TestReadyz_PassesOnlyOnceCacheSyncedAndConsumersAttached(t *testing.T) {
 
 func TestHealthz_FailsOnlyWhenABatcherStalls(t *testing.T) {
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
-	p := newProbes(30 * time.Minute)
+	p := newProbes(30*time.Minute, time.Minute)
 	p.now = func() time.Time { return now }
 
 	if code, body := probe(t, p, "/healthz"); code != http.StatusOK {
@@ -70,6 +74,49 @@ func TestHealthz_FailsOnlyWhenABatcherStalls(t *testing.T) {
 	code, body := probe(t, p, "/healthz")
 	if code != http.StatusServiceUnavailable || !strings.Contains(body, "audit") || strings.Contains(body, "reindex") {
 		t.Fatalf("audit batcher stalled: got %d %q, want 503 naming only the audit batcher", code, body)
+	}
+}
+
+func TestProbes_ConsumerStoppedAfterAttaching(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	p := newProbes(30*time.Minute, 5*time.Minute)
+	p.now = func() time.Time { return now }
+	p.cacheSynced.Store(true)
+	p.consumersAttached.Store(true)
+	p.watchConsumer("audit", fixedAttachment{})
+	p.watchConsumer("reindex", fixedAttachment{})
+
+	for _, path := range []string{"/readyz", "/healthz"} {
+		if code, body := probe(t, p, path); code != http.StatusOK {
+			t.Fatalf("%s with both consumers attached: got %d %q, want 200", path, code, body)
+		}
+	}
+
+	p.watchConsumer("audit", fixedAttachment{since: now})
+	code, body := probe(t, p, "/readyz")
+	if code != http.StatusServiceUnavailable || !strings.Contains(body, "audit consumer") || strings.Contains(body, "reindex") {
+		t.Fatalf("readyz the moment the audit consumer stops: got %d %q, want 503 naming only the audit consumer", code, body)
+	}
+	if code, body = probe(t, p, "/healthz"); code != http.StatusOK {
+		t.Fatalf("healthz the moment the audit consumer stops: got %d %q, want 200 during the grace period", code, body)
+	}
+
+	p.watchConsumer("audit", fixedAttachment{since: now.Add(-5 * time.Minute)})
+	if code, body = probe(t, p, "/healthz"); code != http.StatusOK {
+		t.Fatalf("healthz detached exactly the grace period: got %d %q, want 200", code, body)
+	}
+
+	p.watchConsumer("audit", fixedAttachment{since: now.Add(-6 * time.Minute)})
+	code, body = probe(t, p, "/healthz")
+	if code != http.StatusServiceUnavailable || !strings.Contains(body, "audit consumer has been detached for 6m0s") {
+		t.Fatalf("healthz past the grace period: got %d %q, want 503 naming the audit consumer", code, body)
+	}
+
+	p.watchConsumer("audit", fixedAttachment{})
+	for _, path := range []string{"/readyz", "/healthz"} {
+		if code, body := probe(t, p, path); code != http.StatusOK {
+			t.Fatalf("%s after the audit consumer re-attached: got %d %q, want 200", path, code, body)
+		}
 	}
 }
 

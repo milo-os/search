@@ -88,6 +88,7 @@ type ResourceIndexerOptions struct {
 	MetricsBindAddress     string
 	HealthProbeBindAddress string
 	LivenessStallThreshold time.Duration
+	ConsumerDetachGrace    time.Duration
 
 	// Multi-tenancy settings.
 	EnableMultiTenancy bool
@@ -117,6 +118,7 @@ func NewResourceIndexerOptions() *ResourceIndexerOptions {
 		MetricsBindAddress:          ":8080",
 		HealthProbeBindAddress:      ":8081",
 		LivenessStallThreshold:      30 * time.Minute,
+		ConsumerDetachGrace:         5 * time.Minute,
 		EnableMultiTenancy:          false,
 	}
 }
@@ -155,6 +157,7 @@ func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.MetricsBindAddress, "metrics-bind-address", o.MetricsBindAddress, "The address the metrics endpoint binds to. Set to an empty string to disable metrics serving.")
 	fs.StringVar(&o.HealthProbeBindAddress, "health-probe-bind-address", o.HealthProbeBindAddress, "The address the /readyz and /healthz probe endpoints bind to. Set to an empty string to disable them.")
 	fs.DurationVar(&o.LivenessStallThreshold, "liveness-stall-threshold", o.LivenessStallThreshold, "How long a batcher's flush loop may go without completing a turn before /healthz fails. The loop turns every flush-interval whether or not messages arrive, and blocks only while every flush slot is held, so this must exceed the longest a flush can legitimately take.")
+	fs.DurationVar(&o.ConsumerDetachGrace, "consumer-detach-grace", o.ConsumerDetachGrace, "How long a JetStream consumer may stay stopped after attaching, while the indexer retries attaching it, before /healthz fails. /readyz fails for as long as it is stopped.")
 
 	// Multi-tenancy
 	fs.BoolVar(&o.EnableMultiTenancy, "enable-multi-tenancy", o.EnableMultiTenancy, "Enable multi-tenant mode to index resources from all project control planes.")
@@ -244,6 +247,9 @@ func (o *ResourceIndexerOptions) Validate() error {
 	if floor := o.livenessStallFloor(); o.LivenessStallThreshold < floor {
 		return fmt.Errorf("liveness-stall-threshold %s must be at least %s, twice the longest a flush can hold the loop (batch-flush-timeout + flush-interval)", o.LivenessStallThreshold, floor)
 	}
+	if o.ConsumerDetachGrace < time.Minute {
+		return fmt.Errorf("consumer-detach-grace %s must be at least 1m, so a consumer has time to re-attach", o.ConsumerDetachGrace)
+	}
 
 	return nil
 }
@@ -288,7 +294,7 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 		return err
 	}
 
-	health := newProbes(o.LivenessStallThreshold)
+	health := newProbes(o.LivenessStallThreshold, o.ConsumerDetachGrace)
 	if err := serveHTTP(ctx, "health probe", o.HealthProbeBindAddress, health.mux()); err != nil {
 		return err
 	}
@@ -450,6 +456,8 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 	reindexIdx := indexer.NewReindexConsumer(reindexJSConsumer, reindexPolicyCache, reindexBatcher)
 
 	klog.Info("Starting audit indexer and re-index consumer...")
+	health.watchConsumer("audit", auditIdx)
+	health.watchConsumer("reindex", reindexIdx)
 
 	consumerCtx, cancelConsumers := context.WithCancel(ctx)
 	defer cancelConsumers()

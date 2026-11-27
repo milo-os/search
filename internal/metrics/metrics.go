@@ -60,6 +60,19 @@ var (
 		},
 	)
 
+	// IndexerConsumerStops counts JetStream consumers that stopped after
+	// attaching, such as when the consumer is deleted or its stream recreated.
+	IndexerConsumerStops = metrics.NewCounterVec(
+		&metrics.CounterOpts{
+			Namespace:      namespace,
+			Subsystem:      indexerSubsystem,
+			Name:           "consumer_stops_total",
+			Help:           "Total number of indexer JetStream consumers that stopped after attaching",
+			StabilityLevel: metrics.ALPHA,
+		},
+		[]string{"consumer"},
+	)
+
 	// IndexerFlushDuration tracks how long a flush takes, including the wait for
 	// the Meilisearch tasks it enqueued.
 	IndexerFlushDuration = metrics.NewHistogramVec(
@@ -136,6 +149,7 @@ func init() {
 		ResourceSearchQueryDuration,
 		IndexerPendingOperations,
 		IndexerInFlightFlushes,
+		IndexerConsumerStops,
 		IndexerFlushDuration,
 		IndexerFlushTotal,
 		IndexerFlushSlotWait,

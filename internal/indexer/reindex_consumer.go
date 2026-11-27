@@ -16,7 +16,7 @@ type ReindexConsumer struct {
 	consumer    jetstream.Consumer
 	policyCache *PolicyCache
 	batcher     *Batcher
-	attached    startSignal
+	attached    attachment
 }
 
 // NewReindexConsumer creates a new ReindexConsumer instance.
@@ -33,7 +33,7 @@ func NewReindexConsumer(consumer jetstream.Consumer, policyCache *PolicyCache, b
 func (r *ReindexConsumer) Start(ctx context.Context) error {
 	klog.Info("Starting ReindexConsumer...")
 
-	cons, err := r.consumer.Consume(func(msg jetstream.Msg) {
+	err := r.attached.run(ctx, "reindex", r.consumer, func(msg jetstream.Msg) {
 		var event ReindexEvent
 		if err := json.Unmarshal(msg.Data(), &event); err != nil {
 			klog.Errorf("ReindexConsumer: failed to unmarshal event: %v", err)
@@ -66,11 +66,6 @@ func (r *ReindexConsumer) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to start re-index consumer: %w", err)
 	}
-	defer cons.Stop()
-	r.attached.fire()
-
-	// Wait for context cancellation
-	<-ctx.Done()
 	klog.Info("Shutting down ReindexConsumer...")
 	return nil
 }
