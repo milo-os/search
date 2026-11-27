@@ -43,7 +43,10 @@ spec:
             path: /readyz
             port: health
           periodSeconds: 10
-          timeoutSeconds: 5
+          # Must exceed --nats-doc-state-timeout (5s by default), so the
+          # document state check can fail and report why before the kubelet
+          # gives up on the request.
+          timeoutSeconds: 10
           failureThreshold: 3
         livenessProbe:
           httpGet:

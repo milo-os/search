@@ -235,6 +235,34 @@ func TestOpenDocStateBucket(t *testing.T) {
 		}
 	})
 
+	t.Run("managed update keeps unmanaged settings", func(t *testing.T) {
+		tuned := tunedDocStateBucket()
+		tuned.cfg.Compression = true
+		tuned.cfg.Metadata = map[string]string{"owner": "platform"}
+		tuned.cfg.MaxValueSize = 1 << 20
+		tuned.cfg.Placement = &jetstream.Placement{Cluster: "nats-east"}
+		tuned.cfg.RePublish = &jetstream.RePublish{Source: ">", Destination: "repub.>"}
+		tuned.cfg.Description = "tuned by hand"
+		m := &fakeKVManager{bucket: tuned}
+
+		kv, err := openDocStateBucket(context.Background(), m, want, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m.updates != 1 {
+			t.Fatalf("%d updates, want 1", m.updates)
+		}
+		got := kv.(*configKV).cfg
+		if got.Replicas != want.Replicas || got.TTL != want.TTL || got.MaxBytes != want.MaxBytes || got.History != want.History || got.Storage != want.Storage {
+			t.Fatalf("managed settings not applied: got %+v, want those of %+v", got, want)
+		}
+		if !got.Compression || got.Metadata["owner"] != "platform" || got.MaxValueSize != 1<<20 ||
+			got.Placement == nil || got.Placement.Cluster != "nats-east" ||
+			got.RePublish == nil || got.RePublish.Destination != "repub.>" || got.Description != "tuned by hand" {
+			t.Fatalf("the update reset settings the indexer does not manage: %+v", got)
+		}
+	})
+
 	t.Run("refused update keeps the existing bucket", func(t *testing.T) {
 		tuned := tunedDocStateBucket()
 		m := &fakeKVManager{bucket: tuned, updateErr: errors.New("insufficient resources")}
@@ -301,4 +329,25 @@ func TestDocStateBucketConfig_Defaults(t *testing.T) {
 	if cfg.Bucket != "SEARCH_INDEXER_DOC_STATE" || cfg.TTL != docStateTTLDefault || cfg.History != 1 || cfg.Storage != jetstream.FileStorage {
 		t.Errorf("unexpected bucket defaults %+v", cfg)
 	}
+}
+
+// TestDeploymentReadinessProbe_OutlastsDocStateCheck keeps the kubelet from
+// giving up on /readyz at the same moment as the document state check, which
+// would hide the reason the replica is unready.
+func TestDeploymentReadinessProbe_OutlastsDocStateCheck(t *testing.T) {
+	m := readDeploymentManifest(t)
+	for _, c := range m.Spec.Template.Spec.Containers {
+		if c.Name != "indexer" {
+			continue
+		}
+		if c.ReadinessProbe == nil {
+			t.Fatal("the indexer container defines no readinessProbe")
+		}
+		probeTimeout := time.Duration(c.ReadinessProbe.TimeoutSeconds) * time.Second
+		if docState := NewResourceIndexerOptions().NatsDocStateTimeout; probeTimeout <= docState {
+			t.Fatalf("readinessProbe timeoutSeconds is %s, which must exceed the default --nats-doc-state-timeout of %s", probeTimeout, docState)
+		}
+		return
+	}
+	t.Fatal("no indexer container in the deployment manifest")
 }

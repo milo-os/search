@@ -280,16 +280,22 @@ reports it in readiness:
 - `/readyz` asks the bucket for its status on every probe, with the same
   timeout, and fails with `document state bucket <name> unavailable: <cause>`
   while it cannot. It recovers by itself once the bucket answers again, whether
-  or not the replica has anything to index.
+  or not the replica has anything to index. The readiness probe's
+  `timeoutSeconds` must exceed `--nats-doc-state-timeout`; otherwise the
+  kubelet gives up at the same moment as the check and never sees that
+  message. The base deployment uses 10 seconds against the 5 second default.
 - The same status call sets `search_indexer_doc_state_bucket_bytes` to the
-  bucket's size.
+  bucket's size. Only `/readyz` refreshes the gauge, so it stays unset when
+  `--health-probe-bind-address` is empty. Every replica reports the size of
+  the same shared bucket, so alert on `max()` across replicas, not `sum()`.
 
 The indexer opens the bucket on start and creates it if it is missing. When the
 bucket already exists, the indexer compares its replicas, TTL, byte limit,
 history and storage with the flags below and logs any difference. With
-`--nats-doc-state-manage-bucket=true`, the default, it then updates the bucket
-to match the flags; if NATS refuses the update, the indexer logs the error and
-keeps using the bucket as it is. With `--nats-doc-state-manage-bucket=false`,
+`--nats-doc-state-manage-bucket=true`, the default, it then updates those five
+settings to match the flags and keeps every other setting of the bucket, such
+as compression, metadata or placement, as it is. If NATS refuses the update,
+the indexer logs the error and keeps using the bucket unchanged. With `--nats-doc-state-manage-bucket=false`,
 the indexer never changes an existing bucket, so settings an operator has
 tuned by hand survive restarts.
 
@@ -307,9 +313,9 @@ and staging should set `--nats-doc-state-replicas=3`.
 | `--nats-doc-state-bucket` | `SEARCH_INDEXER_DOC_STATE` | Bucket name; every replica must share it |
 | `--nats-doc-state-replicas` | `1` | JetStream replicas for the bucket; use `3` in production and staging |
 | `--nats-doc-state-max-bytes` | `10737418240` (10 GiB) | Byte limit of the bucket; must be greater than 0 |
-| `--nats-doc-state-manage-bucket` | `true` | Whether to update an existing bucket to match these flags |
+| `--nats-doc-state-manage-bucket` | `true` | Whether to update an existing bucket's replicas, TTL, byte limit, history and storage to match these flags; nothing else is changed |
 | `--doc-state-ttl` | `168h` | How long a record outlives its last write; must cover the audit stream's retention |
-| `--nats-doc-state-timeout` | `5s` | Limit on each bucket request and on the readiness check |
+| `--nats-doc-state-timeout` | `5s` | Limit on each bucket request and on the readiness check; keep it under the readiness probe's `timeoutSeconds` |
 
 Within one buffer, an operation older than the one already buffered for its
 document is dropped rather than replacing it.

@@ -23,12 +23,14 @@ type keyValueManager interface {
 // openDocStateBucket opens the document state bucket, creating it with cfg
 // if it does not exist.
 //
-// An existing bucket is compared with cfg, and any difference is logged. It
-// is only brought in line with cfg when manage is set: an operator may have
-// tuned the bucket by hand, raising its replicas or byte limit for example,
-// and re-applying the flag values on every start would quietly undo that.
-// Should the update be refused, the bucket is used as it is, since a bucket
-// whose settings differ still orders writes correctly.
+// An existing bucket is compared with cfg on the settings the indexer
+// manages, and any difference is logged. It is only brought in line with cfg
+// when manage is set: an operator may have tuned the bucket by hand, raising
+// its replicas or byte limit for example, and re-applying the flag values on
+// every start would quietly undo that. Even then only the managed settings
+// change; see managedDocStateBucketConfig. Should the update be refused, the
+// bucket is used as it is, since a bucket whose settings differ still orders
+// writes correctly.
 func openDocStateBucket(ctx context.Context, js keyValueManager, cfg jetstream.KeyValueConfig, manage bool) (jetstream.KeyValue, error) {
 	kv, err := js.KeyValue(ctx, cfg.Bucket)
 	if errors.Is(err, jetstream.ErrBucketNotFound) {
@@ -54,7 +56,8 @@ func openDocStateBucket(ctx context.Context, js keyValueManager, cfg jetstream.K
 	if err != nil {
 		return nil, fmt.Errorf("failed to read the status of document state bucket %s: %w", cfg.Bucket, err)
 	}
-	drift := docStateBucketDrift(status.Config(), cfg)
+	current := status.Config()
+	drift := docStateBucketDrift(current, cfg)
 	if len(drift) == 0 {
 		return kv, nil
 	}
@@ -66,12 +69,27 @@ func openDocStateBucket(ctx context.Context, js keyValueManager, cfg jetstream.K
 	}
 
 	klog.Infof("Document state bucket %s differs from the configured settings (%s); updating it", cfg.Bucket, strings.Join(drift, ", "))
-	updated, err := js.UpdateKeyValue(ctx, cfg)
+	updated, err := js.UpdateKeyValue(ctx, managedDocStateBucketConfig(current, cfg))
 	if err != nil {
 		klog.Errorf("Failed to update document state bucket %s, using it with its current settings: %v", cfg.Bucket, err)
 		return kv, nil
 	}
 	return updated, nil
+}
+
+// managedDocStateBucketConfig is the bucket's current configuration with only
+// the settings the indexer manages taken from want. An update replaces the
+// whole configuration, so sending want as it is would also reset everything
+// the indexer does not compare, such as compression, metadata, placement, the
+// value size limit or republishing, which an operator may have set.
+func managedDocStateBucketConfig(current, want jetstream.KeyValueConfig) jetstream.KeyValueConfig {
+	cfg := current
+	cfg.Replicas = want.Replicas
+	cfg.TTL = want.TTL
+	cfg.MaxBytes = want.MaxBytes
+	cfg.History = want.History
+	cfg.Storage = want.Storage
+	return cfg
 }
 
 // docStateBucketDrift describes each setting the indexer manages where the
