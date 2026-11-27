@@ -18,8 +18,16 @@ import (
 // its resourceVersion, so a test can read which write landed last. onAdd, when
 // set, runs before an AddDocuments call is given its task uid, which lets a
 // test hold one flush between claiming and enqueueing.
+//
+// chunkSize, when set, splits each call into chunks of at most that many
+// documents and gives every chunk its own task, as the SDK client does with
+// --meilisearch-chunk-size. onTask runs before each chunk is given its task
+// uid, so a test can slip another replica's task between two chunks of one
+// call.
 type rvSearchClient struct {
-	onAdd func(indexUID string, docs []any)
+	onAdd     func(indexUID string, docs []any)
+	onTask    func(indexUID string, docs []any)
+	chunkSize int
 
 	mu       sync.Mutex
 	nextTask int64
@@ -36,6 +44,18 @@ func (c *rvSearchClient) AddDocumentsAsync(indexUID string, documents []any) ([]
 		c.onAdd(indexUID, documents)
 	}
 
+	var tasks []*meilisearch.Task
+	for _, chunk := range c.chunks(len(documents)) {
+		docs := documents[chunk[0]:chunk[1]]
+		if c.onTask != nil {
+			c.onTask(indexUID, docs)
+		}
+		tasks = append(tasks, c.add(indexUID, docs))
+	}
+	return tasks, nil
+}
+
+func (c *rvSearchClient) add(indexUID string, documents []any) *meilisearch.Task {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -49,10 +69,18 @@ func (c *rvSearchClient) AddDocumentsAsync(indexUID string, documents []any) ([]
 		c.log = append(c.log, fmt.Sprintf("add %s/%s@%d", indexUID, uid, resourceVersionOf(doc)))
 	}
 	c.nextTask++
-	return []*meilisearch.Task{{TaskUID: c.nextTask, IndexUID: indexUID}}, nil
+	return &meilisearch.Task{TaskUID: c.nextTask, IndexUID: indexUID}
 }
 
 func (c *rvSearchClient) DeleteDocumentsAsync(indexUID string, documentIDs []string) ([]*meilisearch.Task, error) {
+	var tasks []*meilisearch.Task
+	for _, chunk := range c.chunks(len(documentIDs)) {
+		tasks = append(tasks, c.remove(indexUID, documentIDs[chunk[0]:chunk[1]]))
+	}
+	return tasks, nil
+}
+
+func (c *rvSearchClient) remove(indexUID string, documentIDs []string) *meilisearch.Task {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -61,7 +89,21 @@ func (c *rvSearchClient) DeleteDocumentsAsync(indexUID string, documentIDs []str
 		c.log = append(c.log, "delete "+indexUID+"/"+id)
 	}
 	c.nextTask++
-	return []*meilisearch.Task{{TaskUID: c.nextTask, IndexUID: indexUID}}, nil
+	return &meilisearch.Task{TaskUID: c.nextTask, IndexUID: indexUID}
+}
+
+// chunks splits n items into [start, end) ranges of at most chunkSize, or one
+// range when chunkSize is unset.
+func (c *rvSearchClient) chunks(n int) [][2]int {
+	size := c.chunkSize
+	if size <= 0 {
+		size = n
+	}
+	var out [][2]int
+	for start := 0; start < n; start += size {
+		out = append(out, [2]int{start, min(start+size, n)})
+	}
+	return out
 }
 
 func (c *rvSearchClient) WaitForTasks(tasks []*meilisearch.Task) (*meilisearch.Task, error) {

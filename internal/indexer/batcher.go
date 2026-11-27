@@ -75,6 +75,11 @@ type BatchConfig struct {
 	// slow Meilisearch cannot hold every slot indefinitely. Zero selects
 	// DefaultFlushTimeout.
 	FlushTimeout time.Duration
+	// ChunkSize is the most documents one Meilisearch call may carry. It must
+	// not exceed the search client's own chunk size, so that each call the
+	// batcher makes is enqueued as exactly one task and every document is
+	// recorded against the task that carries it. Zero leaves groups whole.
+	ChunkSize int
 	// DocState is the store that orders writes to one document across every
 	// batcher and replica that shares it. Nil uses a store private to this
 	// process, which is only suitable for tests and single-replica setups.
@@ -680,7 +685,7 @@ func (b *Batcher) performFlush(bt batch) {
 	var groups []*flushGroup
 	enqueued := false
 	if err == nil {
-		groups = groupClaims(claims)
+		groups = groupClaims(claims, b.batchConfig.ChunkSize)
 		if enqueued = b.enqueueGroups(ctx, groups, &wg, &errs); !enqueued {
 			errs.add(fmt.Errorf("flush exceeded %s while enqueueing", b.batchConfig.FlushTimeout))
 		}
@@ -704,7 +709,7 @@ func (b *Batcher) performFlush(bt batch) {
 		}
 		searchmetrics.IndexerOrderRepairs.Add(float64(len(repairs)))
 		klog.Infof("Re-enqueueing %d documents whose newer state was enqueued before this batch's", len(repairs))
-		groups = groupClaims(repairs)
+		groups = groupClaims(repairs, b.batchConfig.ChunkSize)
 		if enqueued = b.enqueueGroups(ctx, groups, &wg, &errs); !enqueued {
 			errs.add(fmt.Errorf("flush exceeded %s while re-enqueueing", b.batchConfig.FlushTimeout))
 		}
@@ -737,9 +742,9 @@ func (b *Batcher) performFlush(bt batch) {
 // enqueueGroups sends each group to Meilisearch and reports whether every
 // group was enqueued, or gave up, before ctx ended; when it returns true the
 // task uids are recorded on the groups. Waiting for the tasks to finish
-// continues in the background under wg. The keys in a group are unique, so
-// the order of its tasks relative to each other does not matter; only the
-// enqueue barrier against the next batch does.
+// continues in the background under wg. No key appears in two groups of one
+// round, so the order of the groups' tasks relative to each other does not
+// matter; only the enqueue barrier against the next batch does.
 func (b *Batcher) enqueueGroups(ctx context.Context, groups []*flushGroup, wg *sync.WaitGroup, errs *flushErrors) bool {
 	var enqueueWG sync.WaitGroup
 	for _, g := range groups {
@@ -759,7 +764,7 @@ func (b *Batcher) enqueueGroups(ctx context.Context, groups []*flushGroup, wg *s
 			tasks, err := g.enqueue(b.client)
 			<-b.sem
 			if err == nil {
-				g.task = firstTaskUID(tasks)
+				g.task = groupTaskUID(g, tasks)
 			}
 			enqueueWG.Done()
 
@@ -777,19 +782,31 @@ func (b *Batcher) enqueueGroups(ctx context.Context, groups []*flushGroup, wg *s
 	return b.wait(ctx, &enqueueWG)
 }
 
-// firstTaskUID is the uid of the earliest task among those a group was
-// enqueued as. A group spanning several chunks applies across a range of
-// uids; claiming the lowest is conservative, since any task later than it is
-// treated as able to land after the group.
-func firstTaskUID(tasks []*meilisearch.Task) int64 {
+// groupTaskUID is the uid to record against every document in g.
+//
+// The batcher sizes groups to the client's chunk size, so a group is normally
+// enqueued as one task. Should the client still split it, each chunk is its
+// own task and a document lands with whichever chunk carried it, which the
+// returned tasks do not say. The highest uid is the safe one to record: it is
+// at or after every chunk, so a newer state recorded by another flush between
+// the chunks is seen as about to be overwritten and enqueued again. The worst
+// a document in an earlier chunk suffers is a redundant repair. The lowest uid
+// would instead leave that repair to a flush that may already have finished.
+func groupTaskUID(g *flushGroup, tasks []*meilisearch.Task) int64 {
 	var uid int64
+	n := 0
 	for _, t := range tasks {
 		if t == nil {
 			continue
 		}
-		if uid == 0 || t.TaskUID < uid {
+		n++
+		if t.TaskUID > uid {
 			uid = t.TaskUID
 		}
+	}
+	if n > 1 {
+		klog.V(2).Infof("Index %s: a group of %d documents was enqueued as %d tasks, recording them against the latest, task %d",
+			g.indexUID, len(g.claims), n, uid)
 	}
 	return uid
 }

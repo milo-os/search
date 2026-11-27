@@ -57,16 +57,16 @@ type docClaim struct {
 	doc      any
 }
 
-// flushGroup is one Meilisearch task's worth of claims: every claim of one
-// index that is either added or removed.
+// flushGroup is one Meilisearch task's worth of claims: claims of one index
+// that are all added or all removed, at most one chunk of them.
 type flushGroup struct {
 	indexUID string
 	remove   bool
 	claims   []*docClaim
 
-	// task is the earliest uid of the tasks the group was enqueued as, set
-	// once the enqueue returns. Zero means the enqueue failed or the client
-	// reported no tasks.
+	// task is the uid of the task that carries the group, set once the
+	// enqueue returns (see groupTaskUID). Zero means the enqueue failed or the
+	// client reported no tasks.
 	task int64
 }
 
@@ -86,8 +86,10 @@ func (g *flushGroup) enqueue(client SearchClient) ([]*meilisearch.Task, error) {
 }
 
 // groupClaims splits claims by index and by whether the document is being
-// added or removed.
-func groupClaims(claims []*docClaim) []*flushGroup {
+// added or removed, and each of those into groups of at most chunkSize claims
+// when chunkSize is positive. Each group is one client call, and so, with
+// chunkSize no larger than the client's own, one Meilisearch task.
+func groupClaims(claims []*docClaim, chunkSize int) []*flushGroup {
 	byKey := make(map[string]*flushGroup)
 	var groups []*flushGroup
 	for _, c := range claims {
@@ -100,7 +102,7 @@ func groupClaims(claims []*docClaim) []*flushGroup {
 			key = c.indexUID + "/remove"
 		}
 		g, ok := byKey[key]
-		if !ok {
+		if !ok || (chunkSize > 0 && len(g.claims) >= chunkSize) {
 			g = &flushGroup{indexUID: c.indexUID, remove: remove}
 			byKey[key] = g
 			groups = append(groups, g)

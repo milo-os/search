@@ -503,6 +503,7 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 		MaxInFlightFlushes:   o.BatchMaxInFlightFlushes,
 		AckProgressInterval:  o.BatchAckProgressInterval,
 		FlushTimeout:         o.BatchFlushTimeout,
+		ChunkSize:            o.MeilisearchChunkSize,
 		DocState:             indexer.NewNATSDocStateStore(docStateKV, o.NatsDocStateTimeout),
 	}
 	health.checkDocState(docStateBucketCheck(docStateKV, o.NatsDocStateTimeout))
