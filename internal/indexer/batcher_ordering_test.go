@@ -23,10 +23,13 @@ import (
 // documents and gives every chunk its own task, as the SDK client does with
 // --meilisearch-chunk-size. onTask runs before each chunk is given its task
 // uid, so a test can slip another replica's task between two chunks of one
-// call.
+// call. afterTask runs once a chunk has its task uid, before the call
+// returns, so a test can run another flush between one flush's enqueue and its
+// record step.
 type rvSearchClient struct {
 	onAdd     func(indexUID string, docs []any)
 	onTask    func(indexUID string, docs []any)
+	afterTask func(indexUID string, docs []any, task int64)
 	chunkSize int
 
 	mu       sync.Mutex
@@ -50,7 +53,11 @@ func (c *rvSearchClient) AddDocumentsAsync(indexUID string, documents []any) ([]
 		if c.onTask != nil {
 			c.onTask(indexUID, docs)
 		}
-		tasks = append(tasks, c.add(indexUID, docs))
+		task := c.add(indexUID, docs)
+		if c.afterTask != nil {
+			c.afterTask(indexUID, docs, task.TaskUID)
+		}
+		tasks = append(tasks, task)
 	}
 	return tasks, nil
 }
