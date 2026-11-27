@@ -342,6 +342,48 @@ was previously indexed, and Meilisearch delete operations are idempotent.
 [meilisearch-add-documents]: https://www.meilisearch.com/docs/reference/api/documents#add-or-replace-documents
 [meilisearch-delete-documents]: https://www.meilisearch.com/docs/reference/api/documents#delete-documents-by-batch
 
+### After an etcd restore
+
+Restoring etcd from a backup winds every `resourceVersion` back, but the
+document state bucket still holds the newer versions it recorded before the
+restore. The bucket then works against the restored cluster:
+
+- Every write to an object the bucket already knows carries a lower
+  `resourceVersion` than its record, so it is treated as stale and the
+  recorded pre-restore state is applied instead. The document stays frozen at
+  that state until the record expires.
+- A record only expires `--doc-state-ttl` after its last write, and the record
+  step rewrites it on every flush that touches the document. An object that
+  keeps changing therefore never expires and stays frozen indefinitely.
+- A tombstone wins regardless of `resourceVersion`, so an object deleted
+  before the restore but brought back by it stays out of the index.
+
+To recover, clear the bucket and rebuild the indexes from the restored
+cluster:
+
+1. Let the indexer drain the audit stream's backlog, or purge it. Audit events
+   from before the restore carry the old, higher `resourceVersion`s, and any
+   that flush after the bucket is cleared record them again.
+2. Stop indexing so no flush rewrites a record while it is being cleared:
+   `kubectl -n search-system scale deployment resource-indexer --replicas=0`.
+3. Clear the bucket. Either purge it whole with
+   `nats stream purge KV_SEARCH_INDEXER_DOC_STATE`, or delete it with
+   `nats kv del SEARCH_INDEXER_DOC_STATE` and let the indexer recreate it on
+   start. To clear only some documents, run
+   `nats kv purge SEARCH_INDEXER_DOC_STATE <key>` for each. A key is
+   `<indexName>/<uid>`; a part that contains anything other than letters,
+   digits, `-` and `_` is written as `=` and its unpadded base64url encoding.
+   `nats kv ls SEARCH_INDEXER_DOC_STATE` lists the keys.
+4. Scale the indexer back up.
+5. Re-index every affected `ResourceIndexPolicy`. A policy re-indexes when the
+   hash of its spec differs from `status.currentGeneration`, and the spec has
+   no field that exists only to trigger it, so clear that status field:
+   `kubectl patch resourceindexpolicy <name> --subresource=status --type=merge -p '{"status":{"currentGeneration":""}}'`.
+   The controller then publishes a re-index event for every target resource at
+   its restored `resourceVersion`. Re-index events are deduplicated by
+   `reindex/<policyName>/<uid>` within the stream's duplicate window, so wait
+   for that window to pass before re-indexing the same policy twice.
+
 ### Duplicate Handling
 
 At-least-once delivery means duplicates are possible (e.g., after a failure
