@@ -29,6 +29,12 @@ import (
 // process, so it is duplicated here to bound the indexing timeouts.
 const consumerAckWait = 300 * time.Second
 
+// docStateMaxBytesDefault is the byte limit the document state bucket is
+// created with. A KV bucket discards new writes once it is full, which fails
+// every flush, so the limit is generous: a record holds a copy of its
+// document, and there is one per indexed document per index.
+const docStateMaxBytesDefault int64 = 10 << 30
+
 // docStateTTLDefault mirrors the audit stream's maxAge in
 // config/components/nats-streams/nats-streams.yaml. A record must outlive
 // every event that could still be redelivered for its document, or a late
@@ -75,10 +81,12 @@ type ResourceIndexerOptions struct {
 
 	// Document state bucket, shared by every replica so that writes to one
 	// document stay in resourceVersion order whichever replica flushes last.
-	NatsDocStateBucket   string
-	NatsDocStateReplicas int
-	NatsDocStateTimeout  time.Duration
-	DocStateTTL          time.Duration
+	NatsDocStateBucket       string
+	NatsDocStateReplicas     int
+	NatsDocStateMaxBytes     int64
+	NatsDocStateManageBucket bool
+	NatsDocStateTimeout      time.Duration
+	DocStateTTL              time.Duration
 
 	// Meilisearch connection and timeout settings
 	MeilisearchTaskWaitTimeout  time.Duration
@@ -116,6 +124,8 @@ func NewResourceIndexerOptions() *ResourceIndexerOptions {
 		NatsReindexConsumerName:     "search-reindexer",
 		NatsDocStateBucket:          "SEARCH_INDEXER_DOC_STATE",
 		NatsDocStateReplicas:        1,
+		NatsDocStateMaxBytes:        docStateMaxBytesDefault,
+		NatsDocStateManageBucket:    true,
 		NatsDocStateTimeout:         5 * time.Second,
 		DocStateTTL:                 docStateTTLDefault,
 		MeilisearchTaskWaitTimeout:  10 * time.Minute,
@@ -147,7 +157,9 @@ func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.NatsReindexStream, "nats-reindex-stream", o.NatsReindexStream, "The JetStream stream name for re-index messages.")
 	fs.StringVar(&o.NatsReindexConsumerName, "nats-reindex-consumer-name", o.NatsReindexConsumerName, "The name of the re-index JetStream consumer (must match the manifest).")
 	fs.StringVar(&o.NatsDocStateBucket, "nats-doc-state-bucket", o.NatsDocStateBucket, "The JetStream KV bucket that records the newest indexed state of every document. It is created if missing and must be shared by all replicas.")
-	fs.IntVar(&o.NatsDocStateReplicas, "nats-doc-state-replicas", o.NatsDocStateReplicas, "The number of JetStream replicas for the document state bucket.")
+	fs.IntVar(&o.NatsDocStateReplicas, "nats-doc-state-replicas", o.NatsDocStateReplicas, "The number of JetStream replicas for the document state bucket. Production and staging should use 3.")
+	fs.Int64Var(&o.NatsDocStateMaxBytes, "nats-doc-state-max-bytes", o.NatsDocStateMaxBytes, "The byte limit of the document state bucket. A full KV bucket discards new writes, which fails every flush and nacks its batch, so indexing stops until the bucket is grown: size it generously and alert on search_indexer_doc_state_bucket_bytes.")
+	fs.BoolVar(&o.NatsDocStateManageBucket, "nats-doc-state-manage-bucket", o.NatsDocStateManageBucket, "Whether to apply the configured replicas, TTL, byte limit, history and storage to an existing document state bucket. When false, an existing bucket is used as it is and differences are only logged; a missing bucket is created either way.")
 	fs.DurationVar(&o.NatsDocStateTimeout, "nats-doc-state-timeout", o.NatsDocStateTimeout, "How long one request to the document state bucket may take before it fails. A failed request nacks its batch for redelivery, and the readiness check on the bucket uses the same limit.")
 	fs.DurationVar(&o.DocStateTTL, "doc-state-ttl", o.DocStateTTL, "How long a document's recorded state is kept after its last write. Must cover the audit stream's retention so no redelivered event can outlive the record that orders it.")
 	fs.StringVar(&o.NatsTLSCA, "nats-tls-ca", o.NatsTLSCA, "The path to the NATS TLS CA file.")
@@ -203,6 +215,9 @@ func (o *ResourceIndexerOptions) Validate() error {
 	}
 	if o.NatsDocStateReplicas < 1 {
 		return fmt.Errorf("nats-doc-state-replicas must be at least 1")
+	}
+	if o.NatsDocStateMaxBytes <= 0 {
+		return fmt.Errorf("nats-doc-state-max-bytes must be greater than 0")
 	}
 	if o.NatsDocStateTimeout <= 0 {
 		return fmt.Errorf("nats-doc-state-timeout must be greater than 0")
@@ -279,6 +294,20 @@ func (o *ResourceIndexerOptions) Validate() error {
 	}
 
 	return nil
+}
+
+// docStateBucketConfig is the configuration the document state bucket is
+// created with, and held to when the indexer manages it.
+func (o *ResourceIndexerOptions) docStateBucketConfig() jetstream.KeyValueConfig {
+	return jetstream.KeyValueConfig{
+		Bucket:      o.NatsDocStateBucket,
+		Description: "Newest indexed state per document, shared by search indexer replicas to keep writes in resourceVersion order",
+		History:     1,
+		TTL:         o.DocStateTTL,
+		MaxBytes:    o.NatsDocStateMaxBytes,
+		Storage:     jetstream.FileStorage,
+		Replicas:    o.NatsDocStateReplicas,
+	}
 }
 
 func (o *ResourceIndexerOptions) livenessStallFloor() time.Duration {
@@ -462,16 +491,9 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 	// The bucket is owned by the indexer rather than declared alongside the
 	// consumers because every replica, and the re-index path, must agree on
 	// the one arbiter for a document's newest state.
-	docStateKV, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
-		Bucket:      o.NatsDocStateBucket,
-		Description: "Newest indexed state per document, shared by search indexer replicas to keep writes in resourceVersion order",
-		History:     1,
-		TTL:         o.DocStateTTL,
-		Storage:     jetstream.FileStorage,
-		Replicas:    o.NatsDocStateReplicas,
-	})
+	docStateKV, err := openDocStateBucket(ctx, js, o.docStateBucketConfig(), o.NatsDocStateManageBucket)
 	if err != nil {
-		return fmt.Errorf("failed to open document state bucket %s: %w", o.NatsDocStateBucket, err)
+		return err
 	}
 
 	batchConfig := indexer.BatchConfig{

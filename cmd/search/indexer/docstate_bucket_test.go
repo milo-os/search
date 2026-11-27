@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -18,9 +19,11 @@ import (
 type fakeBucketStatus struct {
 	jetstream.KeyValueStatus
 	bytes uint64
+	cfg   jetstream.KeyValueConfig
 }
 
-func (s fakeBucketStatus) Bytes() uint64 { return s.bytes }
+func (s fakeBucketStatus) Bytes() uint64                    { return s.bytes }
+func (s fakeBucketStatus) Config() jetstream.KeyValueConfig { return s.cfg }
 
 // statusKV answers Status as told: with an error, by hanging until the
 // context ends, or with a status.
@@ -98,6 +101,8 @@ func TestResourceIndexerOptions_Validate_DocState(t *testing.T) {
 		{"defaults", func(*ResourceIndexerOptions) {}, false},
 		{"zero request timeout", func(o *ResourceIndexerOptions) { o.NatsDocStateTimeout = 0 }, true},
 		{"negative request timeout", func(o *ResourceIndexerOptions) { o.NatsDocStateTimeout = -time.Second }, true},
+		{"zero max bytes", func(o *ResourceIndexerOptions) { o.NatsDocStateMaxBytes = 0 }, true},
+		{"unlimited max bytes", func(o *ResourceIndexerOptions) { o.NatsDocStateMaxBytes = -1 }, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			o := NewResourceIndexerOptions()
@@ -106,5 +111,194 @@ func TestResourceIndexerOptions_Validate_DocState(t *testing.T) {
 				t.Fatalf("Validate() = %v, want error: %t", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// configKV is a bucket that reports cfg as its configuration.
+type configKV struct {
+	jetstream.KeyValue
+	cfg jetstream.KeyValueConfig
+}
+
+func (k *configKV) Status(context.Context) (jetstream.KeyValueStatus, error) {
+	return fakeBucketStatus{cfg: k.cfg}, nil
+}
+
+// fakeKVManager holds at most one bucket. When createErr is set, a create
+// fails with it and leaves raced as the bucket, as if another replica had
+// created raced first.
+type fakeKVManager struct {
+	bucket    *configKV
+	createErr error
+	raced     *configKV
+	updateErr error
+
+	creates int
+	updates int
+}
+
+func (m *fakeKVManager) KeyValue(_ context.Context, name string) (jetstream.KeyValue, error) {
+	if m.bucket == nil {
+		return nil, jetstream.ErrBucketNotFound
+	}
+	return m.bucket, nil
+}
+
+func (m *fakeKVManager) CreateKeyValue(_ context.Context, cfg jetstream.KeyValueConfig) (jetstream.KeyValue, error) {
+	m.creates++
+	if m.createErr != nil {
+		m.bucket = m.raced
+		return nil, m.createErr
+	}
+	m.bucket = &configKV{cfg: cfg}
+	return m.bucket, nil
+}
+
+func (m *fakeKVManager) UpdateKeyValue(_ context.Context, cfg jetstream.KeyValueConfig) (jetstream.KeyValue, error) {
+	m.updates++
+	if m.updateErr != nil {
+		return nil, m.updateErr
+	}
+	m.bucket = &configKV{cfg: cfg}
+	return m.bucket, nil
+}
+
+func wantedDocStateBucket() jetstream.KeyValueConfig {
+	o := NewResourceIndexerOptions()
+	o.NatsDocStateReplicas = 3
+	return o.docStateBucketConfig()
+}
+
+// tunedDocStateBucket is a bucket an operator has changed by hand.
+func tunedDocStateBucket() *configKV {
+	cfg := wantedDocStateBucket()
+	cfg.Replicas = 5
+	cfg.MaxBytes = 50 << 30
+	return &configKV{cfg: cfg}
+}
+
+func TestOpenDocStateBucket(t *testing.T) {
+	want := wantedDocStateBucket()
+
+	t.Run("missing bucket is created", func(t *testing.T) {
+		for _, manage := range []bool{true, false} {
+			m := &fakeKVManager{}
+			kv, err := openDocStateBucket(context.Background(), m, want, manage)
+			if err != nil {
+				t.Fatalf("manage=%t: %v", manage, err)
+			}
+			if m.creates != 1 || m.updates != 0 {
+				t.Fatalf("manage=%t: %d creates and %d updates, want 1 and 0", manage, m.creates, m.updates)
+			}
+			if got := kv.(*configKV).cfg; got.MaxBytes != want.MaxBytes || got.Replicas != 3 {
+				t.Fatalf("manage=%t: created with %+v, want %+v", manage, got, want)
+			}
+		}
+	})
+
+	t.Run("matching bucket is opened as is", func(t *testing.T) {
+		m := &fakeKVManager{bucket: &configKV{cfg: want}}
+		if _, err := openDocStateBucket(context.Background(), m, want, true); err != nil {
+			t.Fatal(err)
+		}
+		if m.creates != 0 || m.updates != 0 {
+			t.Fatalf("%d creates and %d updates, want none", m.creates, m.updates)
+		}
+	})
+
+	t.Run("drifted bucket is left alone when unmanaged", func(t *testing.T) {
+		tuned := tunedDocStateBucket()
+		m := &fakeKVManager{bucket: tuned}
+		kv, err := openDocStateBucket(context.Background(), m, want, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m.updates != 0 || m.creates != 0 {
+			t.Fatalf("%d creates and %d updates, want none", m.creates, m.updates)
+		}
+		if kv != tuned {
+			t.Fatal("the existing bucket must be used as it is")
+		}
+	})
+
+	t.Run("drifted bucket is updated when managed", func(t *testing.T) {
+		m := &fakeKVManager{bucket: tunedDocStateBucket()}
+		kv, err := openDocStateBucket(context.Background(), m, want, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m.updates != 1 {
+			t.Fatalf("%d updates, want 1", m.updates)
+		}
+		if got := kv.(*configKV).cfg; got.Replicas != want.Replicas || got.MaxBytes != want.MaxBytes {
+			t.Fatalf("updated to %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("refused update keeps the existing bucket", func(t *testing.T) {
+		tuned := tunedDocStateBucket()
+		m := &fakeKVManager{bucket: tuned, updateErr: errors.New("insufficient resources")}
+		kv, err := openDocStateBucket(context.Background(), m, want, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kv != tuned {
+			t.Fatal("a refused update must leave the existing bucket in use")
+		}
+	})
+
+	for _, raceErr := range []error{
+		fmt.Errorf("%w: %s", jetstream.ErrBucketExists, want.Bucket),
+		jetstream.ErrStreamNameAlreadyInUse,
+	} {
+		t.Run("create race: "+raceErr.Error(), func(t *testing.T) {
+			raced := tunedDocStateBucket()
+			m := &fakeKVManager{createErr: raceErr, raced: raced}
+			kv, err := openDocStateBucket(context.Background(), m, want, false)
+			if err != nil {
+				t.Fatalf("losing the create race must open the other replica's bucket: %v", err)
+			}
+			if kv != raced || m.updates != 0 {
+				t.Fatalf("got %v with %d updates, want the raced bucket untouched", kv, m.updates)
+			}
+		})
+	}
+
+	t.Run("other create failures are returned", func(t *testing.T) {
+		m := &fakeKVManager{createErr: errors.New("jetstream not enabled")}
+		if _, err := openDocStateBucket(context.Background(), m, want, true); err == nil {
+			t.Fatal("want an error")
+		}
+	})
+}
+
+func TestDocStateBucketDrift(t *testing.T) {
+	want := wantedDocStateBucket()
+	if drift := docStateBucketDrift(want, want); len(drift) != 0 {
+		t.Fatalf("identical configs drift: %v", drift)
+	}
+
+	current := want
+	current.Replicas = 1
+	current.TTL = time.Hour
+	current.MaxBytes = -1
+	current.History = 5
+	current.Storage = jetstream.MemoryStorage
+	current.Description = "not managed"
+	if drift := docStateBucketDrift(current, want); len(drift) != 5 {
+		t.Fatalf("got %d differences %v, want one each for replicas, TTL, max bytes, history and storage", len(drift), drift)
+	}
+}
+
+func TestDocStateBucketConfig_Defaults(t *testing.T) {
+	cfg := NewResourceIndexerOptions().docStateBucketConfig()
+	if cfg.MaxBytes != 10737418240 {
+		t.Errorf("max bytes default is %d, want 10 GiB so the bucket is never unbounded", cfg.MaxBytes)
+	}
+	if cfg.Replicas != 1 {
+		t.Errorf("replicas default is %d, want 1 for single-node dev and kind clusters", cfg.Replicas)
+	}
+	if cfg.Bucket != "SEARCH_INDEXER_DOC_STATE" || cfg.TTL != docStateTTLDefault || cfg.History != 1 || cfg.Storage != jetstream.FileStorage {
+		t.Errorf("unexpected bucket defaults %+v", cfg)
 	}
 }

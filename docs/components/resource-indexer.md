@@ -284,10 +284,30 @@ reports it in readiness:
 - The same status call sets `search_indexer_doc_state_bucket_bytes` to the
   bucket's size.
 
+The indexer opens the bucket on start and creates it if it is missing. When the
+bucket already exists, the indexer compares its replicas, TTL, byte limit,
+history and storage with the flags below and logs any difference. With
+`--nats-doc-state-manage-bucket=true`, the default, it then updates the bucket
+to match the flags; if NATS refuses the update, the indexer logs the error and
+keeps using the bucket as it is. With `--nats-doc-state-manage-bucket=false`,
+the indexer never changes an existing bucket, so settings an operator has
+tuned by hand survive restarts.
+
+A KV bucket discards new writes once it reaches its byte limit. Every flush
+then fails and is nacked, and indexing stops until the bucket is grown. Size
+`--nats-doc-state-max-bytes` generously (each record carries a copy of its
+document) and alert on `search_indexer_doc_state_bucket_bytes` well before it
+reaches the limit.
+
+The replica default of 1 suits single-node dev and kind clusters. Production
+and staging should set `--nats-doc-state-replicas=3`.
+
 | Flag | Default | Purpose |
 |------|---------|---------|
 | `--nats-doc-state-bucket` | `SEARCH_INDEXER_DOC_STATE` | Bucket name; every replica must share it |
-| `--nats-doc-state-replicas` | `1` | JetStream replicas for the bucket |
+| `--nats-doc-state-replicas` | `1` | JetStream replicas for the bucket; use `3` in production and staging |
+| `--nats-doc-state-max-bytes` | `10737418240` (10 GiB) | Byte limit of the bucket; must be greater than 0 |
+| `--nats-doc-state-manage-bucket` | `true` | Whether to update an existing bucket to match these flags |
 | `--doc-state-ttl` | `168h` | How long a record outlives its last write; must cover the audit stream's retention |
 | `--nats-doc-state-timeout` | `5s` | Limit on each bucket request and on the readiness check |
 
