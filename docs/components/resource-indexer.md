@@ -268,6 +268,29 @@ newer write it needs to see. Every flush:
    recorded task repairs; a flush that fails between steps is nacked and the
    redelivery runs the protocol from the newest recorded state.
 
+Every flush depends on the bucket, so the indexer bounds each request to it and
+reports it in readiness:
+
+- Each bucket request is given up after `--nats-doc-state-timeout`. A timed-out
+  request fails the flush like any other error, so the batch is nacked and
+  redelivered rather than dropped, and once one claim or record fails the flush
+  starts no further requests. A bucket that stops answering therefore fails a
+  flush in about one timeout instead of holding the flush, and every batch
+  queued behind it, for the whole `--batch-flush-timeout`.
+- `/readyz` asks the bucket for its status on every probe, with the same
+  timeout, and fails with `document state bucket <name> unavailable: <cause>`
+  while it cannot. It recovers by itself once the bucket answers again, whether
+  or not the replica has anything to index.
+- The same status call sets `search_indexer_doc_state_bucket_bytes` to the
+  bucket's size.
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--nats-doc-state-bucket` | `SEARCH_INDEXER_DOC_STATE` | Bucket name; every replica must share it |
+| `--nats-doc-state-replicas` | `1` | JetStream replicas for the bucket |
+| `--doc-state-ttl` | `168h` | How long a record outlives its last write; must cover the audit stream's retention |
+| `--nats-doc-state-timeout` | `5s` | Limit on each bucket request and on the readiness check |
+
 Within one buffer, an operation older than the one already buffered for its
 document is dropped rather than replacing it.
 

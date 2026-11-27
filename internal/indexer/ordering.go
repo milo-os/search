@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/meilisearch/meilisearch-go"
 	searchmetrics "go.miloapis.net/search/internal/metrics"
@@ -114,7 +115,7 @@ func groupClaims(claims []*docClaim) []*flushGroup {
 // which is left to the flush that recorded that state.
 func (b *Batcher) claimBatch(ctx context.Context, ops []pendingOp) ([]*docClaim, error) {
 	claims := make([]*docClaim, len(ops))
-	err := forEachParallel(len(ops), docStateParallelism, func(i int) error {
+	err := forEachParallel(ctx, len(ops), docStateParallelism, func(ctx context.Context, i int) error {
 		c, err := b.claimOne(ctx, ops[i])
 		if err != nil {
 			return err
@@ -205,7 +206,7 @@ func (b *Batcher) recordBatch(ctx context.Context, groups []*flushGroup) ([]*doc
 	}
 
 	repairs := make([]*docClaim, len(jobs))
-	err := forEachParallel(len(jobs), docStateParallelism, func(i int) error {
+	err := forEachParallel(ctx, len(jobs), docStateParallelism, func(ctx context.Context, i int) error {
 		r, err := b.recordOne(ctx, jobs[i].claim, jobs[i].task)
 		if err != nil {
 			return err
@@ -259,9 +260,22 @@ func (b *Batcher) recordOne(ctx context.Context, c *docClaim, task int64) (*docC
 	return nil, fmt.Errorf("document %s: state changed under %d record attempts", key, maxClaimAttempts)
 }
 
+// errJobFailed cancels the jobs forEachParallel still has running once one of
+// them has failed.
+var errJobFailed = errors.New("another job failed")
+
 // forEachParallel runs fn for every index with at most workers in flight and
 // returns every error raised.
-func forEachParallel(n, workers int, fn func(i int) error) error {
+//
+// One failure already fails the flush, so after the first error no further job
+// is started and the ctx handed to those still running is cancelled. Without
+// that, a document state store that has stopped answering would fail every
+// job in turn, each after its own request timeout, and a large batch would
+// hold its flush for dozens of timeouts instead of one. A job cut short this
+// way is not reported, since the failure that stopped it already is; the
+// result is still an error whenever any job failed, so a caller never takes
+// the jobs that did not run for successes.
+func forEachParallel(ctx context.Context, n, workers int, fn func(ctx context.Context, i int) error) error {
 	if n == 0 {
 		return nil
 	}
@@ -269,18 +283,33 @@ func forEachParallel(n, workers int, fn func(i int) error) error {
 		workers = n
 	}
 
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+
 	var wg sync.WaitGroup
 	var errs flushErrors
+	var failed atomic.Bool
 	slots := make(chan struct{}, workers)
 	for i := 0; i < n; i++ {
 		slots <- struct{}{}
+		// A failing job marks the failure before it frees its slot, so the
+		// check sees it before the next job could take that slot.
+		if failed.Load() {
+			break
+		}
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			defer func() { <-slots }()
-			if err := fn(i); err != nil {
-				errs.add(err)
+			err := fn(ctx, i)
+			if err == nil {
+				return
 			}
+			if failed.Swap(true) && errors.Is(context.Cause(ctx), errJobFailed) && errors.Is(err, context.Canceled) {
+				return
+			}
+			errs.add(err)
+			cancel(errJobFailed)
 		}(i)
 	}
 	wg.Wait()

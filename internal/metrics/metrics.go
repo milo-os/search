@@ -152,6 +152,20 @@ var (
 			StabilityLevel: metrics.ALPHA,
 		},
 	)
+
+	// IndexerDocStateBucketBytes tracks the size of the document state bucket.
+	// A KV bucket refuses new writes once it reaches its byte limit, which
+	// fails every flush, so this is the signal to grow the bucket before then.
+	// It is refreshed by the readiness check.
+	IndexerDocStateBucketBytes = metrics.NewGauge(
+		&metrics.GaugeOpts{
+			Namespace:      namespace,
+			Subsystem:      indexerSubsystem,
+			Name:           "doc_state_bucket_bytes",
+			Help:           "Bytes stored in the indexer's document state KV bucket",
+			StabilityLevel: metrics.ALPHA,
+		},
+	)
 )
 
 // init registers all custom metrics with the legacy registry
@@ -169,5 +183,6 @@ func init() {
 		IndexerMessagesNacked,
 		IndexerStaleWritesSuperseded,
 		IndexerOrderRepairs,
+		IndexerDocStateBucketBytes,
 	)
 }

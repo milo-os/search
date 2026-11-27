@@ -77,6 +77,7 @@ type ResourceIndexerOptions struct {
 	// document stay in resourceVersion order whichever replica flushes last.
 	NatsDocStateBucket   string
 	NatsDocStateReplicas int
+	NatsDocStateTimeout  time.Duration
 	DocStateTTL          time.Duration
 
 	// Meilisearch connection and timeout settings
@@ -115,6 +116,7 @@ func NewResourceIndexerOptions() *ResourceIndexerOptions {
 		NatsReindexConsumerName:     "search-reindexer",
 		NatsDocStateBucket:          "SEARCH_INDEXER_DOC_STATE",
 		NatsDocStateReplicas:        1,
+		NatsDocStateTimeout:         5 * time.Second,
 		DocStateTTL:                 docStateTTLDefault,
 		MeilisearchTaskWaitTimeout:  10 * time.Minute,
 		MeilisearchTaskPollInterval: 500 * time.Millisecond,
@@ -146,6 +148,7 @@ func (o *ResourceIndexerOptions) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.NatsReindexConsumerName, "nats-reindex-consumer-name", o.NatsReindexConsumerName, "The name of the re-index JetStream consumer (must match the manifest).")
 	fs.StringVar(&o.NatsDocStateBucket, "nats-doc-state-bucket", o.NatsDocStateBucket, "The JetStream KV bucket that records the newest indexed state of every document. It is created if missing and must be shared by all replicas.")
 	fs.IntVar(&o.NatsDocStateReplicas, "nats-doc-state-replicas", o.NatsDocStateReplicas, "The number of JetStream replicas for the document state bucket.")
+	fs.DurationVar(&o.NatsDocStateTimeout, "nats-doc-state-timeout", o.NatsDocStateTimeout, "How long one request to the document state bucket may take before it fails. A failed request nacks its batch for redelivery, and the readiness check on the bucket uses the same limit.")
 	fs.DurationVar(&o.DocStateTTL, "doc-state-ttl", o.DocStateTTL, "How long a document's recorded state is kept after its last write. Must cover the audit stream's retention so no redelivered event can outlive the record that orders it.")
 	fs.StringVar(&o.NatsTLSCA, "nats-tls-ca", o.NatsTLSCA, "The path to the NATS TLS CA file.")
 	fs.StringVar(&o.NatsTLSCert, "nats-tls-cert", o.NatsTLSCert, "The path to the NATS TLS certificate file.")
@@ -200,6 +203,9 @@ func (o *ResourceIndexerOptions) Validate() error {
 	}
 	if o.NatsDocStateReplicas < 1 {
 		return fmt.Errorf("nats-doc-state-replicas must be at least 1")
+	}
+	if o.NatsDocStateTimeout <= 0 {
+		return fmt.Errorf("nats-doc-state-timeout must be greater than 0")
 	}
 	if o.DocStateTTL < time.Hour {
 		return fmt.Errorf("doc-state-ttl must be at least 1h")
@@ -475,8 +481,9 @@ func Run(o *ResourceIndexerOptions, ctx context.Context) error {
 		MaxInFlightFlushes:   o.BatchMaxInFlightFlushes,
 		AckProgressInterval:  o.BatchAckProgressInterval,
 		FlushTimeout:         o.BatchFlushTimeout,
-		DocState:             indexer.NewNATSDocStateStore(docStateKV),
+		DocState:             indexer.NewNATSDocStateStore(docStateKV, o.NatsDocStateTimeout),
 	}
+	health.checkDocState(docStateBucketCheck(docStateKV, o.NatsDocStateTimeout))
 
 	// Create separate batchers for audit events and re-indexing events
 	// so they don't block each other and can be tuned independently if needed.

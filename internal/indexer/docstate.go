@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -122,17 +123,34 @@ func (s *memoryDocStateStore) Put(_ context.Context, key string, rec docRecord, 
 
 // natsDocStateStore backs DocStateStore with a JetStream KV bucket, which is
 // shared by every indexer replica and linearizable per key.
+//
+// Every request to the bucket gets its own timeout. The client only applies
+// its default timeout to a context without a deadline, and the flush context
+// carries the whole-flush deadline, so without one a single hung request would
+// hold the flush, and the enqueue turn behind it, for the length of the flush
+// timeout.
 type natsDocStateStore struct {
-	kv jetstream.KeyValue
+	kv      jetstream.KeyValue
+	timeout time.Duration
 }
 
-// NewNATSDocStateStore returns a DocStateStore on the given KV bucket.
-func NewNATSDocStateStore(kv jetstream.KeyValue) DocStateStore {
-	return &natsDocStateStore{kv: kv}
+// NewNATSDocStateStore returns a DocStateStore on the given KV bucket. Each
+// request to the bucket is abandoned after timeout; a timed-out request is an
+// ordinary failure, so the flush making it is nacked and redelivered.
+func NewNATSDocStateStore(kv jetstream.KeyValue, timeout time.Duration) DocStateStore {
+	return &natsDocStateStore{kv: kv, timeout: timeout}
+}
+
+// request bounds one call to the bucket by the store's timeout.
+func (s *natsDocStateStore) request(ctx context.Context) (context.Context, context.CancelFunc) {
+	if s.timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, s.timeout)
 }
 
 func (s *natsDocStateStore) Get(ctx context.Context, key string) (docRecord, uint64, bool, error) {
-	entry, err := s.kv.Get(ctx, key)
+	entry, err := s.get(ctx, key)
 	if errors.Is(err, jetstream.ErrKeyNotFound) {
 		return docRecord{}, 0, false, nil
 	}
@@ -146,23 +164,42 @@ func (s *natsDocStateStore) Get(ctx context.Context, key string) (docRecord, uin
 	return rec, entry.Revision(), true, nil
 }
 
+func (s *natsDocStateStore) get(ctx context.Context, key string) (jetstream.KeyValueEntry, error) {
+	ctx, cancel := s.request(ctx)
+	defer cancel()
+	return s.kv.Get(ctx, key)
+}
+
+func (s *natsDocStateStore) write(ctx context.Context, key string, data []byte, revision uint64) (uint64, error) {
+	ctx, cancel := s.request(ctx)
+	defer cancel()
+	if revision == 0 {
+		return s.kv.Create(ctx, key, data)
+	}
+	return s.kv.Update(ctx, key, data, revision)
+}
+
 func (s *natsDocStateStore) Put(ctx context.Context, key string, rec docRecord, revision uint64) (uint64, error) {
 	data, err := json.Marshal(rec)
 	if err != nil {
 		return 0, fmt.Errorf("encode document state %s: %w", key, err)
 	}
 
-	var rev uint64
-	if revision == 0 {
-		rev, err = s.kv.Create(ctx, key, data)
-	} else {
-		rev, err = s.kv.Update(ctx, key, data, revision)
-	}
+	rev, err := s.write(ctx, key, data, revision)
 	if err == nil {
 		return rev, nil
 	}
 	if errors.Is(err, jetstream.ErrKeyExists) {
 		return 0, errDocStateConflict
+	}
+
+	// A write that timed out may or may not have landed, so a changed
+	// revision read back afterwards could be this write's own. It is reported
+	// as the failure it is rather than as a conflict, which would send the
+	// caller around its compare-and-set loop against a bucket that is not
+	// answering.
+	if isTimeout(err) {
+		return 0, fmt.Errorf("put document state %s: %w", key, err)
 	}
 
 	// A document beyond the server's payload limit is still ordered by its
@@ -175,11 +212,21 @@ func (s *natsDocStateStore) Put(ctx context.Context, key string, rec docRecord, 
 	}
 
 	// The client does not type every wrong-revision rejection, so a changed
-	// revision is detected by reading the key back.
-	if entry, getErr := s.kv.Get(ctx, key); getErr == nil && entry.Revision() != revision {
+	// revision is detected by reading the key back. Only a read that succeeds
+	// can show a conflict; when the read fails too, the write's own error is
+	// the one worth reporting.
+	if entry, getErr := s.get(ctx, key); getErr == nil && entry.Revision() != revision {
 		return 0, errDocStateConflict
 	}
 	return 0, fmt.Errorf("put document state %s: %w", key, err)
+}
+
+// isTimeout reports whether err means a request was given up on rather than
+// answered.
+func isTimeout(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, nats.ErrTimeout)
 }
 
 // docStateKey names a document's record in the store.
