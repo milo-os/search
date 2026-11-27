@@ -131,7 +131,7 @@ func (b *Batcher) claimBatch(ctx context.Context, ops []pendingOp) ([]*docClaim,
 // claimOne makes op's state the newest in the store if it is, and returns the
 // state the flush should apply: op's own, or the store's when that is newer.
 func (b *Batcher) claimOne(ctx context.Context, op pendingOp) (*docClaim, error) {
-	key := pendingKey(op.indexUID, op.docID)
+	key := docStateKey(op.indexUID, op.docID)
 	mine := op.record()
 	if op.isUpsert() {
 		raw, err := json.Marshal(op.doc)
@@ -229,7 +229,7 @@ func (b *Batcher) recordBatch(ctx context.Context, groups []*flushGroup) ([]*doc
 // recordOne notes that task carries c's state, and returns the newer state to
 // enqueue again if the store shows task is about to overwrite it.
 func (b *Batcher) recordOne(ctx context.Context, c *docClaim, task int64) (*docClaim, error) {
-	key := pendingKey(c.indexUID, c.docID)
+	key := docStateKey(c.indexUID, c.docID)
 
 	for attempt := 0; attempt < maxClaimAttempts; attempt++ {
 		stored, rev, found, err := b.docState.Get(ctx, key)

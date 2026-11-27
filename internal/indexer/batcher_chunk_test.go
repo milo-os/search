@@ -85,7 +85,7 @@ func TestBatcher_MultiChunkGroup_RecordsTheTaskThatCarriedEachDocument(t *testin
 			assert.Equal(t, "newer", hostnameOf(client.Doc("proxies", "p1")),
 				"the newer state must land after the chunk that carried the older one; log: %v", client.Log())
 
-			rec, _, found, err := store.Get(context.Background(), pendingKey("proxies", "p1"))
+			rec, _, found, err := store.Get(context.Background(), docStateKey("proxies", "p1"))
 			require.NoError(t, err)
 			require.True(t, found)
 			assert.Equal(t, uint64(6), rec.RV)

@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -229,9 +230,41 @@ func isTimeout(err error) bool {
 		errors.Is(err, nats.ErrTimeout)
 }
 
-// docStateKey names a document's record in the store.
+// docStateKey names a document's record in the store. Every replica must
+// derive the same key for a document, and the key must be valid in a
+// JetStream KV bucket, whose keys allow only letters, digits and "-/_=." and
+// treat "." as a subject token separator.
+//
+// Index uids and Kubernetes object uids use only letters, digits, "-" and
+// "_", so for them the key is "<index>/<doc>", the form records were first
+// written in. Any other part is written as "=" followed by its unpadded
+// base64url encoding. A plain part never contains "=", and neither form
+// contains "/", so no two documents share a key and the key never holds an
+// empty token.
 func docStateKey(indexUID, docID string) string {
-	return indexUID + "." + docID
+	return docStateKeyPart(indexUID) + "/" + docStateKeyPart(docID)
+}
+
+func docStateKeyPart(s string) string {
+	if isPlainKeyPart(s) {
+		return s
+	}
+	return "=" + base64.RawURLEncoding.EncodeToString([]byte(s))
+}
+
+func isPlainKeyPart(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // resourceVersionOf reads a document's resourceVersion as an integer, which

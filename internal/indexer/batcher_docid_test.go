@@ -1,12 +1,10 @@
 package indexer
 
 import (
-	"context"
 	"testing"
 
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // TestBatcher_DocumentWithoutStringUID_IsSkippedAndAcked covers a policy
@@ -40,11 +38,9 @@ func TestBatcher_DocumentWithoutStringUID_IsSkippedAndAcked(t *testing.T) {
 	requireAcked(t, m1, m2)
 	assert.Equal(t, []string{"add proxies/p1@5"}, client.Log())
 
-	for _, indexUID := range []string{"proxies", "gateways"} {
-		_, _, found, err := store.Get(context.Background(), pendingKey(indexUID, ""))
-		require.NoError(t, err)
-		assert.False(t, found, "no record may be kept under an empty document id in %s", indexUID)
-	}
+	recs := store.(*memoryDocStateStore).recs
+	assert.Len(t, recs, 1, "only the document with an id may be recorded: %v", recs)
+	assert.Contains(t, recs, docStateKey("proxies", "p1"))
 }
 
 func TestUpsertDocID(t *testing.T) {

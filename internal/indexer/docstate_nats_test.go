@@ -91,7 +91,7 @@ func startTogether(n int, fn func(i int)) {
 func TestNATSDocStateStore_GetPutRoundTrip(t *testing.T) {
 	store, _ := newNATSStore(t)
 	ctx := context.Background()
-	key := pendingKey("proxies", "p1")
+	key := docStateKey("proxies", "p1")
 
 	_, _, found, err := store.Get(ctx, key)
 	require.NoError(t, err)
@@ -113,7 +113,7 @@ func TestNATSDocStateStore_GetPutRoundTrip(t *testing.T) {
 // other is told the record changed under it.
 func TestNATSDocStateStore_CreateRace_OneWins(t *testing.T) {
 	store, _ := newNATSStore(t)
-	key := pendingKey("proxies", "p1")
+	key := docStateKey("proxies", "p1")
 
 	const racers = 16
 	errs := make([]error, racers)
@@ -137,7 +137,7 @@ func TestNATSDocStateStore_CreateRace_OneWins(t *testing.T) {
 func TestNATSDocStateStore_UpdateRace_OneWins(t *testing.T) {
 	store, _ := newNATSStore(t)
 	ctx := context.Background()
-	key := pendingKey("proxies", "p1")
+	key := docStateKey("proxies", "p1")
 	rev, err := store.Put(ctx, key, docRecord{RV: 1, State: docIndexed}, 0)
 	require.NoError(t, err)
 
@@ -163,7 +163,7 @@ func TestNATSDocStateStore_UpdateRace_OneWins(t *testing.T) {
 // the record; a lost update would leave the count short.
 func TestNATSDocStateStore_CompareAndSetLoop_LosesNoUpdate(t *testing.T) {
 	store, _ := newNATSStore(t)
-	key := pendingKey("proxies", "p1")
+	key := docStateKey("proxies", "p1")
 
 	const workers, increments = 8, 20
 	var failures atomic.Int32
@@ -236,7 +236,7 @@ func TestNATSDocStateStore_LandedUpdateReportedAsFailed_IsAConflict(t *testing.T
 	wrapped := &landThenFailKV{KeyValue: kv, fail: func(string, []byte) bool { return true }}
 	store := NewNATSDocStateStore(wrapped, 5*time.Second)
 	ctx := context.Background()
-	key := pendingKey("proxies", "p1")
+	key := docStateKey("proxies", "p1")
 
 	rev, err := store.Put(ctx, key, docRecord{RV: 1, State: docIndexed}, 0)
 	require.NoError(t, err)
@@ -251,35 +251,67 @@ func TestNATSDocStateStore_LandedUpdateReportedAsFailed_IsAConflict(t *testing.T
 
 // TestBatcher_NATS_ConcurrentFlushes_RepairsOverwrite runs the whole protocol,
 // claim, enqueue and record, through a real bucket shared by two batchers.
-// Replica A claims p1@10 and is held before it enqueues; replica B claims,
-// enqueues and records p1@20; A's older write then lands last in Meilisearch,
-// so A must enqueue p1@20 again behind it.
+// Replica A claims doc@10 and is held before it enqueues; replica B claims,
+// enqueues and records doc@20; A's older write then lands last in
+// Meilisearch, so A must enqueue doc@20 again behind it. It runs once with an
+// object uid and once with a document id that is not a valid NATS key.
 func TestBatcher_NATS_ConcurrentFlushes_RepairsOverwrite(t *testing.T) {
-	store, _ := newNATSStore(t)
-	client := newRVSearchClient()
-	replicaA := newOrderingBatcher(client, store)
-	replicaB := newOrderingBatcher(client, store)
+	for _, uid := range []string{"6f1c2a9e-3b7d-4c55-9a0e-2d8b1f4e7c63", "web.default/pod 1..é"} {
+		t.Run(uid, func(t *testing.T) {
+			store, _ := newNATSStore(t)
+			client := newRVSearchClient()
+			replicaA := newOrderingBatcher(client, store)
+			replicaB := newOrderingBatcher(client, store)
 
-	var interleaved atomic.Bool
-	var mB *boundMsg
-	client.onTask = func(_ string, docs []any) {
-		if resourceVersionOf(docs[0]) == 10 && interleaved.CompareAndSwap(false, true) {
-			mB = flushNow(replicaB, 2, upsertOp("proxies", rvDoc("p1", 20, "poet-jump")))
-		}
+			var interleaved atomic.Bool
+			var mB *boundMsg
+			client.onTask = func(_ string, docs []any) {
+				if resourceVersionOf(docs[0]) == 10 && interleaved.CompareAndSwap(false, true) {
+					mB = flushNow(replicaB, 2, upsertOp("proxies", rvDoc(uid, 20, "poet-jump")))
+				}
+			}
+
+			mA := flushNow(replicaA, 1, upsertOp("proxies", rvDoc(uid, 10, "")))
+
+			require.True(t, interleaved.Load())
+			requireAcked(t, mA, mB)
+			assert.Equal(t, []string{
+				"add proxies/" + uid + "@20",
+				"add proxies/" + uid + "@10",
+				"add proxies/" + uid + "@20",
+			}, client.Log())
+			assert.Equal(t, "poet-jump", hostnameOf(client.Doc("proxies", uid)))
+
+			rec, _, found, err := store.Get(context.Background(), docStateKey("proxies", uid))
+			require.NoError(t, err)
+			require.True(t, found)
+			assert.Equal(t, uint64(20), rec.RV)
+			assert.True(t, rec.applied(), "the record must show the newest state as the one landing last: %+v", rec)
+		})
 	}
+}
 
-	mA := flushNow(replicaA, 1, upsertOp("proxies", rvDoc("p1", 10, "")))
+// TestNATSDocStateStore_AnyDocumentID_IsAValidKey writes a record for
+// document ids that are not valid NATS keys as they stand. Each must be
+// accepted by a real bucket and read back from its own key.
+func TestNATSDocStateStore_AnyDocumentID_IsAValidKey(t *testing.T) {
+	store, kv := newNATSStore(t)
+	ctx := context.Background()
 
-	require.True(t, interleaved.Load())
-	requireAcked(t, mA, mB)
-	assert.Equal(t, []string{"add proxies/p1@20", "add proxies/p1@10", "add proxies/p1@20"}, client.Log())
-	assert.Equal(t, "poet-jump", hostnameOf(client.Doc("proxies", "p1")))
+	_, err := kv.Create(ctx, "proxies/a b", []byte("{}"))
+	require.ErrorIs(t, err, jetstream.ErrInvalidKey, "the unencoded form of an odd id is rejected by NATS")
 
-	rec, _, found, err := store.Get(context.Background(), pendingKey("proxies", "p1"))
-	require.NoError(t, err)
-	require.True(t, found)
-	assert.Equal(t, uint64(20), rec.RV)
-	assert.True(t, rec.applied(), "the record must show the newest state as the one landing last: %+v", rec)
+	for i, id := range oddDocIDs {
+		key := docStateKey("proxies", id)
+		_, err := store.Put(ctx, key, docRecord{RV: uint64(i + 1), State: docIndexed}, 0)
+		require.NoError(t, err, "document id %q as key %q", id, key)
+	}
+	for i, id := range oddDocIDs {
+		rec, _, found, err := store.Get(ctx, docStateKey("proxies", id))
+		require.NoError(t, err)
+		require.True(t, found, "document id %q", id)
+		assert.Equal(t, uint64(i+1), rec.RV, "document id %q must read back its own record", id)
+	}
 }
 
 // TestBatcher_NATS_AmbiguousRecordWrite_StillRepairs covers a record write
@@ -317,7 +349,7 @@ func TestBatcher_NATS_AmbiguousRecordWrite_StillRepairs(t *testing.T) {
 		"the flush whose record write landed must still enqueue the newer state behind its own task")
 	assert.Equal(t, "newer", hostnameOf(client.Doc("proxies", "p1")))
 
-	rec, _, _, err := shared.Get(context.Background(), pendingKey("proxies", "p1"))
+	rec, _, _, err := shared.Get(context.Background(), docStateKey("proxies", "p1"))
 	require.NoError(t, err)
 	assert.True(t, rec.applied(), "%+v", rec)
 }
@@ -361,7 +393,7 @@ func TestBatcher_RecordingAnOlderTask_KeepsTheLaterTasksRecord(t *testing.T) {
 			assert.Equal(t, []string{"add proxies/p1@5", "add proxies/p1@6"}, client.Log(),
 				"the flush holding the older task must not enqueue a state the later task already carries")
 
-			rec, _, found, err := store.Get(context.Background(), pendingKey("proxies", "p1"))
+			rec, _, found, err := store.Get(context.Background(), docStateKey("proxies", "p1"))
 			require.NoError(t, err)
 			require.True(t, found)
 			assert.Equal(t, docRecord{RV: 6, State: docIndexed, Task: 2, TaskRV: 6, TaskState: docIndexed},
