@@ -116,8 +116,9 @@ func TestIndexer_Start_ConsumeFlow(t *testing.T) {
 			"apiVersion": "v1",
 			"kind":       "Pod",
 			"metadata": map[string]interface{}{
-				"name": "mypod",
-				"uid":  "pod-uid-1",
+				"name":            "mypod",
+				"uid":             "pod-uid-1",
+				"resourceVersion": "1",
 			},
 		},
 	}
@@ -405,8 +406,9 @@ func TestIndexer_Consume_UpdateWithoutDeletionTimestamp_Upserts(t *testing.T) {
 			"apiVersion": "v1",
 			"kind":       "Pod",
 			"metadata": map[string]interface{}{
-				"name": "mypod",
-				"uid":  "pod-uid-live",
+				"name":            "mypod",
+				"uid":             "pod-uid-live",
+				"resourceVersion": "1",
 			},
 		},
 	}

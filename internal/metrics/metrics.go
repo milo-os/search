@@ -126,6 +126,46 @@ var (
 		},
 		[]string{"type"},
 	)
+
+	// IndexerStaleWritesSuperseded counts operations the document state store
+	// showed to be older than a state already recorded by an earlier flush,
+	// possibly on another replica. The recorded state is applied instead.
+	IndexerStaleWritesSuperseded = metrics.NewCounter(
+		&metrics.CounterOpts{
+			Namespace:      namespace,
+			Subsystem:      indexerSubsystem,
+			Name:           "stale_writes_superseded_total",
+			Help:           "Total number of indexer operations replaced by a newer recorded state for the same document",
+			StabilityLevel: metrics.ALPHA,
+		},
+	)
+
+	// IndexerOrderRepairs counts documents a flush enqueued a second time
+	// because a newer state had been enqueued before the flush's own task and
+	// would otherwise have been overwritten by it.
+	IndexerOrderRepairs = metrics.NewCounter(
+		&metrics.CounterOpts{
+			Namespace:      namespace,
+			Subsystem:      indexerSubsystem,
+			Name:           "order_repairs_total",
+			Help:           "Total number of documents re-enqueued so their newest state lands after an older task",
+			StabilityLevel: metrics.ALPHA,
+		},
+	)
+
+	// IndexerDocStateBucketBytes tracks the size of the document state bucket.
+	// A KV bucket refuses new writes once it reaches its byte limit, which
+	// fails every flush, so this is the signal to grow the bucket before then.
+	// It is refreshed by the readiness check.
+	IndexerDocStateBucketBytes = metrics.NewGauge(
+		&metrics.GaugeOpts{
+			Namespace:      namespace,
+			Subsystem:      indexerSubsystem,
+			Name:           "doc_state_bucket_bytes",
+			Help:           "Bytes stored in the indexer's document state KV bucket",
+			StabilityLevel: metrics.ALPHA,
+		},
+	)
 )
 
 // init registers all custom metrics with the legacy registry
@@ -141,5 +181,8 @@ func init() {
 		IndexerFlushSlotWait,
 		IndexerAckProgress,
 		IndexerMessagesNacked,
+		IndexerStaleWritesSuperseded,
+		IndexerOrderRepairs,
+		IndexerDocStateBucketBytes,
 	)
 }

@@ -52,6 +52,15 @@ patches:
       - op: add
         path: /spec/template/spec/containers/0/imagePullPolicy
         value: Never
+  # The test cluster runs a single-node NATS (config/dependencies/nats), which
+  # cannot place the document state bucket's default of 3 replicas.
+  - target:
+      kind: Deployment
+      name: resource-indexer
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --nats-doc-state-replicas=1
   - target:
       kind: APIService
       name: v1alpha1.search.miloapis.com

@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"sort"
@@ -23,6 +24,10 @@ type probes struct {
 
 	mu      sync.RWMutex
 	sources map[string]progressSource
+	// docState, once set, reports whether the document state bucket is
+	// answering. Every flush claims its operations there first, so while it
+	// is not, every batch is nacked and the replica indexes nothing.
+	docState func(ctx context.Context) error
 }
 
 func newProbes(stallThreshold time.Duration) *probes {
@@ -39,13 +44,33 @@ func (p *probes) watch(name string, source progressSource) {
 	p.sources[name] = source
 }
 
-func (p *probes) readyz(w http.ResponseWriter, _ *http.Request) {
+// checkDocState makes readiness depend on check, which should return an error
+// naming the bucket when the document state store cannot be reached.
+func (p *probes) checkDocState(check func(ctx context.Context) error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.docState = check
+}
+
+func (p *probes) readyz(w http.ResponseWriter, r *http.Request) {
 	var failures []string
 	if !p.cacheSynced.Load() {
 		failures = append(failures, "policy cache has not synced")
 	}
 	if !p.consumersAttached.Load() {
 		failures = append(failures, "JetStream consumers are not attached")
+	}
+
+	// The check is made on every probe rather than inferred from failed
+	// flushes: a replica with nothing to index makes no store calls, so it
+	// would never see the bucket come back.
+	p.mu.RLock()
+	docState := p.docState
+	p.mu.RUnlock()
+	if docState != nil {
+		if err := docState(r.Context()); err != nil {
+			failures = append(failures, err.Error())
+		}
 	}
 	respond(w, failures)
 }

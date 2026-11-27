@@ -245,7 +245,94 @@ the buffer reaches its size or time threshold:
 
 Meilisearch applies an index's tasks in the order they are enqueued, so each
 batch enqueues its tasks only after the batch taken before it has enqueued.
-This ordering holds within one indexer replica only.
+That holds within one replica only; across replicas, which share one JetStream
+queue group, the events for one object are spread out and an older event's
+batch can be enqueued after a newer one's.
+
+A document state bucket (JetStream KV, created by the indexer) is the arbiter
+across replicas. It records, per index and document, the newest state any
+replica has accepted — its `resourceVersion`, whether it is indexed, removed
+from the index or deleted, and a copy of the document — plus the latest
+Meilisearch task known to carry a state for it. Reading the current document
+from Meilisearch cannot play that role: writes are queued tasks that take
+longer to apply than a flush interval under load, so a read misses exactly the
+newer write it needs to see. Every flush:
+
+1. Claims each operation with a compare-and-set. An operation older than the
+   recorded state is replaced by that state, so a late create re-applies the
+   newest update instead of the create response.
+2. Enqueues the claimed states and learns the task uid that carries them.
+3. Records that task. If the bucket already names a newer state, it was
+   enqueued before this task and is about to be overwritten, so the flush
+   enqueues it again behind its own task. Only the flush holding the latest
+   recorded task repairs; a flush that fails between steps is nacked and the
+   redelivery runs the protocol from the newest recorded state.
+
+Every flush depends on the bucket, so the indexer bounds each request to it and
+reports it in readiness:
+
+- Each bucket request is given up after `--nats-doc-state-timeout`. A timed-out
+  request fails the flush like any other error, so the batch is nacked and
+  redelivered rather than dropped, and once one claim or record fails the flush
+  starts no further requests. A bucket that stops answering therefore fails a
+  flush in about one timeout instead of holding the flush, and every batch
+  queued behind it, for the whole `--batch-flush-timeout`.
+- `/readyz` asks the bucket for its status on every probe, with the same
+  timeout, and fails with `document state bucket <name> unavailable: <cause>`
+  while it cannot. It recovers by itself once the bucket answers again, whether
+  or not the replica has anything to index. The readiness probe's
+  `timeoutSeconds` must exceed `--nats-doc-state-timeout`; otherwise the
+  kubelet gives up at the same moment as the check and never sees that
+  message. The base deployment uses 10 seconds against the 5 second default.
+- The same status call sets `search_indexer_doc_state_bucket_bytes` to the
+  bucket's size. Only `/readyz` refreshes the gauge, so it stays unset when
+  `--health-probe-bind-address` is empty. Every replica reports the size of
+  the same shared bucket, so alert on `max()` across replicas, not `sum()`.
+
+The indexer opens the bucket on start and creates it if it is missing. When the
+bucket already exists, the indexer compares its replicas, TTL, byte limit,
+history and storage with the flags below and logs any difference. With
+`--nats-doc-state-manage-bucket=true`, the default, it then updates those five
+settings to match the flags and keeps every other setting of the bucket, such
+as compression, metadata or placement, as it is. If NATS refuses the update,
+the indexer logs the error and keeps using the bucket unchanged. With `--nats-doc-state-manage-bucket=false`,
+the indexer never changes an existing bucket, so settings an operator has
+tuned by hand survive restarts.
+
+A KV bucket discards new writes once it reaches its byte limit. Every flush
+then fails and is nacked, and indexing stops until the bucket is grown. Size
+`--nats-doc-state-max-bytes` generously (each record carries a copy of its
+document) and alert on `search_indexer_doc_state_bucket_bytes` well before it
+reaches the limit.
+
+The bucket defaults to 3 replicas. Every flush claims through it, so a bucket
+on one replica stops indexing on every indexer replica whenever its NATS
+server restarts. A single-node NATS cannot place 3 replicas, so the `dev` and
+`ci` overlays and `task dev:run-indexer`, which run against the single-node
+NATS of the kind test cluster, set `--nats-doc-state-replicas=1`. Staging and
+production deploy the `core-control-plane` overlay and use the default.
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--nats-doc-state-bucket` | `SEARCH_INDEXER_DOC_STATE` | Bucket name; every replica must share it |
+| `--nats-doc-state-replicas` | `3` | JetStream replicas for the bucket; set `1` only against a single-node NATS |
+| `--nats-doc-state-max-bytes` | `10737418240` (10 GiB) | Byte limit of the bucket; must be greater than 0 |
+| `--nats-doc-state-manage-bucket` | `true` | Whether to update an existing bucket's replicas, TTL, byte limit, history and storage to match these flags; nothing else is changed |
+| `--doc-state-ttl` | `168h` | How long a record outlives its last write; must cover the audit stream's retention |
+| `--nats-doc-state-timeout` | `5s` | Limit on each bucket request and on the readiness check; keep it under the readiness probe's `timeoutSeconds` |
+
+Within one buffer, an operation older than the one already buffered for its
+document is dropped rather than replacing it.
+
+A deletion of the object itself (a `delete` verb, or a write with a
+`deletionTimestamp`) is recorded as a tombstone that wins over every later
+flushed write regardless of `resourceVersion`, since an object's uid is never
+reused. Removal because the object stopped matching a policy is an ordinary
+versioned state, so a newer matching write brings the document back.
+
+Dry-run writes are audited like real ones but persist nothing; the indexer
+skips any event whose request URI carries `dryRun`, and any write whose
+response lacks a `resourceVersion`.
 
 Create events that don't match any policy can be acknowledged immediately since
 the resource was never indexed. Update and delete events that don't match should
@@ -254,6 +341,61 @@ was previously indexed, and Meilisearch delete operations are idempotent.
 
 [meilisearch-add-documents]: https://www.meilisearch.com/docs/reference/api/documents#add-or-replace-documents
 [meilisearch-delete-documents]: https://www.meilisearch.com/docs/reference/api/documents#delete-documents-by-batch
+
+### After an etcd restore
+
+Restoring etcd from a backup winds every `resourceVersion` back, but the
+document state bucket still holds the newer versions it recorded before the
+restore. The bucket then works against the restored cluster:
+
+- Every write to an object the bucket already knows carries a lower
+  `resourceVersion` than its record, so it is treated as stale and the
+  recorded pre-restore state is applied instead. The document stays frozen at
+  that state until the record expires.
+- A record only expires `--doc-state-ttl` after its last write, and the record
+  step rewrites it on every flush that touches the document. An object that
+  keeps changing therefore never expires and stays frozen indefinitely.
+- A tombstone wins regardless of `resourceVersion`, so an object deleted
+  before the restore but brought back by it stays out of the index.
+
+To recover, clear the bucket and rebuild the indexes from the restored
+cluster:
+
+1. Let the indexer drain the audit stream's backlog, or purge it. Audit events
+   from before the restore carry the old, higher `resourceVersion`s, and any
+   that flush after the bucket is cleared record them again.
+2. Stop indexing so no flush rewrites a record while it is being cleared:
+   `kubectl -n search-system scale deployment resource-indexer --replicas=0`.
+3. Clear the bucket. Either purge it whole with
+   `nats stream purge KV_SEARCH_INDEXER_DOC_STATE`, or delete it with
+   `nats kv del SEARCH_INDEXER_DOC_STATE` and let the indexer recreate it on
+   start. To clear only some documents, run
+   `nats kv purge SEARCH_INDEXER_DOC_STATE <key>` for each. A key is
+   `<indexName>/<uid>`; a part that contains anything other than letters,
+   digits, `-` and `_` is written as `=` and its unpadded base64url encoding.
+   `nats kv ls SEARCH_INDEXER_DOC_STATE` lists the keys.
+4. Delete every document from each affected index, named in the policy's
+   `status.indexName`:
+   `curl -X DELETE "$MEILISEARCH_URL/indexes/<indexName>/documents" -H "Authorization: Bearer $MEILISEARCH_API_KEY"`.
+   Re-indexing only upserts, or removes from the index, objects that exist in
+   the restored cluster. A document for an object created after the backup
+   was taken has no object left to remove it, so without this step it stays in
+   the index for good. Searches return nothing from the index until step 6
+   finishes.
+5. Scale the indexer back up.
+6. Re-index every affected `ResourceIndexPolicy`. A policy re-indexes when the
+   hash of its spec differs from `status.currentGeneration`, and the spec has
+   no field that exists only to trigger it, so clear that status field:
+   `kubectl patch resourceindexpolicy <name> --subresource=status --type=merge -p '{"status":{"currentGeneration":""}}'`.
+   The controller then publishes a re-index event for every target resource at
+   its restored `resourceVersion`.
+
+The same purge, clear and re-index is needed if Meilisearch's task uids start
+again from a lower number, as with a new Meilisearch instance or one that
+lost its task store. Every task recorded in the bucket is then higher than any
+new task, so the record step takes each new task for an older one and
+returns without checking whether it overwrote a newer state. Repairs stop
+silently, and documents can again regress to older states.
 
 ### Duplicate Handling
 

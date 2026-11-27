@@ -128,6 +128,25 @@ type httpProbe struct {
 		Path string `yaml:"path"`
 		Port string `yaml:"port"`
 	} `yaml:"httpGet"`
+	TimeoutSeconds int `yaml:"timeoutSeconds"`
+}
+
+func readDeploymentManifest(t *testing.T) deploymentManifest {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller could not resolve this test file's path")
+	}
+	manifestPath := filepath.Join(filepath.Dir(thisFile), "..", "..", "..", "config", "base", "resource-indexer", "deployment.yaml")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("reading %s: %v", manifestPath, err)
+	}
+	var m deploymentManifest
+	if err := yaml.Unmarshal(data, &m); err != nil {
+		t.Fatalf("decoding %s: %v", manifestPath, err)
+	}
+	return m
 }
 
 func TestDeploymentProbes_MatchServedEndpoints(t *testing.T) {

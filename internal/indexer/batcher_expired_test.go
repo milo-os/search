@@ -32,9 +32,9 @@ func TestBatcher_ExpiredDeadlineWithoutSlot_NacksAndNeverAcks(t *testing.T) {
 	msg := &boundMsg{seq: 1}
 	var jm jetstream.Msg = msg
 	batcher.performFlush(batch{
-		upserts: []upsertItem{{indexUID: "index-1", doc: map[string]any{"uid": "a"}}},
-		msgs:    []jetstream.Msg{jm},
-		turn:    enqueueTurn{prev: batcher.lastEnqueue, done: make(chan struct{})},
+		ops:  []pendingOp{{indexUID: "index-1", docID: "a", state: docIndexed, doc: map[string]any{"uid": "a"}}},
+		msgs: []jetstream.Msg{jm},
+		turn: enqueueTurn{prev: batcher.lastEnqueue, done: make(chan struct{})},
 	})
 
 	require.Zero(t, atomic.LoadInt32(&msg.acked), "a batch that was never enqueued must not be acked")

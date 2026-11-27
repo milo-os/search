@@ -81,7 +81,7 @@ func consumeForPending(t *testing.T, event map[string]any) (deleteKeys []string,
 	batcher.mu.Lock()
 	defer batcher.mu.Unlock()
 	for key, op := range batcher.pending {
-		require.True(t, op.isDelete, "no event here should queue an upsert, got one for %s", key)
+		require.False(t, op.isUpsert(), "no event here should queue an upsert, got one for %s", key)
 		deleteKeys = append(deleteKeys, key)
 	}
 	sort.Strings(deleteKeys)
@@ -95,7 +95,7 @@ func consumeForPending(t *testing.T, event map[string]any) (deleteKeys []string,
 }
 
 func updateEvent(apiVersion, kind, uid string, extraMeta map[string]any) map[string]any {
-	meta := map[string]any{"name": "obj", "uid": uid}
+	meta := map[string]any{"name": "obj", "uid": uid, "resourceVersion": "1"}
 	for k, v := range extraMeta {
 		meta[k] = v
 	}
